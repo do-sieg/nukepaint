@@ -2,6 +2,8 @@
 
 use eframe::egui::{self, Color32, ColorImage, Painter, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 
+use crate::tiled_texture::TiledTexture;
+
 /// Side, in pixels, of each checkerboard square behind the image.
 const CHECKER_CELL: f32 = 8.0;
 const CHECKER_LIGHT: Color32 = Color32::from_gray(204);
@@ -25,22 +27,18 @@ pub fn paint_checker(painter: &Painter, rect: Rect, cell: f32, checker: &Texture
     painter.image(checker.id(), rect, uv, Color32::WHITE);
 }
 
-pub fn show(ui: &mut egui::Ui, texture: &TextureHandle, checker: &TextureHandle) {
+pub fn show(ui: &mut egui::Ui, texture: &TiledTexture, checker: &TextureHandle) {
     let pixels_per_point = ui.ctx().pixels_per_point();
     // One image pixel to one screen pixel.
-    let size = texture.size_vec2() / pixels_per_point;
+    let size = texture.size() / pixels_per_point;
     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
         let (room, _) = ui.allocate_exact_size(size.max(ui.available_size()), Sense::hover());
         let corner = ((room.center() - size / 2.0) * pixels_per_point).round() / pixels_per_point;
         let rect = Rect::from_min_size(corner, size);
         let painter = ui.painter();
         paint_checker(painter, rect, CHECKER_CELL / pixels_per_point, checker);
-        painter.image(texture.id(), rect, full_uv(), Color32::WHITE);
+        texture.paint(painter, rect);
     });
-}
-
-pub fn full_uv() -> Rect {
-    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
 }
 
 /// The largest rectangle of the image's proportions that fits in `room`, centered.

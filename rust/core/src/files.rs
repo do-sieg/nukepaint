@@ -36,10 +36,12 @@ pub fn load_image(path: &Path) -> Result<RgbaImage, OpenError> {
     if is_svg {
         return load_svg(path);
     }
-    let reader = image::ImageReader::open(path)
+    let mut reader = image::ImageReader::open(path)
         .map_err(OpenError::Io)?
         .with_guessed_format()
         .map_err(OpenError::Io)?;
+    // The default limits refuse images over 512 MB, which large photos and scans reach.
+    reader.no_limits();
     Ok(reader.decode().map_err(OpenError::Image)?.into_rgba8())
 }
 

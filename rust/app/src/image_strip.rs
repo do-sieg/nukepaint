@@ -7,7 +7,7 @@ use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, Response, Sense, Sh
 use crate::{OpenImage, canvas};
 
 /// Side, in points, of the square each image is fitted into.
-const THUMBNAIL_SIZE: f32 = 48.0;
+pub const THUMBNAIL_SIZE: f32 = 48.0;
 /// Room around that square, in points.
 const THUMBNAIL_MARGIN: f32 = 4.0;
 const CHECKER_CELL: f32 = 4.0;
@@ -111,9 +111,10 @@ fn thumbnail(ui: &mut egui::Ui, image: &OpenImage, selected: bool, checker: &Tex
         painter.rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
     }
 
-    let picture = canvas::fit(image.texture.size_vec2(), rect.shrink(THUMBNAIL_MARGIN));
+    // Fitted to the image's own proportions, which the shrunk copy only rounds.
+    let picture = canvas::fit(image.texture.size(), rect.shrink(THUMBNAIL_MARGIN));
     canvas::paint_checker(painter, picture, CHECKER_CELL, checker);
-    painter.image(image.texture.id(), picture, canvas::full_uv(), Color32::WHITE);
+    painter.image(image.thumbnail.id(), picture, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
     painter.rect_stroke(picture, 0.0, Stroke::new(1.0, Color32::from_black_alpha(128)), StrokeKind::Outside);
 
     // Only the current image, and the one under the pointer, show their close button.

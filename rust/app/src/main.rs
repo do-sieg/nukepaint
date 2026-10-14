@@ -1,10 +1,12 @@
 mod canvas;
 mod image_strip;
+mod tiled_texture;
 
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
-use power_paint_core::{Document, OPEN_EXTENSIONS};
+use power_paint_core::{Document, OPEN_EXTENSIONS, thumbnail};
+use tiled_texture::TiledTexture;
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
@@ -21,10 +23,12 @@ fn main() -> eframe::Result {
     eframe::run_native("Power Paint", options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
 }
 
-/// A document with the texture that shows it.
+/// A document with the textures that show it.
 pub struct OpenImage {
     pub document: Document,
-    pub texture: TextureHandle,
+    pub texture: TiledTexture,
+    /// The image shrunk for the image strip, as textures are not mipmapped.
+    pub thumbnail: TextureHandle,
 }
 
 struct App {
@@ -32,8 +36,7 @@ struct App {
     current: Option<usize>,
     /// Set when the current image changes, so the strip brings it into view.
     scroll_to_current: bool,
-    /// Files given on the command line, opened on the first frame, once the
-    /// largest texture size is known.
+    /// Files given on the command line, opened on the first frame.
     pending_paths: Vec<PathBuf>,
     /// Files that could not be opened, with why, until the user closes the message.
     open_errors: Vec<String>,
@@ -67,7 +70,6 @@ impl App {
     /// Opens each file as an image of its own, the last one becoming the current
     /// image. A file already open is made current instead.
     fn open_paths(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
-        let max_side = ctx.input(|input| input.max_texture_side);
         for path in paths {
             if let Some(index) = self.find_image(&path) {
                 self.select(index);
@@ -80,28 +82,16 @@ impl App {
                     continue;
                 }
             };
-            let (width, height) = document.size();
-            // Large images need tiled textures, which come with the canvas.
-            if width.max(height) as usize > max_side {
-                self.open_errors.push(format!(
-                    "{}: {width} × {height} is larger than the {max_side} pixels that can be shown for now",
-                    path.display()
-                ));
-                continue;
-            }
-
             let flat = document.flattened();
-            let size = [width as usize, height as usize];
             let options = TextureOptions {
                 magnification: egui::TextureFilter::Nearest,
                 minification: egui::TextureFilter::Linear,
-                wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                // Smooth thumbnails.
-                mipmap_mode: Some(egui::TextureFilter::Linear),
+                ..Default::default()
             };
-            let texture = ctx.load_texture(document.name(), ColorImage::from_rgba_unmultiplied(size, &flat), options);
+            let texture = TiledTexture::new(ctx, &document.name(), &flat, options);
+            let thumbnail = make_thumbnail(ctx, &document.name(), &flat);
             self.last_dir = path.parent().map(Path::to_path_buf);
-            self.images.push(OpenImage { document, texture });
+            self.images.push(OpenImage { document, texture, thumbnail });
             self.select(self.images.len() - 1);
         }
     }
@@ -176,6 +166,15 @@ impl App {
             self.open_errors.clear();
         }
     }
+}
+
+/// The texture the image strip shows, sharp at the screen's scale.
+fn make_thumbnail(ctx: &egui::Context, name: &str, image: &power_paint_core::RgbaImage) -> TextureHandle {
+    let max_side = (image_strip::THUMBNAIL_SIZE * ctx.pixels_per_point()).ceil() as u32;
+    let small = thumbnail(image, max_side);
+    let size = [small.width() as usize, small.height() as usize];
+    let pixels = ColorImage::from_rgba_unmultiplied(size, small.as_raw());
+    ctx.load_texture(format!("{name} thumbnail"), pixels, TextureOptions::LINEAR)
 }
 
 impl eframe::App for App {
