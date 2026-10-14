@@ -2,6 +2,7 @@ mod canvas;
 mod image_strip;
 mod settings;
 mod tiled_texture;
+mod view;
 
 use std::path::{Path, PathBuf};
 
@@ -9,10 +10,17 @@ use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, TextureHa
 use power_paint_core::{Document, OPEN_EXTENSIONS, thumbnail};
 use settings::Settings;
 use tiled_texture::TiledTexture;
+use view::{View, ZOOM_LEVELS, format_zoom};
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+const ZOOM_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
+/// Plus is a shifted key on most keyboards, so the key it shares counts as well.
+const ZOOM_IN_EQUALS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
+const ZOOM_OUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
+const ZOOM_TO_WINDOW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
+const ACTUAL_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0);
 
 /// Widest the list of recent files gets, in points.
 const WELCOME_WIDTH: f32 = 600.0;
@@ -34,6 +42,16 @@ pub struct OpenImage {
     pub texture: TiledTexture,
     /// The image shrunk for the image strip, as textures are not mipmapped.
     pub thumbnail: TextureHandle,
+    pub view: View,
+}
+
+/// What the View menu and its shortcuts do.
+#[derive(Clone, Copy)]
+enum ViewCommand {
+    ZoomIn,
+    ZoomOut,
+    ZoomToWindow,
+    ActualSize,
 }
 
 struct App {
@@ -47,10 +65,14 @@ struct App {
     open_errors: Vec<String>,
     settings: Settings,
     checker: TextureHandle,
+    /// The pixel under the pointer, while it is over the image's view.
+    pointer_pixel: Option<(i64, i64)>,
 }
 
 impl App {
     fn new(ctx: &egui::Context) -> Self {
+        // Ctrl with plus, minus and 0 zoom the image, not the whole interface.
+        ctx.options_mut(|options| options.zoom_with_keyboard = false);
         Self {
             images: Vec::new(),
             current: None,
@@ -59,6 +81,7 @@ impl App {
             open_errors: Vec::new(),
             settings: Settings::load(),
             checker: canvas::checker_texture(ctx),
+            pointer_pixel: None,
         }
     }
 
@@ -91,18 +114,14 @@ impl App {
                 }
             };
             let flat = document.flattened();
-            let options = TextureOptions {
-                magnification: egui::TextureFilter::Nearest,
-                minification: egui::TextureFilter::Linear,
-                ..Default::default()
-            };
-            let texture = TiledTexture::new(ctx, &document.name(), &flat, options);
+            let texture = TiledTexture::new(ctx, &document.name(), &flat);
+            let view = View::new(texture.size());
             let thumbnail = make_thumbnail(ctx, &document.name(), &flat);
             if let Some(dir) = path.parent() {
                 self.settings.set_last_dir(dir);
             }
             self.settings.add_recent_file(&path);
-            self.images.push(OpenImage { document, texture, thumbnail });
+            self.images.push(OpenImage { document, texture, thumbnail, view });
             self.select(self.images.len() - 1);
         }
     }
@@ -165,7 +184,101 @@ impl App {
         });
     }
 
+    fn current_view(&mut self) -> Option<&mut View> {
+        self.current.map(|current| &mut self.images[current].view)
+    }
+
+    fn can_run(&self, command: ViewCommand) -> bool {
+        let Some(current) = self.current else {
+            return false;
+        };
+        let view = &self.images[current].view;
+        match command {
+            ViewCommand::ZoomIn => view.can_zoom_in(),
+            ViewCommand::ZoomOut => view.can_zoom_out(),
+            ViewCommand::ZoomToWindow | ViewCommand::ActualSize => true,
+        }
+    }
+
+    fn run(&mut self, command: ViewCommand) {
+        let Some(view) = self.current_view() else {
+            return;
+        };
+        match command {
+            ViewCommand::ZoomIn => view.zoom_in(),
+            ViewCommand::ZoomOut => view.zoom_out(),
+            ViewCommand::ZoomToWindow => view.zoom_to_window(),
+            ViewCommand::ActualSize => view.zoom_to(1.0),
+        }
+    }
+
+    fn view_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.menu_button("View", |ui| {
+            let items = [
+                ("Zoom In", ZOOM_IN, ViewCommand::ZoomIn),
+                ("Zoom Out", ZOOM_OUT, ViewCommand::ZoomOut),
+                ("Zoom to Window", ZOOM_TO_WINDOW, ViewCommand::ZoomToWindow),
+                ("Actual Size", ACTUAL_SIZE, ViewCommand::ActualSize),
+            ];
+            for (label, shortcut, command) in items {
+                let button = egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
+                if ui.add_enabled(self.can_run(command), button).clicked() {
+                    self.run(command);
+                }
+            }
+        });
+    }
+
+    /// The image's size, the pixel under the pointer, and a picker for the zoom.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(current) = self.current else {
+            return;
+        };
+        let pointer_pixel = self.pointer_pixel;
+        let image = &mut self.images[current];
+        let (width, height) = image.document.size();
+        let view = &mut image.view;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            egui::ComboBox::from_id_salt("zoom")
+                .selected_text(format_zoom(view.zoom))
+                .show_ui(ui, |ui| {
+                    // Largest first, then a last row that fits the image in the window.
+                    for &level in ZOOM_LEVELS.iter().rev() {
+                        let selected = (view.zoom - level).abs() < 0.0001;
+                        if ui.selectable_label(selected, format_zoom(level)).clicked() {
+                            view.zoom_to(level);
+                        }
+                    }
+                    ui.separator();
+                    if ui.selectable_label(false, "Window").clicked() {
+                        view.zoom_to_window();
+                    }
+                })
+                .response
+                .on_hover_text("Zoom");
+            ui.separator();
+            ui.label(format!("{width} × {height}"));
+            if let Some((x, y)) = pointer_pixel {
+                ui.separator();
+                ui.label(format!("{x}, {y}"));
+            }
+        });
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let view_shortcuts = [
+            (ZOOM_IN, ViewCommand::ZoomIn),
+            (ZOOM_IN_EQUALS, ViewCommand::ZoomIn),
+            (ZOOM_OUT, ViewCommand::ZoomOut),
+            (ZOOM_TO_WINDOW, ViewCommand::ZoomToWindow),
+            (ACTUAL_SIZE, ViewCommand::ActualSize),
+        ];
+        for (shortcut, command) in view_shortcuts {
+            if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+                self.run(command);
+            }
+        }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN)) {
             self.show_open_dialog(ctx);
         }
@@ -255,6 +368,7 @@ impl eframe::App for App {
             // The strip goes in the menu bar, which takes the whole row.
             egui::MenuBar::new().ui(ui, |ui| {
                 self.file_menu(ui);
+                self.view_menu(ui);
                 let action = image_strip::show(ui, &self.images, self.current, scroll_to_current, &self.checker);
                 match action {
                     Some(image_strip::Action::Select(index)) => self.select(index),
@@ -264,9 +378,19 @@ impl eframe::App for App {
             });
         });
 
-        egui::CentralPanel::default().show(ui, |ui| match self.current {
-            Some(current) => canvas::show(ui, &self.images[current].texture, &self.checker),
-            None => self.welcome(ui),
+        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+
+        // The image goes right up to the panels around it.
+        let frame = egui::Frame::central_panel(ui.style()).inner_margin(0.0);
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| match self.current {
+            Some(current) => {
+                let image = &mut self.images[current];
+                self.pointer_pixel = canvas::show(ui, &mut image.view, &image.texture, &self.checker);
+            }
+            None => {
+                self.pointer_pixel = None;
+                self.welcome(ui);
+            }
         });
 
         self.show_open_errors(&ctx);

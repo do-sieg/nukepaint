@@ -9,4 +9,4 @@ pub use document::Document;
 pub use files::{OPEN_EXTENSIONS, OpenError, load_image};
 pub use image::RgbaImage;
 pub use layer::Layer;
-pub use scale::thumbnail;
+pub use scale::{halve, thumbnail};

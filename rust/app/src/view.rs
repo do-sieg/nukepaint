@@ -1,0 +1,214 @@
+//! How an image is shown: how far it is zoomed in and where it is scrolled to.
+
+use eframe::egui::{Pos2, Rect, Vec2};
+
+/// The steps Zoom In and Zoom Out go through.
+pub const ZOOM_LEVELS: [f32; 26] = [
+    0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.12, 0.16, 0.25, 0.33, 0.5, 0.66, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0,
+    7.0, 8.0, 12.0, 16.0, 24.0, 32.0,
+];
+
+pub struct View {
+    /// Screen pixels per image pixel: 1.0 shows the image at its actual size.
+    pub zoom: f32,
+    /// How far the view is scrolled, in points.
+    pub offset: Vec2,
+    /// Where the view was on screen when last shown, and the screen's scale then.
+    viewport: Rect,
+    pixels_per_point: f32,
+    /// Size of the image, in pixels.
+    image_size: Vec2,
+    /// Set until the view is first shown, to fit a large image in it.
+    first_show: bool,
+}
+
+impl View {
+    pub fn new(image_size: Vec2) -> Self {
+        Self {
+            zoom: 1.0,
+            offset: Vec2::ZERO,
+            viewport: Rect::NOTHING,
+            pixels_per_point: 1.0,
+            image_size,
+            first_show: true,
+        }
+    }
+
+    /// Takes note of where the view is on screen, before it is drawn. An image too
+    /// large for the view the first time is zoomed out to fit in it.
+    pub fn place(&mut self, viewport: Rect, pixels_per_point: f32) {
+        self.viewport = viewport;
+        self.pixels_per_point = pixels_per_point;
+        if std::mem::take(&mut self.first_show) {
+            let fits = self.image_size.x <= viewport.width() * pixels_per_point
+                && self.image_size.y <= viewport.height() * pixels_per_point;
+            if !fits {
+                self.zoom_to_window();
+            }
+        }
+    }
+
+    /// Size of the image on screen, in points.
+    pub fn image_size_on_screen(&self) -> Vec2 {
+        self.image_size * self.zoom / self.pixels_per_point
+    }
+
+    /// Where the image is on screen: at the top left of what is scrolled to, or
+    /// in the middle of the view along a side where it is smaller than the view.
+    pub fn image_rect(&self) -> Rect {
+        let size = self.image_size_on_screen();
+        let gap = ((self.viewport.size() - size) / 2.0).max(Vec2::ZERO);
+        let corner = self.viewport.min - self.offset + gap;
+        // On whole screen pixels, for enlarged pixels to keep their edges.
+        let corner = (corner.to_vec2() * self.pixels_per_point).round() / self.pixels_per_point;
+        Rect::from_min_size(corner.to_pos2(), size)
+    }
+
+    /// The image pixel at a point of the screen, which can be outside the image.
+    pub fn pixel_at(&self, point: Pos2) -> (i64, i64) {
+        let pixel = (point - self.image_rect().min) * self.pixels_per_point / self.zoom;
+        (pixel.x.floor() as i64, pixel.y.floor() as i64)
+    }
+
+    pub fn can_zoom_in(&self) -> bool {
+        self.zoom < ZOOM_LEVELS[ZOOM_LEVELS.len() - 1]
+    }
+
+    pub fn can_zoom_out(&self) -> bool {
+        self.zoom > ZOOM_LEVELS[0]
+    }
+
+    pub fn zoom_in(&mut self) {
+        self.step_zoom(1, self.viewport.center());
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.step_zoom(-1, self.viewport.center());
+    }
+
+    /// Zooms about the middle of the view.
+    pub fn zoom_to(&mut self, zoom: f32) {
+        self.set_zoom(zoom, self.viewport.center());
+    }
+
+    /// Shows the whole image, as large as the view allows.
+    pub fn zoom_to_window(&mut self) {
+        let fit = self.viewport.size() * self.pixels_per_point / self.image_size;
+        self.set_zoom(fit.x.min(fit.y), self.viewport.center());
+    }
+
+    /// Moves to the next zoom level up or down. What is under `anchor`, a point of
+    /// the screen, stays there.
+    pub fn step_zoom(&mut self, direction: i32, anchor: Pos2) {
+        // The zoom may sit between two levels, or a rounding error away from one.
+        let next = |level: &&f32| (**level - self.zoom) * direction as f32 > 0.001 * self.zoom;
+        let level = if direction > 0 {
+            ZOOM_LEVELS.iter().find(next)
+        } else {
+            ZOOM_LEVELS.iter().rev().find(next)
+        };
+        if let Some(&level) = level {
+            self.set_zoom(level, anchor);
+        }
+    }
+
+    /// Zooms so that what is under `anchor`, a point of the screen, stays there, as
+    /// far as scrolling allows.
+    pub fn set_zoom(&mut self, zoom: f32, anchor: Pos2) {
+        let zoom = zoom.clamp(ZOOM_LEVELS[0], ZOOM_LEVELS[ZOOM_LEVELS.len() - 1]);
+        let anchored = (anchor - self.image_rect().min) / self.image_size_on_screen();
+        self.zoom = zoom;
+        let size = self.image_size_on_screen();
+        let gap = ((self.viewport.size() - size) / 2.0).max(Vec2::ZERO);
+        let offset = self.viewport.min.to_vec2() + gap + anchored * size - anchor.to_vec2();
+        self.offset = offset.clamp(Vec2::ZERO, (size - self.viewport.size()).max(Vec2::ZERO));
+    }
+
+    /// Scrolls by this much, in points, as far as the image goes.
+    pub fn pan(&mut self, delta: Vec2) {
+        let max = (self.image_size_on_screen() - self.viewport.size()).max(Vec2::ZERO);
+        self.offset = (self.offset - delta).clamp(Vec2::ZERO, max);
+    }
+}
+
+/// The zoom as a percentage.
+pub fn format_zoom(zoom: f32) -> String {
+    format!("{}%", (zoom * 100.0).round())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn placed(image: Vec2, viewport: Vec2) -> View {
+        let mut view = View::new(image);
+        view.place(Rect::from_min_size(Pos2::new(10.0, 20.0), viewport), 1.0);
+        view
+    }
+
+    #[test]
+    fn small_image_opens_at_actual_size_centered() {
+        let view = placed(Vec2::new(100.0, 50.0), Vec2::new(400.0, 300.0));
+        assert_eq!(view.zoom, 1.0);
+        assert_eq!(view.image_rect(), Rect::from_min_size(Pos2::new(160.0, 145.0), Vec2::new(100.0, 50.0)));
+    }
+
+    #[test]
+    fn large_image_opens_fitted() {
+        let view = placed(Vec2::new(12000.0, 9000.0), Vec2::new(1200.0, 600.0));
+        assert!((view.zoom - 600.0 / 9000.0).abs() < 1e-6);
+        assert!(view.image_rect().height() <= 600.0 + 0.01);
+    }
+
+    #[test]
+    fn steps_through_levels() {
+        let mut view = placed(Vec2::new(100.0, 100.0), Vec2::new(400.0, 400.0));
+        view.zoom_in();
+        assert_eq!(view.zoom, 1.5);
+        view.zoom_out();
+        view.zoom_out();
+        assert_eq!(view.zoom, 0.66);
+        // From between two levels, to the nearest one each way.
+        view.zoom = 0.7;
+        view.zoom_in();
+        assert_eq!(view.zoom, 1.0);
+        view.zoom = 0.7;
+        view.zoom_out();
+        assert_eq!(view.zoom, 0.66);
+    }
+
+    #[test]
+    fn stops_at_the_ends() {
+        let mut view = placed(Vec2::new(100.0, 100.0), Vec2::new(400.0, 400.0));
+        view.zoom_to(32.0);
+        assert!(!view.can_zoom_in());
+        view.zoom_in();
+        assert_eq!(view.zoom, 32.0);
+        view.zoom_to(0.001);
+        assert_eq!(view.zoom, 0.01);
+        assert!(!view.can_zoom_out());
+    }
+
+    #[test]
+    fn zoom_keeps_the_anchored_pixel_under_it() {
+        let mut view = placed(Vec2::new(1000.0, 1000.0), Vec2::new(400.0, 400.0));
+        view.zoom_to(1.0);
+        let anchor = Pos2::new(110.0, 70.0);
+        let before = view.pixel_at(anchor);
+        view.step_zoom(1, anchor);
+        view.step_zoom(1, anchor);
+        assert_eq!(view.zoom, 2.0);
+        assert_eq!(view.pixel_at(anchor), before);
+    }
+
+    #[test]
+    fn pan_stays_within_the_image() {
+        let mut view = placed(Vec2::new(1000.0, 1000.0), Vec2::new(400.0, 400.0));
+        view.zoom_to(1.0);
+        // Actual Size zooms about the middle: the view is scrolled to (300, 300).
+        view.pan(Vec2::new(-5000.0, 100.0));
+        assert_eq!(view.offset, Vec2::new(600.0, 200.0));
+        view.pan(Vec2::new(0.0, 1000.0));
+        assert_eq!(view.offset, Vec2::new(600.0, 0.0));
+    }
+}

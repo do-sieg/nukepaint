@@ -12,3 +12,10 @@ pub fn thumbnail(image: &RgbaImage, max_side: u32) -> RgbaImage {
     let new_height = ((height as f64 * scale).round() as u32).max(1);
     imageops::thumbnail(image, new_width, new_height)
 }
+
+/// A copy of the image at half its width and height, rounded up, each pixel
+/// averaging the four it covers.
+pub fn halve(image: &RgbaImage) -> RgbaImage {
+    let (width, height) = image.dimensions();
+    imageops::thumbnail(image, width.div_ceil(2), height.div_ceil(2))
+}
