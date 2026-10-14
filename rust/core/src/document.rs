@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use image::RgbaImage;
 
-use crate::{Layer, OpenError, load_image};
+use crate::{Layer, OpenError, Selection, load_image};
 
 /// An image being edited: its layers, bottom first, and the file it came from.
 pub struct Document {
@@ -10,6 +10,7 @@ pub struct Document {
     pub path: Option<PathBuf>,
     pub layers: Vec<Layer>,
     pub active_layer: usize,
+    pub selection: Selection,
 }
 
 impl Document {
@@ -20,6 +21,7 @@ impl Document {
             path: Some(path.to_path_buf()),
             layers: vec![Layer::new("Background", pixels)],
             active_layer: 0,
+            selection: Selection::default(),
         })
     }
 

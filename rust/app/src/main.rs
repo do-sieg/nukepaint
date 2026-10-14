@@ -1,5 +1,6 @@
 mod canvas;
 mod image_strip;
+mod frame_select;
 mod settings;
 mod tiled_texture;
 mod view;
@@ -7,7 +8,8 @@ mod view;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
-use power_paint_core::{Document, OPEN_EXTENSIONS, thumbnail};
+use power_paint_core::{Document, OPEN_EXTENSIONS, SelectionMode, thumbnail};
+use frame_select::{FrameSelect, Shape};
 use settings::Settings;
 use tiled_texture::TiledTexture;
 use view::{View, ZOOM_LEVELS, format_zoom};
@@ -21,6 +23,8 @@ const ZOOM_IN_EQUALS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAN
 const ZOOM_OUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
 const ZOOM_TO_WINDOW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 const ACTUAL_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0);
+/// Goes from one selection tool to the next.
+const SELECT_TOOL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::S);
 
 /// Widest the list of recent files gets, in points.
 const WELCOME_WIDTH: f32 = 600.0;
@@ -67,6 +71,11 @@ struct App {
     checker: TextureHandle,
     /// The pixel under the pointer, while it is over the image's view.
     pointer_pixel: Option<(i64, i64)>,
+    frame_select: FrameSelect,
+    /// What the selection tool selects: which tool it is.
+    select_shape: Shape,
+    /// What selecting does to the selection there already is, unless Ctrl is held.
+    selection_mode: SelectionMode,
 }
 
 impl App {
@@ -82,6 +91,9 @@ impl App {
             settings: Settings::load(),
             checker: canvas::checker_texture(ctx),
             pointer_pixel: None,
+            frame_select: FrameSelect::default(),
+            select_shape: Shape::default(),
+            selection_mode: SelectionMode::default(),
         }
     }
 
@@ -230,6 +242,36 @@ impl App {
         });
     }
 
+    /// The settings of the tool, under the menu bar.
+    fn tool_options(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for shape in Shape::ALL {
+                ui.selectable_value(&mut self.select_shape, shape, shape.tool_name())
+                    .on_hover_text(format!("{} ({})", shape.tool_name(), ui.ctx().format_shortcut(&SELECT_TOOL)));
+            }
+            ui.separator();
+            ui.label("Mode:");
+            let name = |mode| match mode {
+                SelectionMode::Replace => "Replace",
+                SelectionMode::Add => "Add",
+                SelectionMode::Subtract => "Subtract",
+                SelectionMode::Intersect => "Intersect",
+                SelectionMode::Invert => "Invert",
+            };
+            egui::ComboBox::from_id_salt("selection_mode")
+                .selected_text(name(self.selection_mode))
+                .show_ui(ui, |ui| {
+                    for mode in SelectionMode::ALL {
+                        ui.selectable_value(&mut self.selection_mode, mode, name(mode));
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "What selecting does to what is already selected.\nWhatever this says, holding Ctrl adds to it.",
+                );
+        });
+    }
+
     /// The image's size, the pixel under the pointer, and a picker for the zoom.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let Some(current) = self.current else {
@@ -278,6 +320,11 @@ impl App {
             if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
                 self.run(command);
             }
+        }
+        // Not while a drag would carry on with another tool than it began with.
+        let busy = ctx.memory(|memory| memory.focused().is_some()) || self.frame_select.is_dragging();
+        if !busy && ctx.input_mut(|input| input.consume_shortcut(&SELECT_TOOL)) {
+            self.select_shape = self.select_shape.next();
         }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN)) {
             self.show_open_dialog(ctx);
@@ -378,6 +425,7 @@ impl eframe::App for App {
             });
         });
 
+        egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
 
         // The image goes right up to the panels around it.
@@ -385,7 +433,8 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(frame).show(ui, |ui| match self.current {
             Some(current) => {
                 let image = &mut self.images[current];
-                self.pointer_pixel = canvas::show(ui, &mut image.view, &image.texture, &self.checker);
+                let (tool, shape, mode) = (&mut self.frame_select, self.select_shape, self.selection_mode);
+                self.pointer_pixel = canvas::show(ui, image, tool, shape, mode, &self.checker);
             }
             None => {
                 self.pointer_pixel = None;

@@ -70,6 +70,18 @@ impl View {
         (pixel.x.floor() as i64, pixel.y.floor() as i64)
     }
 
+    /// The corner between pixels nearest to a point of the screen, within the image.
+    pub fn corner_at(&self, point: Pos2) -> (i32, i32) {
+        let corner = ((point - self.image_rect().min) * self.pixels_per_point / self.zoom).round();
+        let max = self.image_size;
+        (corner.x.clamp(0.0, max.x) as i32, corner.y.clamp(0.0, max.y) as i32)
+    }
+
+    /// Where a point of the image, in pixels, is on screen.
+    pub fn to_screen(&self, x: f32, y: f32) -> Pos2 {
+        self.image_rect().min + Vec2::new(x, y) * self.zoom / self.pixels_per_point
+    }
+
     pub fn can_zoom_in(&self) -> bool {
         self.zoom < ZOOM_LEVELS[ZOOM_LEVELS.len() - 1]
     }
@@ -199,6 +211,16 @@ mod tests {
         view.step_zoom(1, anchor);
         assert_eq!(view.zoom, 2.0);
         assert_eq!(view.pixel_at(anchor), before);
+    }
+
+    #[test]
+    fn corners_round_to_the_nearest_within_the_image() {
+        let mut view = placed(Vec2::new(100.0, 50.0), Vec2::new(400.0, 300.0));
+        view.zoom_to(4.0);
+        let origin = view.image_rect().min;
+        assert_eq!(view.corner_at(origin + Vec2::new(9.0, 6.0)), (2, 2));
+        assert_eq!(view.corner_at(origin + Vec2::new(-50.0, 1000.0)), (0, 50));
+        assert_eq!(view.to_screen(2.0, 2.0), origin + Vec2::new(8.0, 8.0));
     }
 
     #[test]
