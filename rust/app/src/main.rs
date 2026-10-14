@@ -1,6 +1,7 @@
 mod canvas;
 mod image_strip;
 mod frame_select;
+mod icons;
 mod settings;
 mod tiled_texture;
 mod view;
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{Document, OPEN_EXTENSIONS, SelectionMode, thumbnail};
 use frame_select::{FrameSelect, Shape};
+use icons::{ICON_SIZE, Icons};
 use settings::Settings;
 use tiled_texture::TiledTexture;
 use view::{View, ZOOM_LEVELS, format_zoom};
@@ -71,6 +73,7 @@ struct App {
     checker: TextureHandle,
     /// The pixel under the pointer, while it is over the image's view.
     pointer_pixel: Option<(i64, i64)>,
+    icons: Icons,
     frame_select: FrameSelect,
     /// What the selection tool selects: which tool it is.
     select_shape: Shape,
@@ -91,6 +94,7 @@ impl App {
             settings: Settings::load(),
             checker: canvas::checker_texture(ctx),
             pointer_pixel: None,
+            icons: Icons::default(),
             frame_select: FrameSelect::default(),
             select_shape: Shape::default(),
             selection_mode: SelectionMode::default(),
@@ -245,9 +249,17 @@ impl App {
     /// The settings of the tool, under the menu bar.
     fn tool_options(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let key = ui.ctx().format_shortcut(&SELECT_TOOL);
             for shape in Shape::ALL {
-                ui.selectable_value(&mut self.select_shape, shape, shape.tool_name())
-                    .on_hover_text(format!("{} ({})", shape.tool_name(), ui.ctx().format_shortcut(&SELECT_TOOL)));
+                let texture = self.icons.get(ui.ctx(), shape.icon());
+                // The icons are light gray lines, made the colour of the text to suit either theme.
+                let tint = ui.visuals().strong_text_color();
+                let icon = egui::Image::new(texture).fit_to_exact_size(ICON_SIZE).tint(tint);
+                let button = egui::Button::selectable(self.select_shape == shape, icon);
+                let tooltip = format!("{} ({key})\n{}", shape.tool_name(), shape.help());
+                if ui.add(button).on_hover_text(tooltip).clicked() {
+                    self.select_shape = shape;
+                }
             }
             ui.separator();
             ui.label("Mode:");

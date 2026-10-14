@@ -8,6 +8,8 @@
 
 use power_paint_core::{PixelRect, Selection, SelectionMode};
 
+use crate::icons::{self, Icon};
+
 /// What a drag selects in the rectangle it frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Shape {
@@ -24,6 +26,21 @@ impl Shape {
         match self {
             Self::Rectangle => "Rectangle Select",
             Self::Ellipse => "Ellipse Select",
+        }
+    }
+
+    pub fn icon(self) -> Icon {
+        match self {
+            Self::Rectangle => icons::RECT_SELECT,
+            Self::Ellipse => icons::ELLIPSE_SELECT,
+        }
+    }
+
+    /// How to use the tool.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Rectangle => "Drag to select, a square with Shift. Hold Ctrl to add to the selection.",
+            Self::Ellipse => "Drag to select, a circle with Shift. Hold Ctrl to add to the selection.",
         }
     }
 

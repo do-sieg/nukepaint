@@ -7,7 +7,7 @@ mod scale;
 mod selection;
 
 pub use document::Document;
-pub use files::{OPEN_EXTENSIONS, OpenError, load_image};
+pub use files::{OPEN_EXTENSIONS, OpenError, load_image, render_svg};
 pub use image::RgbaImage;
 pub use layer::Layer;
 pub use scale::{halve, thumbnail};
