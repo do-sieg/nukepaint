@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+directories = "6.0.0"
 eframe = "0.36.2"
 power-paint-core = { path = "../core" }
 rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"

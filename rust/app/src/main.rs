@@ -1,16 +1,21 @@
 mod canvas;
 mod image_strip;
+mod settings;
 mod tiled_texture;
 
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{Document, OPEN_EXTENSIONS, thumbnail};
+use settings::Settings;
 use tiled_texture::TiledTexture;
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+
+/// Widest the list of recent files gets, in points.
+const WELCOME_WIDTH: f32 = 600.0;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -40,7 +45,7 @@ struct App {
     pending_paths: Vec<PathBuf>,
     /// Files that could not be opened, with why, until the user closes the message.
     open_errors: Vec<String>,
-    last_dir: Option<PathBuf>,
+    settings: Settings,
     checker: TextureHandle,
 }
 
@@ -52,14 +57,14 @@ impl App {
             scroll_to_current: false,
             pending_paths: std::env::args_os().skip(1).map(PathBuf::from).collect(),
             open_errors: Vec::new(),
-            last_dir: None,
+            settings: Settings::load(),
             checker: canvas::checker_texture(ctx),
         }
     }
 
     fn show_open_dialog(&mut self, ctx: &egui::Context) {
         let mut dialog = rfd::FileDialog::new().add_filter("Images", OPEN_EXTENSIONS);
-        if let Some(dir) = &self.last_dir {
+        if let Some(dir) = self.settings.last_dir() {
             dialog = dialog.set_directory(dir);
         }
         if let Some(paths) = dialog.pick_files() {
@@ -71,6 +76,8 @@ impl App {
     /// image. A file already open is made current instead.
     fn open_paths(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
         for path in paths {
+            // Kept whole in the recent files, whatever folder the app was started from.
+            let path = path.canonicalize().unwrap_or(path);
             if let Some(index) = self.find_image(&path) {
                 self.select(index);
                 continue;
@@ -79,6 +86,7 @@ impl App {
                 Ok(document) => document,
                 Err(error) => {
                     self.open_errors.push(format!("{}: {error}", path.display()));
+                    self.settings.remove_recent_file(&path);
                     continue;
                 }
             };
@@ -90,7 +98,10 @@ impl App {
             };
             let texture = TiledTexture::new(ctx, &document.name(), &flat, options);
             let thumbnail = make_thumbnail(ctx, &document.name(), &flat);
-            self.last_dir = path.parent().map(Path::to_path_buf);
+            if let Some(dir) = path.parent() {
+                self.settings.set_last_dir(dir);
+            }
+            self.settings.add_recent_file(&path);
             self.images.push(OpenImage { document, texture, thumbnail });
             self.select(self.images.len() - 1);
         }
@@ -125,6 +136,24 @@ impl App {
             if ui.add(egui::Button::new("Open…").shortcut_text(ctx.format_shortcut(&OPEN))).clicked() {
                 self.show_open_dialog(&ctx);
             }
+            ui.menu_button("Open Recent", |ui| {
+                let mut opened = None;
+                for path in self.settings.recent_files() {
+                    if ui.button(path.display().to_string()).clicked() {
+                        opened = Some(path.clone());
+                    }
+                }
+                if !self.settings.recent_files().is_empty() {
+                    ui.separator();
+                }
+                let clear = egui::Button::new("Clear Recent Files");
+                if ui.add_enabled(!self.settings.recent_files().is_empty(), clear).clicked() {
+                    self.settings.clear_recent_files();
+                }
+                if let Some(path) = opened {
+                    self.open_paths(&ctx, vec![path]);
+                }
+            });
             ui.separator();
             let close = egui::Button::new("Close").shortcut_text(ctx.format_shortcut(&CLOSE));
             if ui.add_enabled(self.current.is_some(), close).clicked() {
@@ -147,6 +176,37 @@ impl App {
         }
         if ctx.input_mut(|input| input.consume_shortcut(&QUIT)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// What shows while no image is open: the recent files, to open one again.
+    fn welcome(&mut self, ui: &mut egui::Ui) {
+        let recent = self.settings.recent_files();
+        let heading = if recent.is_empty() { "Open an image, or drop one here" } else { "Recent files" };
+        let mut opened = None;
+        let width = ui.available_width().min(WELCOME_WIDTH);
+        // Roughly halfway down, the list growing from there.
+        ui.add_space(ui.available_height() / 3.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(width);
+            ui.heading(heading);
+            ui.add_space(8.0);
+            // A column as wide as the list, its file names lined up on the left.
+            let column = egui::Vec2::new(width, 0.0);
+            ui.allocate_ui_with_layout(column, egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                for path in recent {
+                    let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+                    let dir = path.parent().map(|dir| dir.display().to_string()).unwrap_or_default();
+                    // A long path is cut short to the list's width.
+                    let button = egui::Button::new(format!("{name}  —  {dir}")).frame(false).truncate();
+                    if ui.add(button).on_hover_text(path.display().to_string()).clicked() {
+                        opened = Some(path.clone());
+                    }
+                }
+            });
+        });
+        if let Some(path) = opened {
+            self.open_paths(ui.ctx(), vec![path]);
         }
     }
 
@@ -206,11 +266,7 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ui, |ui| match self.current {
             Some(current) => canvas::show(ui, &self.images[current].texture, &self.checker),
-            None => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Open an image with Ctrl+O, or drop files here");
-                });
-            }
+            None => self.welcome(ui),
         });
 
         self.show_open_errors(&ctx);
