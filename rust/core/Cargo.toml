@@ -1,0 +1,6 @@
+[package]
+name = "power-paint-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

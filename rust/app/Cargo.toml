@@ -1,0 +1,8 @@
+[package]
+name = "power-paint"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eframe = "0.36.2"
+power-paint-core = { path = "../core" }
