@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 eframe = "0.36.2"
 power-paint-core = { path = "../core" }
+rfd = "0.17.2"
