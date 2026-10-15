@@ -117,7 +117,7 @@ fn thumbnail(ui: &mut egui::Ui, image: &OpenImage, selected: bool, checker: &Tex
     // Fitted to the image's own proportions, which the shrunk copy only rounds.
     let picture = canvas::fit(image.texture.size(), rect.shrink(THUMBNAIL_MARGIN));
     canvas::paint_checker(painter, picture, CHECKER_CELL, checker);
-    painter.image(image.thumbnail.id(), picture, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+    image.texture.paint(painter, picture);
     painter.rect_stroke(picture, 0.0, Stroke::new(1.0, Color32::from_black_alpha(128)), StrokeKind::Outside);
 
     if image.document.is_unsaved() {

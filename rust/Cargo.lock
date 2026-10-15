@@ -2590,6 +2590,7 @@ dependencies = [
  "directories",
  "eframe",
  "naga",
+ "pollster 1.0.1",
  "power-paint-core",
  "rfd",
  "serde",

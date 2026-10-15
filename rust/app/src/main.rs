@@ -1,6 +1,7 @@
 mod canvas;
 mod checkerboard;
 mod colors_panel;
+mod composite;
 mod dock;
 mod image_strip;
 mod frame_select;
@@ -26,6 +27,7 @@ use canvas::Drawing;
 use dock::{DockLayout, DockSide, Section};
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use checkerboard::Checkerboard;
+use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
     Affine, Document, FloatingPixels, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, RgbaImage,
@@ -35,7 +37,6 @@ use icons::{ICON_SIZE, Icon, Icons};
 use layer_commands::LayerCommand;
 use layer_properties::Properties;
 use settings::Settings;
-use tiled_texture::TiledTexture;
 use tools::{SampleSource, Tool, Tools};
 use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
@@ -88,11 +89,10 @@ fn main() -> eframe::Result {
         APP_NAME,
         options,
         Box::new(|cc| {
-            if let Some(render_state) = &cc.wgpu_render_state {
-                grid::init(render_state);
-                resample_preview::init(render_state);
-            }
-            Ok(Box::new(App::new(&cc.egui_ctx)))
+            let render_state = cc.wgpu_render_state.as_ref().expect("eframe draws with wgpu");
+            grid::init(render_state);
+            resample_preview::init(render_state);
+            Ok(Box::new(App::new(&cc.egui_ctx, Gpu::new(render_state))))
         }),
     )
 }
@@ -100,9 +100,8 @@ fn main() -> eframe::Result {
 /// A document with the textures that show it.
 pub struct OpenImage {
     pub document: Document,
-    pub texture: TiledTexture,
-    /// The image shrunk for the image strip, as textures are not mipmapped.
-    pub thumbnail: TextureHandle,
+    /// The layers on the GPU, blended there.
+    pub texture: Composite,
     /// Each layer shrunk for the layers list, in the order of the layers.
     pub layer_thumbnails: Vec<TextureHandle>,
     pub view: View,
@@ -113,45 +112,39 @@ pub struct OpenImage {
 }
 
 impl OpenImage {
-    fn new(ctx: &egui::Context, document: Document) -> Self {
-        let flat = document.flattened();
-        let texture = TiledTexture::new(ctx, &document.name(), &flat);
+    fn new(ctx: &egui::Context, gpu: &Gpu, document: Document) -> Self {
+        let texture = Composite::new(gpu, &document.layers);
         let view = View::new(texture.size());
-        let thumbnail = make_thumbnail(ctx, &document.name(), &flat, image_strip::THUMBNAIL_SIZE);
-        let mut image = Self { document, texture, thumbnail, layer_thumbnails: Vec::new(), view, transform: None, stroke: None };
+        let mut image = Self { document, texture, layer_thumbnails: Vec::new(), view, transform: None, stroke: None };
         image.refresh_layer_thumbnails(ctx);
         image
     }
 
     /// Shows the image again after the pixels of the active layer changed.
     pub fn refresh(&mut self, ctx: &egui::Context) {
-        self.refresh_image(ctx);
         let active = self.document.active_layer;
+        self.texture.update_layer(&self.document.layers, active, None);
         self.layer_thumbnails[active] = self.make_layer_thumbnail(ctx, active);
     }
 
     /// Shows an area of the image again after the pixels of the active layer changed
     /// there, while it is being drawn on. The thumbnails wait for [`OpenImage::refresh`].
     pub fn refresh_area(&mut self, area: PixelRect) {
-        let pixels = self.document.flattened_area(area);
-        self.texture.update(&pixels, area.left as u32, area.top as u32);
+        self.texture.update_layer(&self.document.layers, self.document.active_layer, Some(area));
     }
 
     /// Shows the image and its layers again after layers were added, removed, moved or
     /// changed.
     pub fn refresh_layers(&mut self, ctx: &egui::Context) {
-        self.refresh_image(ctx);
+        self.texture.replace_layers(&self.document.layers);
+        // Cropping, resizing, and undoing either, change the size.
+        self.view.set_image_size(self.texture.size());
         self.refresh_layer_thumbnails(ctx);
     }
 
     /// Shows the image again after how its layers are blended changed, not their pixels.
-    pub fn refresh_image(&mut self, ctx: &egui::Context) {
-        let flat = self.document.flattened();
-        let name = self.document.name();
-        self.texture = TiledTexture::new(ctx, &name, &flat);
-        // Cropping, resizing, and undoing either, change the size.
-        self.view.set_image_size(self.texture.size());
-        self.thumbnail = make_thumbnail(ctx, &name, &flat, image_strip::THUMBNAIL_SIZE);
+    pub fn refresh_image(&mut self) {
+        self.texture.reblend(&self.document.layers);
     }
 
     fn refresh_layer_thumbnails(&mut self, ctx: &egui::Context) {
@@ -370,6 +363,7 @@ enum UnsavedChoice {
 }
 
 struct App {
+    gpu: Gpu,
     images: Vec<OpenImage>,
     current: Option<usize>,
     /// Set when the current image changes, so the strip brings it into view.
@@ -407,7 +401,7 @@ struct App {
 }
 
 impl App {
-    fn new(ctx: &egui::Context) -> Self {
+    fn new(ctx: &egui::Context, gpu: Gpu) -> Self {
         // Ctrl with plus, minus and 0 zoom the image, not the whole interface.
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         let settings = Settings::load();
@@ -417,6 +411,7 @@ impl App {
             ..Tools::default()
         };
         Self {
+            gpu,
             images: Vec::new(),
             current: None,
             scroll_to_current: false,
@@ -478,7 +473,7 @@ impl App {
 
     /// Shows the document as the current image, after the others.
     fn add_image(&mut self, ctx: &egui::Context, document: Document) {
-        self.images.push(OpenImage::new(ctx, document));
+        self.images.push(OpenImage::new(ctx, &self.gpu, document));
         self.select(self.images.len() - 1);
     }
 
@@ -1054,7 +1049,7 @@ impl App {
                 image.transform = None;
                 document.layers[index].visible = visible;
                 document.commit(if visible { "Layer Shown" } else { "Layer Hidden" }, Some(icons::LAYERS.name()));
-                image.refresh_image(ctx);
+                image.refresh_image();
             }
             layers_panel::Action::Move { from, to } => {
                 image.transform = None;
@@ -1105,7 +1100,7 @@ impl App {
                 self.layer_dialog = None;
             }
         }
-        image.refresh_image(ctx);
+        image.refresh_image();
     }
 
     /// Shows the dialog asking for a new size while it is open, and resizes the image
@@ -1142,11 +1137,11 @@ impl App {
     }
 
     /// Puts the layer back as it was and closes the layer properties dialog, if it is open.
-    fn cancel_layer_dialog(&mut self, ctx: &egui::Context) {
+    fn cancel_layer_dialog(&mut self) {
         if let Some(dialog) = self.layer_dialog.take() {
             let image = &mut self.images[dialog.image];
             dialog.before.apply(&mut image.document.layers[dialog.layer]);
-            image.refresh_image(ctx);
+            image.refresh_image();
         }
     }
 
@@ -1682,6 +1677,7 @@ fn make_thumbnail(ctx: &egui::Context, name: &str, image: &RgbaImage, size: f32)
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.gpu.free_released();
         let ctx = ui.ctx().clone();
         let mut paths = std::mem::take(&mut self.pending_paths);
         ctx.input(|input| {
@@ -1789,7 +1785,7 @@ impl eframe::App for App {
 
         // Closing an image or the app first gives up on the layer's properties or the size being edited.
         if self.closing.is_some() {
-            self.cancel_layer_dialog(&ctx);
+            self.cancel_layer_dialog();
             self.size_dialog = None;
             self.grid_dialog = None;
             self.checkerboard_dialog = None;

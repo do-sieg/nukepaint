@@ -1,7 +1,8 @@
 //! Pixels on the GPU, cut into tiles, each a texture of its own: a GPU takes no
 //! texture wider or taller than it allows, which an image can easily be. Shrunk
 //! copies, each half the size of the one before, show the image zoomed out, as
-//! the textures are not mipmapped.
+//! the textures are not mipmapped. The layers around pixels being moved are shown
+//! this way, blended on the CPU once; the image itself is blended by `composite`.
 
 use eframe::egui::{self, Color32, ColorImage, Painter, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 use power_paint_core::{RgbaImage, halve};
@@ -22,9 +23,6 @@ pub struct TiledTexture {
     size: Vec2,
     /// The image at its full size, then at half each time.
     levels: Vec<Level>,
-    /// Set once the full size changed and the shrunk copies did not follow, which are
-    /// then left unused.
-    shrunk_outdated: bool,
 }
 
 struct Level {
@@ -46,35 +44,7 @@ impl TiledTexture {
             levels.push(Level::new(ctx, &format!("{name} {}", levels.len()), &half));
             shrunk = Some(half);
         }
-        Self { size: levels[0].size, levels, shrunk_outdated: false }
-    }
-
-    /// Puts new pixels over part of the image at its full size, their top left corner
-    /// at `left`, `top`. The shrunk copies are not made again, which is slow: the full
-    /// size shows at every zoom until the texture is made anew.
-    pub fn update(&mut self, pixels: &RgbaImage, left: u32, top: u32) {
-        let area = Rect::from_min_size(
-            Pos2::new(left as f32, top as f32),
-            Vec2::new(pixels.width() as f32, pixels.height() as f32),
-        );
-        for (tile, texture) in &mut self.levels[0].tiles {
-            let overlap = tile.intersect(area);
-            if !overlap.is_positive() {
-                continue;
-            }
-            let (x, y) = (overlap.min.x as u32, overlap.min.y as u32);
-            let (width, height) = (overlap.width() as u32, overlap.height() as u32);
-            let part = rows(pixels, x - left, y - top, width, height);
-            let image = ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &part);
-            let at = [(x - tile.min.x as u32) as usize, (y - tile.min.y as u32) as usize];
-            texture.set_partial(at, image, TEXTURE_OPTIONS);
-        }
-        self.shrunk_outdated = true;
-    }
-
-    /// Size in pixels.
-    pub fn size(&self) -> Vec2 {
-        self.size
+        Self { size: levels[0].size, levels }
     }
 
     /// Draws the whole, stretched over `rect`, from the copy closest to that size
@@ -86,7 +56,7 @@ impl TiledTexture {
 
     /// The copy closest to `screen_scale` times the full size without being smaller.
     fn level(&self, screen_scale: f32) -> &Level {
-        if screen_scale >= 1.0 || self.shrunk_outdated {
+        if screen_scale >= 1.0 {
             return &self.levels[0];
         }
         let level = (1.0 / screen_scale).log2().floor() as usize;

@@ -154,7 +154,7 @@ pub fn show(
             let transform = image.transform.as_ref();
             let previewed = transform.is_some_and(|transform| transform.paint_preview(painter, &image.view, tools.resampling));
             if !previewed {
-                image.texture.paint(painter, rect, 1.0);
+                image.texture.paint(painter, rect);
             }
             grid::paint_lines(painter, &image.view, grid);
             response
