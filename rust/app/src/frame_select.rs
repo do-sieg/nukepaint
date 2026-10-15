@@ -69,14 +69,14 @@ impl FrameSelect {
         *selection = drag.base.combine(&drawn, drag.mode);
     }
 
-    pub fn release(&mut self, selection: &mut Selection) {
-        let Some(drag) = self.drag.take() else {
-            return;
-        };
+    /// The drag ends. Returns the selection there was before it, if there was a drag.
+    pub fn release(&mut self, selection: &mut Selection) -> Option<Selection> {
+        let drag = self.drag.take()?;
         let (x, y) = drag.pressed;
         if !drag.moved && (drag.mode == SelectionMode::Replace || !drag.base.contains(x, y)) {
             *selection = Selection::default();
         }
+        Some(drag.base)
     }
 
     /// Puts the selection back the way it was before the drag.

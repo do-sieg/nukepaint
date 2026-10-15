@@ -120,7 +120,7 @@ fn thumbnail(ui: &mut egui::Ui, image: &OpenImage, selected: bool, checker: &Tex
     painter.image(image.thumbnail.id(), picture, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
     painter.rect_stroke(picture, 0.0, Stroke::new(1.0, Color32::from_black_alpha(128)), StrokeKind::Outside);
 
-    if image.document.unsaved {
+    if image.document.is_unsaved() {
         // In the bottom left corner, as long as there are changes to save.
         let center = rect.left_bottom() + Vec2::new(THUMBNAIL_MARGIN + 4.0, -THUMBNAIL_MARGIN - 4.0);
         painter.circle(center, UNSAVED_DOT_RADIUS, UNSAVED_COLOR, Stroke::new(1.0, Color32::BLACK));
@@ -138,7 +138,7 @@ fn thumbnail(ui: &mut egui::Ui, image: &OpenImage, selected: bool, checker: &Tex
         Some(path) => format!("{}\n{}", document.name(), path.display()),
         None => document.name(),
     };
-    if document.unsaved {
+    if document.is_unsaved() {
         tooltip.push_str("\nUnsaved changes");
     }
     let response = response.on_hover_text(tooltip);

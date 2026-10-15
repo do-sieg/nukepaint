@@ -15,7 +15,7 @@ use power_paint_core::{Selection, SelectionMode};
 use crate::{
     OpenImage,
     frame_select::Shape,
-    icons::Icons,
+    icons::{self, Icons},
     tools::{Tool, Tools},
     transform::{BoxState, DragKind, Transform},
     view::View,
@@ -214,14 +214,17 @@ fn use_tool(
     }
 
     if response.drag_stopped() {
-        tools.frame_select.release(&mut image.document.selection);
+        release_selecting(image, tools);
         if let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging()) {
             let clicked = transform.drag_kind().is_some() && response.drag_stopped_by(PointerButton::Primary);
             let (moved, placed) = transform.release();
+            let document = &mut image.document;
             if let Some(pixels) = placed {
-                image.document.active_mut().pixels = pixels;
-                image.document.unsaved = true;
+                document.active_mut().pixels = pixels;
+                document.commit("Move Selected Pixels", Some(icons::MOVE_PIXELS.name()));
                 image.refresh(ui.ctx());
+            } else if moved {
+                document.commit(Tool::MoveSelection.name(), Some(Tool::MoveSelection.icon().name()));
             }
             // A click on the box of a selection tool does what a click with the tool does.
             if !moved
@@ -230,7 +233,7 @@ fn use_tool(
                 && let Some(press) = ui.input(|input| input.pointer.press_origin())
             {
                 start_selecting(image, tools, shape, press, command);
-                tools.frame_select.release(&mut image.document.selection);
+                release_selecting(image, tools);
             }
         }
     }
@@ -254,6 +257,16 @@ fn start_selecting(image: &mut OpenImage, tools: &mut Tools, shape: Shape, press
     let mode = if command { SelectionMode::Add } else { tools.selection_mode };
     let view = &image.view;
     tools.frame_select.press(&mut image.document.selection, shape, view.corner_at(press), view.pixel_at(press), mode);
+}
+
+/// A selection tool ends drawing the selection, which is a step if it changed anything.
+fn release_selecting(image: &mut OpenImage, tools: &mut Tools) {
+    let document = &mut image.document;
+    if let Some(before) = tools.frame_select.release(&mut document.selection)
+        && document.selection != before
+    {
+        document.commit(tools.tool.name(), Some(tools.tool.icon().name()));
+    }
 }
 
 /// Tints the selection and draws its outline, in lines one screen pixel wide.

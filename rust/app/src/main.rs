@@ -2,6 +2,7 @@ mod canvas;
 mod dock;
 mod image_strip;
 mod frame_select;
+mod history_panel;
 mod icons;
 mod layer_commands;
 mod layer_properties;
@@ -20,7 +21,7 @@ use power_paint_core::{
     Affine, Document, FloatingPixels, OPEN_EXTENSIONS, RgbaImage, SAVE_EXTENSIONS, SelectionMode, is_savable,
     thumbnail,
 };
-use icons::{ICON_SIZE, Icons};
+use icons::{ICON_SIZE, Icon, Icons};
 use layer_commands::LayerCommand;
 use layer_properties::Properties;
 use settings::Settings;
@@ -34,6 +35,10 @@ const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S)
 const SAVE_AS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+const REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+/// The other keys Redo goes by, in other applications.
+const REDO_SHIFT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 // Cut and the copies come as events of their own rather than as keys: these are for the menu.
 const CUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::X);
 const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
@@ -137,6 +142,8 @@ enum ViewCommand {
 /// What the Edit menu and its shortcuts do.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EditCommand {
+    Undo,
+    Redo,
     Cut,
     Copy,
     CopyMerged,
@@ -304,12 +311,13 @@ impl App {
             self.flatten_prompt = Some(FlattenPrompt { image: index, path });
             return Saving::AskingToFlatten;
         }
-        if self.write(index, &path) { Saving::Saved } else { Saving::NotSaved }
+        if self.write(index, &path, false) { Saving::Saved } else { Saving::NotSaved }
     }
 
-    /// Writes the image to the file. Returns whether it was written.
-    fn write(&mut self, index: usize, path: &Path) -> bool {
-        if let Err(error) = self.images[index].document.save(path) {
+    /// Writes the image to the file, then blends its layers into one with `flatten`, as
+    /// the file holds them. Returns whether it was written.
+    fn write(&mut self, index: usize, path: &Path, flatten: bool) -> bool {
+        if let Err(error) = self.images[index].document.save(path, flatten) {
             self.save_errors.push(format!("{}: {error}", path.display()));
             return false;
         }
@@ -355,7 +363,7 @@ impl App {
 
     /// Closes the image, first asking whether to save its changes if it has any.
     fn request_close(&mut self, index: usize) {
-        if self.images[index].document.unsaved {
+        if self.images[index].document.is_unsaved() {
             self.closing = Some(Closing::Image(index));
         } else {
             self.close(index);
@@ -479,11 +487,15 @@ impl App {
         let Some(current) = self.current else {
             return false;
         };
+        let document = &self.images[current].document;
         match command {
+            // Nor while a drag or the layer properties dialog would carry on with layers that are no longer there.
+            EditCommand::Undo => self.can_go_to_step() && document.can_undo(),
+            EditCommand::Redo => self.can_go_to_step() && document.can_redo(),
             // A drag would carry on with pixels that are no longer there, or not yet.
             EditCommand::Paste | EditCommand::PasteIntoNewLayer => self.clipboard.is_some() && !self.is_dragging(),
             EditCommand::Cut | EditCommand::EraseSelection if self.is_dragging() => false,
-            _ => !self.images[current].document.selection.is_empty(),
+            _ => !document.selection.is_empty(),
         }
     }
 
@@ -492,14 +504,13 @@ impl App {
             return;
         }
         match command {
+            EditCommand::Undo | EditCommand::Redo => {
+                let step = self.images[self.current.unwrap()].document.current_step();
+                self.go_to_step(ctx, if command == EditCommand::Undo { step - 1 } else { step + 1 });
+            }
             EditCommand::Paste => self.paste(ctx, false),
             EditCommand::PasteIntoNewLayer => self.paste(ctx, true),
-            EditCommand::PasteIntoNewImage => {
-                let mut document = Document::new(self.clipboard.clone().unwrap());
-                // Closing it asks whether to save it, as it is in no file.
-                document.unsaved = true;
-                self.add_image(ctx, document);
-            }
+            EditCommand::PasteIntoNewImage => self.add_image(ctx, Document::pasted(self.clipboard.clone().unwrap())),
             EditCommand::Cut | EditCommand::Copy | EditCommand::CopyMerged | EditCommand::EraseSelection => {
                 self.copy_or_erase(ctx, command);
             }
@@ -519,6 +530,8 @@ impl App {
             self.clipboard = copied;
         }
         if matches!(command, EditCommand::Cut | EditCommand::EraseSelection) && document.erase_selection() {
+            let (name, icon) = if command == EditCommand::Cut { ("Cut", icons::CUT) } else { ("Erase Selection", icons::ERASE) };
+            document.commit(name, Some(icon.name()));
             // A transform would go on from the pixels as they were before.
             image.transform = None;
             image.refresh(ctx);
@@ -549,7 +562,8 @@ impl App {
         *layer = floating.place(&Affine::IDENTITY);
         let transform = Transform::begin_pasted(ctx, floating, document);
         document.selection = transform.selection();
-        document.unsaved = true;
+        let name = if new_layer { "Paste in to New Layer" } else { "Paste" };
+        document.commit(name, Some(icons::PASTE.name()));
         image.transform = Some(transform);
         if new_layer {
             image.refresh_layers(ctx);
@@ -562,6 +576,8 @@ impl App {
         let ctx = ui.ctx().clone();
         ui.menu_button("Edit", |ui| {
             let items = [
+                ("Undo", UNDO, EditCommand::Undo),
+                ("Redo", REDO, EditCommand::Redo),
                 ("Cut", CUT, EditCommand::Cut),
                 ("Copy", COPY, EditCommand::Copy),
                 ("Copy Merged", COPY_MERGED, EditCommand::CopyMerged),
@@ -571,12 +587,34 @@ impl App {
                 ("Erase Selection", ERASE_SELECTION, EditCommand::EraseSelection),
             ];
             for (label, shortcut, command) in items {
+                if command == EditCommand::Cut {
+                    ui.separator();
+                }
                 let button = egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
                 if ui.add_enabled(self.can_edit(command), button).clicked() {
                     self.edit(&ctx, command);
                 }
             }
         });
+    }
+
+    /// Whether the current image can be put back as it was after another of its steps.
+    fn can_go_to_step(&self) -> bool {
+        self.current.is_some() && !self.is_dragging() && self.layer_dialog.is_none()
+    }
+
+    /// Puts the current image back as it was after one of its steps, undoing or redoing
+    /// as many as that takes.
+    fn go_to_step(&mut self, ctx: &egui::Context, index: usize) {
+        if !self.can_go_to_step() {
+            return;
+        }
+        let image = &mut self.images[self.current.unwrap()];
+        if image.document.go_to_step(index) {
+            // A transform would go on with pixels that are no longer there.
+            image.transform = None;
+            image.refresh_layers(ctx);
+        }
     }
 
     /// A menu of layer commands, in groups that separators keep apart.
@@ -621,6 +659,7 @@ impl App {
         // A transform would go on with the pixels of the layer it began on.
         image.transform = None;
         if command.run(&mut image.document) {
+            image.document.commit(command.label().trim_end_matches('…'), command.icon().map(Icon::name));
             image.refresh_layers(ctx);
         }
     }
@@ -642,12 +681,14 @@ impl App {
                 // The transform shows the layers as they were when it began.
                 image.transform = None;
                 document.layers[index].visible = visible;
-                document.unsaved = true;
+                document.commit(if visible { "Layer Shown" } else { "Layer Hidden" }, Some(icons::LAYERS.name()));
                 image.refresh_image(ctx);
             }
             layers_panel::Action::Move { from, to } => {
                 image.transform = None;
                 if document.move_layer(from, to) {
+                    let icon = if to > from { icons::LAYER_UP } else { icons::LAYER_DOWN };
+                    document.commit("Move Layer", Some(icon.name()));
                     image.refresh_layers(ctx);
                 }
             }
@@ -682,7 +723,9 @@ impl App {
             layer_properties::Outcome::Edited => dialog.properties.apply(layer),
             layer_properties::Outcome::Accepted => {
                 dialog.properties.apply(layer);
-                image.document.unsaved |= dialog.properties != dialog.before;
+                if dialog.properties != dialog.before {
+                    image.document.commit("Layer Properties", Some(icons::LAYER_PROPERTIES.name()));
+                }
                 self.layer_dialog = None;
             }
             layer_properties::Outcome::Canceled => {
@@ -823,6 +866,13 @@ impl App {
         }
         let typing = ctx.memory(|memory| memory.focused().is_some());
         if !typing {
+            // Undo would take Redo's other keys as well, so they go first.
+            if ctx.input_mut(|input| input.consume_shortcut(&REDO_SHIFT) || input.consume_shortcut(&REDO)) {
+                self.edit(ctx, EditCommand::Redo);
+            }
+            if ctx.input_mut(|input| input.consume_shortcut(&UNDO)) {
+                self.edit(ctx, EditCommand::Undo);
+            }
             let (cut, copy, shift) = ctx.input(|input| {
                 let has = |wanted: &Event| input.events.iter().any(|event| event == wanted);
                 (has(&Event::Cut), has(&Event::Copy), input.modifiers.shift)
@@ -928,7 +978,7 @@ impl App {
             Some(Closing::Image(index)) => *index,
             Some(Closing::Quit { discarded }) => {
                 let next = (0..self.images.len())
-                    .find(|index| self.images[*index].document.unsaved && !discarded.contains(index));
+                    .find(|index| self.images[*index].document.is_unsaved() && !discarded.contains(index));
                 let Some(index) = next else {
                     self.closing = None;
                     self.may_quit = true;
@@ -1017,10 +1067,8 @@ impl App {
             return;
         };
         let FlattenPrompt { image: index, path } = self.flatten_prompt.take().unwrap();
-        if flatten && self.write(index, &path) {
+        if flatten && self.write(index, &path, true) {
             let image = &mut self.images[index];
-            image.document.flatten();
-            image.document.unsaved = false;
             // A transform would go on with layers that are no longer there.
             image.transform = None;
             image.refresh_layers(ctx);
@@ -1036,7 +1084,7 @@ impl App {
         let title = match self.current {
             Some(current) => {
                 let document = &self.images[current].document;
-                let mark = if document.unsaved { "*" } else { "" };
+                let mark = if document.is_unsaved() { "*" } else { "" };
                 format!("{mark}{} — {APP_NAME}", document.name())
             }
             None => APP_NAME.to_owned(),
@@ -1088,7 +1136,7 @@ impl eframe::App for App {
         }
         // Closing the window, from its title bar or with Quit, first asks about unsaved changes.
         let close_requested = ctx.input(|input| input.viewport().close_requested());
-        if close_requested && !self.may_quit && self.images.iter().any(|image| image.document.unsaved) {
+        if close_requested && !self.may_quit && self.images.iter().any(|image| image.document.is_unsaved()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !matches!(self.closing, Some(Closing::Quit { .. })) {
                 self.closing = Some(Closing::Quit { discarded: Vec::new() });
@@ -1120,22 +1168,34 @@ impl eframe::App for App {
         }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
 
-        // Only the layers are in the dock for now, which there are none of without an image.
+        // The history and the layers are all the dock holds for now, which there are none of without an image.
         if let Some(current) = self.current {
-            let mut action = None;
+            let (mut history_action, mut layers_action) = (None, None);
             let busy = self.is_dragging() || self.layer_dialog.is_some();
             let image = &self.images[current];
             let (checker, icons) = (&self.checker, &mut self.icons);
+            let tooltip = |label: &str, shortcut| format!("{label} ({})", ctx.format_shortcut(&shortcut));
+            let (undo, redo) = (tooltip("Undo", UNDO), tooltip("Redo", REDO));
             let moved = dock::show(ui, self.settings.dock_side(), |ui| {
+                dock::section(ui, "History", |ui| {
+                    let document = &image.document;
+                    history_action = history_panel::show(ui, document, icons, !busy, scroll_to_current, &undo, &redo);
+                });
                 dock::section(ui, "Layers", |ui| {
                     let enabled = |command: LayerCommand| !busy && command.can_run(&image.document);
-                    action = layers_panel::show(ui, image, checker, icons, enabled);
+                    layers_action = layers_panel::show(ui, image, checker, icons, enabled);
                 });
             });
             if let Some(side) = moved {
                 self.settings.set_dock_side(side);
             }
-            if let Some(action) = action {
+            match history_action {
+                Some(history_panel::Action::GoTo(index)) => self.go_to_step(&ctx, index),
+                Some(history_panel::Action::Undo) => self.edit(&ctx, EditCommand::Undo),
+                Some(history_panel::Action::Redo) => self.edit(&ctx, EditCommand::Redo),
+                None => {}
+            }
+            if let Some(action) = layers_action {
                 self.layers_panel_action(&ctx, action);
             }
         }

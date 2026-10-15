@@ -32,6 +32,45 @@ pub const LAYER_MERGE_DOWN: Icon = icon!("layer_merge_down");
 pub const LAYER_UP: Icon = icon!("layer_up");
 pub const LAYER_DOWN: Icon = icon!("layer_down");
 pub const LAYER_PROPERTIES: Icon = icon!("layer_properties");
+pub const LAYERS: Icon = icon!("layers");
+pub const MOVE_PIXELS: Icon = icon!("move_pixels");
+pub const OPEN: Icon = icon!("open");
+pub const CUT: Icon = icon!("cut");
+pub const PASTE: Icon = icon!("paste");
+pub const ERASE: Icon = icon!("erase");
+pub const UNDO: Icon = icon!("undo");
+pub const REDO: Icon = icon!("redo");
+
+/// Those the history can list steps with, which it keeps by name.
+const STEP_ICONS: [Icon; 16] = [
+    RECT_SELECT,
+    ELLIPSE_SELECT,
+    MOVE_SELECTION,
+    LAYER_ADD,
+    LAYER_DELETE,
+    LAYER_DUPLICATE,
+    LAYER_MERGE_DOWN,
+    LAYER_UP,
+    LAYER_DOWN,
+    LAYER_PROPERTIES,
+    LAYERS,
+    MOVE_PIXELS,
+    OPEN,
+    CUT,
+    PASTE,
+    ERASE,
+];
+
+impl Icon {
+    pub fn name(self) -> &'static str {
+        self.name
+    }
+
+    /// The icon of a step of the history, from the name it keeps.
+    pub fn of_step(name: &str) -> Option<Self> {
+        STEP_ICONS.into_iter().find(|icon| icon.name == name)
+    }
+}
 
 #[derive(Default)]
 pub struct Icons {
