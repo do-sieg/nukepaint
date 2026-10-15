@@ -5,6 +5,9 @@
 //! A press inside the box moves it, on an edge or corner resizes it, and just outside
 //! rotates it about its middle, as does the right button anywhere with Move Selection.
 //! Shift keeps the box's proportions while resizing, and turns it in steps of 15°.
+//! While snapping to the grid, moving the box puts the top left corner of the
+//! rectangle around it on a corner of a cell, and resizing an upright box puts its
+//! edges on the grid's lines.
 //! A transform lasts from its first drag until the tool or the selection changes some
 //! other way: until then every drag starts again from what the box held at first, so
 //! nothing degrades.
@@ -16,7 +19,7 @@ use power_paint_core::{
     Affine, Bounds, Document, FloatingPixels, Frame, Layer, MAX_OPACITY, RgbaImage, Selection, composite,
 };
 
-use crate::{tiled_texture::TiledTexture, view::View};
+use crate::{grid::Cells, tiled_texture::TiledTexture, view::View};
 
 /// How far from an edge of the box, in points, a press still grabs that edge.
 pub const GRIP_REACH: f64 = 7.0;
@@ -141,10 +144,19 @@ impl BoxState {
         (edge_at(local.0, half.0, reach), edge_at(local.1, half.1, reach))
     }
 
-    /// Moved by how far the pointer went, in whole pixels.
-    fn moved(&self, press: (f64, f64), point: (f64, f64)) -> Self {
+    /// Moved by how far the pointer went, in whole pixels, then for the top left
+    /// corner of the rectangle around it to be on the nearest corner of a cell of `snap`.
+    fn moved(&self, press: (f64, f64), point: (f64, f64), snap: Option<Cells>) -> Self {
         let offset = sub(point, press);
-        Self { center: add(self.center, (offset.0.round(), offset.1.round())), ..*self }
+        let center = add(self.center, (offset.0.round(), offset.1.round()));
+        let Some(cells) = snap else {
+            return Self { center, ..*self };
+        };
+        let half = (self.size.0.abs() / 2.0, self.size.1.abs() / 2.0);
+        let turned = (self.angle.cos().abs(), self.angle.sin().abs());
+        let reach = (half.0 * turned.0 + half.1 * turned.1, half.0 * turned.1 + half.1 * turned.0);
+        let corner = sub(center, reach);
+        Self { center: add(center, sub(cells.snap(corner), corner)), ..*self }
     }
 
     /// Turned about its middle by the angle the pointer went round it.
@@ -160,9 +172,13 @@ impl BoxState {
     /// Stretched for the grabbed edges to follow the pointer, the opposite ones staying
     /// put. With `keep_ratio`, it keeps its proportions. Nothing comes of a size under
     /// one pixel.
-    fn resized(&self, grip: (i32, i32), point: (f64, f64), keep_ratio: bool) -> Option<Self> {
-        // An upright box keeps its edges on whole pixels.
-        let point = if self.angle == 0.0 { (point.0.round(), point.1.round()) } else { point };
+    fn resized(&self, grip: (i32, i32), point: (f64, f64), keep_ratio: bool, snap: Option<Cells>) -> Option<Self> {
+        // An upright box keeps its edges on whole pixels, or on the lines of `snap`.
+        let point = match snap {
+            _ if self.angle != 0.0 => point,
+            Some(cells) => cells.snap(point),
+            None => (point.0.round(), point.1.round()),
+        };
         let local = rotate(sub(point, self.center), -self.angle);
         let extent = (self.size.0.abs(), self.size.1.abs());
         // How many times larger the box becomes along each axis; negative once an edge
@@ -347,14 +363,15 @@ impl Transform {
         self.drag = Some(Drag { kind, press: point, from: self.state, moved: false });
     }
 
-    /// The drag reaches a point of the image. Returns the selection where the box now is.
-    pub fn drag_to(&mut self, point: (f64, f64), shift: bool) -> Option<Selection> {
+    /// The drag reaches a point of the image. Returns the selection where the box now
+    /// is. Moving and resizing snap to the cells of `snap`, if given.
+    pub fn drag_to(&mut self, point: (f64, f64), shift: bool, snap: Option<Cells>) -> Option<Selection> {
         let drag = self.drag.as_mut()?;
         drag.moved = true;
         self.state = match drag.kind {
-            DragKind::Move => drag.from.moved(drag.press, point),
+            DragKind::Move => drag.from.moved(drag.press, point, snap),
             DragKind::Rotate => drag.from.rotated(drag.press, point, shift),
-            DragKind::Resize(grip) => drag.from.resized(grip, point, shift).unwrap_or(self.state),
+            DragKind::Resize(grip) => drag.from.resized(grip, point, shift, snap).unwrap_or(self.state),
         };
         Some(self.selection())
     }
@@ -495,22 +512,33 @@ mod tests {
 
     #[test]
     fn move_by_whole_pixels() {
-        let state = upright(0.0, 0.0, 10.0, 10.0).moved((5.0, 5.0), (8.4, 3.6));
+        let state = upright(0.0, 0.0, 10.0, 10.0).moved((5.0, 5.0), (8.4, 3.6), None);
         assert_eq!(state.center, (8.0, 4.0));
+    }
+
+    #[test]
+    fn snap_to_the_grid() {
+        let cells = Some(Cells { origin: [0, 0], size: [8, 8] });
+        // The top left corner goes to the nearest corner of a cell.
+        let moved = upright(0.0, 0.0, 10.0, 6.0).moved((5.0, 5.0), (8.0, 15.0), cells);
+        assert_eq!(moved.center, (5.0, 11.0));
+        // An upright box's edge goes to the nearest line.
+        let wider = upright(0.0, 0.0, 10.0, 6.0).resized((1, 0), (19.0, 3.0), false, cells).unwrap();
+        assert_eq!((wider.center, wider.size), ((8.0, 3.0), (16.0, 6.0)));
     }
 
     #[test]
     fn resize_keeps_the_opposite_edge() {
         let state = upright(0.0, 0.0, 10.0, 10.0);
-        let wider = state.resized((1, 0), (20.0, 3.0), false).unwrap();
+        let wider = state.resized((1, 0), (20.0, 3.0), false, None).unwrap();
         assert_eq!((wider.center, wider.size), ((10.0, 5.0), (20.0, 10.0)));
         // The corner goes up to y = -10: twice as tall, and as wide with Shift.
-        let corner = state.resized((-1, -1), (5.0, -10.0), true).unwrap();
+        let corner = state.resized((-1, -1), (5.0, -10.0), true, None).unwrap();
         assert_eq!((corner.center, corner.size), ((0.0, 0.0), (20.0, 20.0)));
         // Past the opposite edge, it is mirrored.
-        let flipped = state.resized((1, 0), (-10.0, 0.0), false).unwrap();
+        let flipped = state.resized((1, 0), (-10.0, 0.0), false, None).unwrap();
         assert_eq!((flipped.center, flipped.size), ((-5.0, 5.0), (-10.0, 10.0)));
-        assert!(state.resized((1, 0), (0.0, 0.0), false).is_none());
+        assert!(state.resized((1, 0), (0.0, 0.0), false, None).is_none());
     }
 
     #[test]
@@ -537,12 +565,12 @@ mod tests {
         let ctx = egui::Context::default();
         let mut transform = Transform::begin(&ctx, &document, false).unwrap();
         transform.press(DragKind::Move, (5.0, 5.0));
-        let moved = transform.drag_to((8.0, 5.0), false).unwrap();
+        let moved = transform.drag_to((8.0, 5.0), false, None).unwrap();
         assert_eq!(moved.bounds(), Some(Bounds { left: 3.0, top: 0.0, right: 13.0, bottom: 10.0 }));
         assert_eq!(transform.release(), (true, None));
         // The next drag starts from where the last one left the box.
         transform.press(DragKind::Resize((1, 0)), (13.0, 5.0));
-        let wider = transform.drag_to((23.0, 5.0), false).unwrap();
+        let wider = transform.drag_to((23.0, 5.0), false, None).unwrap();
         assert_eq!(wider.bounds(), Some(Bounds { left: 3.0, top: 0.0, right: 23.0, bottom: 10.0 }));
         assert_eq!(transform.cancel().bounds(), moved.bounds());
     }
@@ -554,7 +582,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut transform = Transform::begin(&ctx, &document, false).unwrap();
         transform.press(DragKind::Rotate, (30.0, 15.0));
-        let turned = transform.drag_to((20.0, 25.0), false).unwrap();
+        let turned = transform.drag_to((20.0, 25.0), false, None).unwrap();
         transform.release();
         let state = transform.state();
         assert_eq!(BoxState::of(&turned), Some(state));
@@ -563,7 +591,7 @@ mod tests {
         let mut again = Transform::begin(&ctx, &document, false).unwrap();
         assert_eq!(again.state(), state);
         again.press(DragKind::Move, (20.0, 15.0));
-        let moved = again.drag_to((22.0, 15.0), false).unwrap();
+        let moved = again.drag_to((22.0, 15.0), false, None).unwrap();
         let expected = turned.transformed(&Affine::translation(2.0, 0.0));
         for (outline, expected) in moved.outlines().iter().zip(expected.outlines()) {
             for (point, expected) in outline.iter().zip(expected) {
@@ -572,7 +600,7 @@ mod tests {
         }
         // Turned back upright, it is in the box around it.
         again.press(DragKind::Rotate, (22.0, 25.0));
-        let upright = again.drag_to((32.0, 15.0), false).unwrap();
+        let upright = again.drag_to((32.0, 15.0), false, None).unwrap();
         assert!(upright.frame().is_none());
     }
 }

@@ -1,8 +1,11 @@
 mod canvas;
+mod checkerboard;
 mod colors_panel;
 mod dock;
 mod image_strip;
 mod frame_select;
+mod grid;
+mod grid_settings;
 mod history_panel;
 mod icons;
 mod image_size;
@@ -21,6 +24,8 @@ use std::path::{Path, PathBuf};
 use canvas::Drawing;
 use dock::{DockLayout, DockSide, Section};
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
+use checkerboard::Checkerboard;
+use grid::{Cells, Grid};
 use power_paint_core::{
     Affine, Document, FloatingPixels, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, RgbaImage,
     SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
@@ -60,6 +65,8 @@ const ZOOM_IN_EQUALS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAN
 const ZOOM_OUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
 const ZOOM_TO_WINDOW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 const ACTUAL_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0);
+const SHOW_GRID: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Quote);
+const SNAP_TO_GRID: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::S);
 
 const APP_NAME: &str = "Power Paint";
 
@@ -74,7 +81,16 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native(APP_NAME, options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
+    eframe::run_native(
+        APP_NAME,
+        options,
+        Box::new(|cc| {
+            if let Some(render_state) = &cc.wgpu_render_state {
+                grid::init(render_state);
+            }
+            Ok(Box::new(App::new(&cc.egui_ctx)))
+        }),
+    )
 }
 
 /// A document with the textures that show it.
@@ -149,12 +165,61 @@ impl OpenImage {
 }
 
 /// What the View menu and its shortcuts do.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewCommand {
     ZoomIn,
     ZoomOut,
     ZoomToWindow,
     ActualSize,
+    ShowGrid,
+    SnapToGrid,
+    GridSettings,
+    SelectionAsGrid,
+    Checkerboard,
+}
+
+impl ViewCommand {
+    /// The View menu, in groups that separators keep apart.
+    const MENU: [&[Self]; 3] = [
+        &[Self::ZoomIn, Self::ZoomOut, Self::ZoomToWindow, Self::ActualSize],
+        &[Self::ShowGrid, Self::SnapToGrid, Self::GridSettings, Self::SelectionAsGrid],
+        &[Self::Checkerboard],
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ZoomIn => "Zoom In",
+            Self::ZoomOut => "Zoom Out",
+            Self::ZoomToWindow => "Zoom to Window",
+            Self::ActualSize => "Actual Size",
+            Self::ShowGrid => "Show Grid",
+            Self::SnapToGrid => "Snap to Grid",
+            Self::GridSettings => "Grid Settings…",
+            Self::SelectionAsGrid => "Selection as Grid",
+            Self::Checkerboard => "Checkerboard…",
+        }
+    }
+
+    fn shortcut(self) -> Option<KeyboardShortcut> {
+        match self {
+            Self::ZoomIn => Some(ZOOM_IN),
+            Self::ZoomOut => Some(ZOOM_OUT),
+            Self::ZoomToWindow => Some(ZOOM_TO_WINDOW),
+            Self::ActualSize => Some(ACTUAL_SIZE),
+            Self::ShowGrid => Some(SHOW_GRID),
+            Self::SnapToGrid => Some(SNAP_TO_GRID),
+            Self::GridSettings | Self::SelectionAsGrid | Self::Checkerboard => None,
+        }
+    }
+
+    fn icon(self) -> Option<Icon> {
+        match self {
+            Self::ShowGrid => Some(icons::GRID),
+            Self::SnapToGrid => Some(icons::GRID_SNAP),
+            Self::GridSettings => Some(icons::GRID_SETTINGS),
+            _ => None,
+        }
+    }
 }
 
 /// What the Edit menu and its shortcuts do.
@@ -173,6 +238,100 @@ enum EditCommand {
     Deselect,
     InvertSelection,
 }
+
+impl EditCommand {
+    /// The Edit menu, in groups that separators keep apart.
+    const MENU: [&[Self]; 3] = [
+        &[Self::Undo, Self::Redo],
+        &[
+            Self::Cut,
+            Self::Copy,
+            Self::CopyMerged,
+            Self::Paste,
+            Self::PasteIntoNewLayer,
+            Self::PasteIntoNewImage,
+            Self::EraseSelection,
+        ],
+        &[Self::SelectAll, Self::Deselect, Self::InvertSelection],
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Undo => "Undo",
+            Self::Redo => "Redo",
+            Self::Cut => "Cut",
+            Self::Copy => "Copy",
+            Self::CopyMerged => "Copy Merged",
+            Self::Paste => "Paste",
+            Self::PasteIntoNewLayer => "Paste in to New Layer",
+            Self::PasteIntoNewImage => "Paste in to New Image",
+            Self::EraseSelection => "Erase Selection",
+            Self::SelectAll => "Select All",
+            Self::Deselect => "Deselect",
+            Self::InvertSelection => "Invert Selection",
+        }
+    }
+
+    fn shortcut(self) -> KeyboardShortcut {
+        match self {
+            Self::Undo => UNDO,
+            Self::Redo => REDO,
+            Self::Cut => CUT,
+            Self::Copy => COPY,
+            Self::CopyMerged => COPY_MERGED,
+            Self::Paste => PASTE,
+            Self::PasteIntoNewLayer => PASTE_INTO_NEW_LAYER,
+            Self::PasteIntoNewImage => PASTE_INTO_NEW_IMAGE,
+            Self::EraseSelection => ERASE_SELECTION,
+            Self::SelectAll => SELECT_ALL,
+            Self::Deselect => DESELECT,
+            Self::InvertSelection => INVERT_SELECTION,
+        }
+    }
+
+    fn icon(self) -> Option<Icon> {
+        match self {
+            Self::Undo => Some(icons::UNDO),
+            Self::Redo => Some(icons::REDO),
+            Self::Cut => Some(icons::CUT),
+            Self::Copy => Some(icons::COPY),
+            Self::Paste => Some(icons::PASTE),
+            Self::EraseSelection => Some(icons::ERASE),
+            Self::SelectAll => Some(icons::SELECT_ALL),
+            Self::Deselect => Some(icons::DESELECT),
+            Self::InvertSelection => Some(icons::INVERT_SELECTION),
+            Self::CopyMerged | Self::PasteIntoNewLayer | Self::PasteIntoNewImage => None,
+        }
+    }
+}
+
+/// What a button of the toolbar does.
+#[derive(Clone, Copy)]
+enum ToolbarButton {
+    Open,
+    Save,
+    SaveAs,
+    Edit(EditCommand),
+    Layer(LayerCommand),
+    View(ViewCommand),
+}
+
+/// The toolbar's buttons, in groups that separators keep apart.
+const TOOLBAR: [&[ToolbarButton]; 6] = {
+    use ToolbarButton::*;
+    [
+        &[Open, Save, SaveAs],
+        &[Edit(EditCommand::Undo), Edit(EditCommand::Redo)],
+        &[Edit(EditCommand::Cut), Edit(EditCommand::Copy), Edit(EditCommand::Paste), Edit(EditCommand::EraseSelection)],
+        &[Edit(EditCommand::SelectAll), Edit(EditCommand::Deselect), Edit(EditCommand::InvertSelection)],
+        &[Layer(LayerCommand::CropToSelection)],
+        &[
+            View(ViewCommand::ShowGrid),
+            View(ViewCommand::SnapToGrid),
+            View(ViewCommand::GridSettings),
+        ],
+    ]
+};
 
 /// What is being closed, waiting on the user to say what becomes of unsaved changes.
 enum Closing {
@@ -237,6 +396,10 @@ struct App {
     layer_dialog: Option<layer_properties::Dialog>,
     /// Set while asking for a new size of an image or its canvas.
     size_dialog: Option<image_size::Dialog>,
+    /// Set while the grid's settings are being changed.
+    grid_dialog: Option<grid_settings::Dialog>,
+    /// Set while the checkerboard behind the image is being changed.
+    checkerboard_dialog: Option<checkerboard::Dialog>,
 }
 
 impl App {
@@ -264,6 +427,8 @@ impl App {
             clipboard: None,
             layer_dialog: None,
             size_dialog: None,
+            grid_dialog: None,
+            checkerboard_dialog: None,
         }
     }
 
@@ -456,45 +621,192 @@ impl App {
     }
 
     fn can_run(&self, command: ViewCommand) -> bool {
-        let Some(current) = self.current else {
-            return false;
-        };
-        let view = &self.images[current].view;
         match command {
-            ViewCommand::ZoomIn => view.can_zoom_in(),
-            ViewCommand::ZoomOut => view.can_zoom_out(),
-            ViewCommand::ZoomToWindow | ViewCommand::ActualSize => true,
+            ViewCommand::ShowGrid | ViewCommand::SnapToGrid => true,
+            ViewCommand::GridSettings | ViewCommand::Checkerboard => !self.has_dialog(),
+            ViewCommand::SelectionAsGrid => self.selection_rect().is_some(),
+            ViewCommand::ZoomIn | ViewCommand::ZoomOut | ViewCommand::ZoomToWindow | ViewCommand::ActualSize => {
+                let Some(current) = self.current else {
+                    return false;
+                };
+                let view = &self.images[current].view;
+                match command {
+                    ViewCommand::ZoomIn => view.can_zoom_in(),
+                    ViewCommand::ZoomOut => view.can_zoom_out(),
+                    _ => true,
+                }
+            }
         }
     }
 
     fn run(&mut self, command: ViewCommand) {
-        let Some(view) = self.current_view() else {
+        if !self.can_run(command) {
+            return;
+        }
+        let mut grid = self.settings.grid().clone();
+        match command {
+            ViewCommand::ShowGrid => grid.visible = !grid.visible,
+            ViewCommand::SnapToGrid => grid.snap = !grid.snap,
+            ViewCommand::GridSettings => {
+                self.grid_dialog = Some(grid_settings::Dialog::new(grid));
+                return;
+            }
+            ViewCommand::Checkerboard => {
+                self.checkerboard_dialog = Some(checkerboard::Dialog::new(self.settings.checkerboard().clone()));
+                return;
+            }
+            ViewCommand::SelectionAsGrid => {
+                // One cell is the rectangle around the selection, and the others line up with it.
+                let cells = Cells::around(self.selection_rect().unwrap());
+                (grid.origin, grid.cell, grid.visible) = (cells.origin, cells.size, true);
+            }
+            ViewCommand::ZoomIn | ViewCommand::ZoomOut | ViewCommand::ZoomToWindow | ViewCommand::ActualSize => {
+                let view = self.current_view().unwrap();
+                match command {
+                    ViewCommand::ZoomIn => view.zoom_in(),
+                    ViewCommand::ZoomOut => view.zoom_out(),
+                    ViewCommand::ZoomToWindow => view.zoom_to_window(),
+                    _ => view.zoom_to(1.0),
+                }
+                return;
+            }
+        }
+        self.settings.set_grid(grid);
+    }
+
+    /// Whether what the command turns on is on, for the commands that turn something on and off.
+    fn is_on(&self, command: ViewCommand) -> Option<bool> {
+        let grid = self.settings.grid();
+        match command {
+            ViewCommand::ShowGrid => Some(grid.visible),
+            ViewCommand::SnapToGrid => Some(grid.snap),
+            _ => None,
+        }
+    }
+
+    /// The pixels the current image's selection covers, whole or in part, if anything is selected.
+    fn selection_rect(&self) -> Option<PixelRect> {
+        let bounds = self.images[self.current?].document.selection.bounds()?;
+        // Rotating leaves edges a hair off whole pixels; that must not cost an extra pixel.
+        let slack = 0.001;
+        Some(PixelRect {
+            left: (bounds.left + slack).floor() as i32,
+            top: (bounds.top + slack).floor() as i32,
+            right: (bounds.right - slack).ceil() as i32,
+            bottom: (bounds.bottom - slack).ceil() as i32,
+        })
+    }
+
+    /// The grid as it shows: as it is being tried out in its settings, or as the settings say.
+    fn shown_grid(&self) -> Grid {
+        self.grid_dialog.as_ref().map_or_else(|| self.settings.grid().clone(), |dialog| dialog.grid.clone())
+    }
+
+    /// The checkerboard as it shows: as it is being tried out in its dialog, or as the settings say.
+    fn shown_checkerboard(&self) -> Checkerboard {
+        let dialog = self.checkerboard_dialog.as_ref();
+        dialog.map_or_else(|| self.settings.checkerboard().clone(), |dialog| dialog.checkerboard.clone())
+    }
+
+    /// Shows the checkerboard dialog while it is open, and keeps the checkerboard once the user agrees.
+    fn checkerboard_dialog(&mut self, ctx: &egui::Context) {
+        let Some(outcome) = self.checkerboard_dialog.as_mut().and_then(|dialog| dialog.show(ctx)) else {
             return;
         };
-        match command {
-            ViewCommand::ZoomIn => view.zoom_in(),
-            ViewCommand::ZoomOut => view.zoom_out(),
-            ViewCommand::ZoomToWindow => view.zoom_to_window(),
-            ViewCommand::ActualSize => view.zoom_to(1.0),
+        let dialog = self.checkerboard_dialog.take().unwrap();
+        if let checkerboard::Outcome::Accepted = outcome {
+            self.settings.set_checkerboard(dialog.checkerboard);
+        }
+    }
+
+    /// Shows the grid settings dialog while it is open, and keeps the grid once the user agrees.
+    fn grid_dialog(&mut self, ctx: &egui::Context) {
+        let Some(outcome) = self.grid_dialog.as_mut().and_then(|dialog| dialog.show(ctx)) else {
+            return;
+        };
+        let dialog = self.grid_dialog.take().unwrap();
+        if let grid_settings::Outcome::Accepted = outcome {
+            self.settings.set_grid(dialog.grid);
+        }
+    }
+
+    /// The row of buttons under the menus, for the commands with an icon. The ones that
+    /// turn something on stay pressed while it is.
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let mut clicked = None;
+        ui.horizontal(|ui| {
+            for (group, buttons) in TOOLBAR.iter().enumerate() {
+                if group > 0 {
+                    ui.separator();
+                }
+                for &button in *buttons {
+                    let (icon, label, shortcut, enabled, on) = match button {
+                        ToolbarButton::Open => (Some(icons::OPEN), "Open", Some(OPEN), true, None),
+                        ToolbarButton::Save => (Some(icons::SAVE), "Save", Some(SAVE), self.current.is_some(), None),
+                        ToolbarButton::SaveAs => {
+                            (Some(icons::SAVE_AS), "Save As", Some(SAVE_AS), self.current.is_some(), None)
+                        }
+                        ToolbarButton::Edit(command) => {
+                            (command.icon(), command.label(), Some(command.shortcut()), self.can_edit(command), None)
+                        }
+                        ToolbarButton::Layer(command) => {
+                            (command.icon(), command.label(), command.shortcut(), self.can_run_layer(command), None)
+                        }
+                        ToolbarButton::View(command) => {
+                            (command.icon(), command.label(), command.shortcut(), self.can_run(command), self.is_on(command))
+                        }
+                    };
+                    let texture = self.icons.get(&ctx, icon.expect("the toolbar's commands have an icon"));
+                    // The icons are light gray lines, made the colour of the text to suit either theme.
+                    let tint = ui.visuals().strong_text_color();
+                    let image = egui::Image::new(texture).fit_to_exact_size(ICON_SIZE).tint(tint);
+                    let widget = match on {
+                        Some(on) => egui::Button::selectable(on, image),
+                        None => egui::Button::image(image),
+                    };
+                    let label = label.trim_end_matches('…');
+                    let tooltip = match shortcut {
+                        Some(shortcut) => format!("{label} ({})", ctx.format_shortcut(&shortcut)),
+                        None => label.to_owned(),
+                    };
+                    if ui.add_enabled(enabled, widget).on_hover_text(tooltip).clicked() {
+                        clicked = Some(button);
+                    }
+                }
+            }
+        });
+        match clicked {
+            Some(ToolbarButton::Open) => self.show_open_dialog(&ctx),
+            Some(ToolbarButton::Save | ToolbarButton::SaveAs) if let Some(current) = self.current => {
+                self.save(current, matches!(clicked, Some(ToolbarButton::SaveAs)));
+            }
+            Some(ToolbarButton::Edit(command)) => self.edit(&ctx, command),
+            Some(ToolbarButton::Layer(command)) => self.run_layer(&ctx, command),
+            Some(ToolbarButton::View(command)) => self.run(command),
+            _ => {}
         }
     }
 
     fn view_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.menu_button("View", |ui| {
-            let items = [
-                ("Zoom In", ZOOM_IN, ViewCommand::ZoomIn),
-                ("Zoom Out", ZOOM_OUT, ViewCommand::ZoomOut),
-                ("Zoom to Window", ZOOM_TO_WINDOW, ViewCommand::ZoomToWindow),
-                ("Actual Size", ACTUAL_SIZE, ViewCommand::ActualSize),
-            ];
-            for (label, shortcut, command) in items {
-                let button = egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
-                if ui.add_enabled(self.can_run(command), button).clicked() {
-                    self.run(command);
+            for commands in ViewCommand::MENU {
+                for &command in commands {
+                    // Those that turn something on stand out while it is.
+                    let mut button = match self.is_on(command) {
+                        Some(on) => egui::Button::selectable(on, command.label()),
+                        None => egui::Button::new(command.label()),
+                    };
+                    if let Some(shortcut) = command.shortcut() {
+                        button = button.shortcut_text(ctx.format_shortcut(&shortcut));
+                    }
+                    if ui.add_enabled(self.can_run(command), button).clicked() {
+                        self.run(command);
+                    }
                 }
+                ui.separator();
             }
-            ui.separator();
             ui.menu_button("Dock", |ui| {
                 for side in DockSide::ALL {
                     if ui.button(format!("All Sections on the {}", side.name())).clicked() {
@@ -626,27 +938,15 @@ impl App {
     fn edit_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.menu_button("Edit", |ui| {
-            let items = [
-                ("Undo", UNDO, EditCommand::Undo),
-                ("Redo", REDO, EditCommand::Redo),
-                ("Cut", CUT, EditCommand::Cut),
-                ("Copy", COPY, EditCommand::Copy),
-                ("Copy Merged", COPY_MERGED, EditCommand::CopyMerged),
-                ("Paste", PASTE, EditCommand::Paste),
-                ("Paste in to New Layer", PASTE_INTO_NEW_LAYER, EditCommand::PasteIntoNewLayer),
-                ("Paste in to New Image", PASTE_INTO_NEW_IMAGE, EditCommand::PasteIntoNewImage),
-                ("Erase Selection", ERASE_SELECTION, EditCommand::EraseSelection),
-                ("Select All", SELECT_ALL, EditCommand::SelectAll),
-                ("Deselect", DESELECT, EditCommand::Deselect),
-                ("Invert Selection", INVERT_SELECTION, EditCommand::InvertSelection),
-            ];
-            for (label, shortcut, command) in items {
-                if matches!(command, EditCommand::Cut | EditCommand::SelectAll) {
+            for (group, commands) in EditCommand::MENU.into_iter().enumerate() {
+                if group > 0 {
                     ui.separator();
                 }
-                let button = egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
-                if ui.add_enabled(self.can_edit(command), button).clicked() {
-                    self.edit(&ctx, command);
+                for &command in commands {
+                    let button = egui::Button::new(command.label()).shortcut_text(ctx.format_shortcut(&command.shortcut()));
+                    if ui.add_enabled(self.can_edit(command), button).clicked() {
+                        self.edit(&ctx, command);
+                    }
                 }
             }
         });
@@ -830,7 +1130,7 @@ impl App {
 
     /// Whether a dialog is open, which nothing else may change the images under.
     fn has_dialog(&self) -> bool {
-        self.layer_dialog.is_some() || self.size_dialog.is_some()
+        self.layer_dialog.is_some() || self.size_dialog.is_some() || self.grid_dialog.is_some() || self.checkerboard_dialog.is_some()
     }
 
     /// Puts the layer back as it was and closes the layer properties dialog, if it is open.
@@ -842,21 +1142,10 @@ impl App {
         }
     }
 
-    /// The row under the menu bar: Undo and Redo, and the settings of the tool.
+    /// The row under the toolbar: the current tool, and its settings.
     fn tool_options(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let ctx = ui.ctx().clone();
-            for (icon, label, shortcut, command) in
-                [(icons::UNDO, "Undo", UNDO, EditCommand::Undo), (icons::REDO, "Redo", REDO, EditCommand::Redo)]
-            {
-                let texture = self.icons.get(&ctx, icon);
-                let tint = ui.visuals().strong_text_color();
-                let icon = egui::Image::new(texture).fit_to_exact_size(ICON_SIZE).tint(tint);
-                let tooltip = format!("{label} ({})", ctx.format_shortcut(&shortcut));
-                if ui.add_enabled(self.can_edit(command), egui::Button::image(icon)).on_hover_text(tooltip).clicked() {
-                    self.edit(&ctx, command);
-                }
-            }
+            ui.label(egui::RichText::new(self.tools.tool.name()).strong());
             if self.tools.tool.draws() {
                 self.drawing_options(ui);
             } else if self.tools.tool == Tool::PaintBucket {
@@ -1008,20 +1297,21 @@ impl App {
         if self.closing.is_some() || self.flatten_prompt.is_some() || self.has_dialog() {
             return;
         }
-        let view_shortcuts = [
-            (ZOOM_IN, ViewCommand::ZoomIn),
-            (ZOOM_IN_EQUALS, ViewCommand::ZoomIn),
-            (ZOOM_OUT, ViewCommand::ZoomOut),
-            (ZOOM_TO_WINDOW, ViewCommand::ZoomToWindow),
-            (ACTUAL_SIZE, ViewCommand::ActualSize),
-        ];
+        let typing = ctx.memory(|memory| memory.focused().is_some());
+        let view_shortcuts = ViewCommand::MENU
+            .into_iter()
+            .flatten()
+            .filter_map(|&command| Some((command.shortcut()?, command)))
+            .chain([(ZOOM_IN_EQUALS, ViewCommand::ZoomIn)]);
         for (shortcut, command) in view_shortcuts {
-            if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+            // Snap to Grid takes S with Shift, which would otherwise go to the selection
+            // tools' key, so it goes first, but not while typing.
+            if (command != ViewCommand::SnapToGrid || !typing) && ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
                 self.run(command);
             }
         }
         // Not while typing, nor while a drag would carry on with another tool than it began with.
-        let busy = ctx.memory(|memory| memory.focused().is_some()) || self.is_dragging();
+        let busy = typing || self.is_dragging();
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::SELECT_KEY)) {
             self.set_tool(self.tools.next_select_tool());
         }
@@ -1037,7 +1327,6 @@ impl App {
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&colors_panel::RESET_KEY)) {
             self.tools.colors.reset();
         }
-        let typing = ctx.memory(|memory| memory.focused().is_some());
         if !typing {
             // Undo would take Redo's other keys as well, so they go first.
             if ctx.input_mut(|input| input.consume_shortcut(&REDO_SHIFT) || input.consume_shortcut(&REDO)) {
@@ -1355,6 +1644,7 @@ impl eframe::App for App {
             });
         });
 
+        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         // The tools have nothing to work on until an image is open.
         if self.current.is_some() {
             egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
@@ -1401,10 +1691,13 @@ impl eframe::App for App {
 
         // The image goes right up to the panels around it.
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(0.0);
+        let grid = self.shown_grid();
+        let checker_size = self.shown_checkerboard().size;
+        self.tools.snap = grid.snapping();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| match self.current {
             Some(current) => {
                 let image = &mut self.images[current];
-                let output = canvas::show(ui, image, &mut self.tools, &mut self.icons, &self.checker);
+                let output = canvas::show(ui, image, &mut self.tools, &mut self.icons, &self.checker, checker_size, &grid);
                 self.pointer_pixel = output.pointer_pixel;
                 if let Some(tool) = output.tool_requested {
                     self.set_tool(tool);
@@ -1423,9 +1716,13 @@ impl eframe::App for App {
         if self.closing.is_some() {
             self.cancel_layer_dialog(&ctx);
             self.size_dialog = None;
+            self.grid_dialog = None;
+            self.checkerboard_dialog = None;
         }
         self.layer_dialog(&ctx);
         self.size_dialog(&ctx);
+        self.grid_dialog(&ctx);
+        self.checkerboard_dialog(&ctx);
         self.unsaved_prompt(&ctx);
         self.flatten_prompt(&ctx);
         show_errors(&ctx, "open_errors", "Could not open", &mut self.open_errors);

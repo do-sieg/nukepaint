@@ -64,9 +64,19 @@ fn load_svg(path: &Path) -> Result<RgbaImage, OpenError> {
 /// Draws an SVG image at `scale` times its own size, into straight RGBA pixels.
 pub fn render_svg(data: &[u8], scale: f32) -> Result<RgbaImage, OpenError> {
     let tree = usvg::Tree::from_data(data, &usvg::Options::default()).map_err(OpenError::Svg)?;
+    render_tree(&tree, scale)
+}
+
+/// Draws an SVG image `width` pixels wide, its height in proportion, into straight RGBA pixels.
+pub fn render_svg_to_width(data: &[u8], width: f32) -> Result<RgbaImage, OpenError> {
+    let tree = usvg::Tree::from_data(data, &usvg::Options::default()).map_err(OpenError::Svg)?;
+    render_tree(&tree, width / tree.size().width())
+}
+
+fn render_tree(tree: &usvg::Tree, scale: f32) -> Result<RgbaImage, OpenError> {
     let size = tree.size().to_int_size().scale_by(scale).ok_or(OpenError::EmptySvg)?;
     let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height()).ok_or(OpenError::EmptySvg)?;
-    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    resvg::render(tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
 
     // The pixmap is premultiplied.
     let pixels = pixmap

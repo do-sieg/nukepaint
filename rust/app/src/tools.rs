@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     colors_panel::Colors,
     frame_select::{FrameSelect, Shape},
+    grid::Cells,
     icons::{self, Icon},
 };
 
@@ -261,6 +262,8 @@ pub struct Tools {
     /// for the Paint Bucket to fill it.
     pub tolerance: u32,
     pub sample_source: SampleSource,
+    /// The grid's cells, while the selection tools and the selection's box snap to them.
+    pub snap: Option<Cells>,
 }
 
 impl Default for Tools {
@@ -282,6 +285,7 @@ impl Default for Tools {
             contiguous: true,
             tolerance: 50,
             sample_source: SampleSource::default(),
+            snap: None,
         }
     }
 }

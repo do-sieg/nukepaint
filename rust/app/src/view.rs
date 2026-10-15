@@ -104,9 +104,13 @@ impl View {
 
     /// The corner between pixels nearest to a point of the screen, within the image.
     pub fn corner_at(&self, point: Pos2) -> (i32, i32) {
-        let corner = ((point - self.image_rect().min) * self.pixels_per_point / self.zoom).round();
+        self.nearest_corner(self.point_at(point))
+    }
+
+    /// The corner between pixels nearest to a point of the image, within it.
+    pub fn nearest_corner(&self, (x, y): (f64, f64)) -> (i32, i32) {
         let max = self.image_size;
-        (corner.x.clamp(0.0, max.x) as i32, corner.y.clamp(0.0, max.y) as i32)
+        (x.round().clamp(0.0, max.x as f64) as i32, y.round().clamp(0.0, max.y as f64) as i32)
     }
 
     /// Where a point of the image, in pixels, is on screen.

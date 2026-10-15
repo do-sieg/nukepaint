@@ -11,7 +11,8 @@
 //! of its box, or the one out from its bottom right corner, or rotate it from around
 //! the box. The selection shows as a tinted area in a dashed outline, with a button by it: with the
 //! selection tools and Move Selection, to go from one to the other, and with the other
-//! tools, to deselect.
+//! tools, to deselect. The grid shows over the image; while snapping to it, the
+//! selection tools put their corners on its cells' corners.
 
 use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -24,14 +25,13 @@ use power_paint_core::{
 use crate::{
     OpenImage,
     frame_select::Shape,
+    grid::{self, Cells, Grid},
     icons::{self, Icon, Icons},
     tools::{RightClick, SampleSource, Tool, Tools, ZoomDrag},
     transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, Transform},
     view::View,
 };
 
-/// Side, in pixels, of each checkerboard square behind the image.
-const CHECKER_CELL: f32 = 8.0;
 const CHECKER_LIGHT: Color32 = Color32::from_gray(204);
 const CHECKER_DARK: Color32 = Color32::from_gray(153);
 /// How far, in points, a touchpad scrolls with Ctrl held to go one zoom level.
@@ -129,6 +129,8 @@ pub fn show(
     tools: &mut Tools,
     icons: &mut Icons,
     checker: &TextureHandle,
+    checker_size: u32,
+    grid: &Grid,
 ) -> Output {
     let pixels_per_point = ui.ctx().pixels_per_point();
     let viewport = ui.available_rect_before_wrap();
@@ -148,11 +150,12 @@ pub fn show(
             let (_, response) = ui.allocate_exact_size(image_size.max(ui.available_size()), Sense::drag());
             let rect = image.view.image_rect();
             let painter = ui.painter();
-            paint_checker(painter, rect, CHECKER_CELL / pixels_per_point, checker);
+            paint_checker(painter, rect, checker_size as f32 / pixels_per_point, checker);
             let transform = image.transform.as_ref();
             if !transform.is_some_and(|transform| transform.paint_preview(painter, &image.view)) {
                 image.texture.paint(painter, rect, 1.0);
             }
+            grid::paint_lines(painter, &image.view, grid);
             response
         });
     image.view.offset = output.state.offset;
@@ -303,10 +306,11 @@ fn use_tool(
     let dragged = response.dragged() && response.drag_delta() != Vec2::ZERO;
     if dragged && let Some(at) = response.interact_pointer_pos() {
         if tools.frame_select.is_dragging() {
-            tools.frame_select.drag_to(&mut image.document.selection, image.view.corner_at(at), shift);
+            let corner = corner_at(&image.view, at, tools.snap);
+            tools.frame_select.drag_to(&mut image.document.selection, corner, shift);
         }
         if let Some(transform) = image.transform.as_mut()
-            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift)
+            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift, tools.snap)
         {
             image.document.selection = selection;
         }
@@ -565,7 +569,7 @@ fn use_drawing_tool(
         }
         let shift = ui.input(|input| input.modifiers.shift);
         if let Some(transform) = image.transform.as_mut()
-            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift)
+            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift, tools.snap)
         {
             image.document.selection = selection;
         }
@@ -682,8 +686,7 @@ fn seed() -> u64 {
 /// all else.
 fn paint_cursor(ui: &egui::Ui, icons: &mut Icons, cursor: Icon, hotspot: Vec2, at: Pos2) {
     ui.ctx().set_cursor_icon(CursorIcon::None);
-    // At the size its file is drawn for, as the icons are at theirs.
-    let texture = icons.get(ui.ctx(), cursor);
+    let texture = icons.get_sized(ui.ctx(), cursor, CURSOR_SIZE.x);
     let layer = egui::LayerId::new(egui::Order::Tooltip, ui.id().with("tool_cursor"));
     let corner = (at - hotspot).round_to_pixels(ui.ctx().pixels_per_point());
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
@@ -714,7 +717,17 @@ fn start_selecting(image: &mut OpenImage, tools: &mut Tools, shape: Shape, press
     image.transform = None;
     let mode = if command { SelectionMode::Add } else { tools.selection_mode };
     let view = &image.view;
-    tools.frame_select.press(&mut image.document.selection, shape, view.corner_at(press), view.pixel_at(press), mode);
+    let corner = corner_at(view, press, tools.snap);
+    tools.frame_select.press(&mut image.document.selection, shape, corner, view.pixel_at(press), mode);
+}
+
+/// The corner between pixels where the selection tools put a corner of the selection,
+/// for a point of the screen: the nearest one, or the nearest corner of a cell of `snap`.
+fn corner_at(view: &View, at: Pos2, snap: Option<Cells>) -> (i32, i32) {
+    match snap {
+        Some(cells) => view.nearest_corner(cells.snap(view.point_at(at))),
+        None => view.corner_at(at),
+    }
 }
 
 /// A selection tool ends drawing the selection, which is a step if it changed anything.

@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions, Vec2};
-use power_paint_core::render_svg;
+use power_paint_core::render_svg_to_width;
 
-/// Size of an icon, in points, which the SVG files are drawn for.
-pub const ICON_SIZE: Vec2 = Vec2::splat(16.0);
+/// Size the icons show at, in points, which their files are scaled to.
+pub const ICON_SIZE: Vec2 = Vec2::splat(20.0);
 
 #[derive(Clone, Copy)]
 pub struct Icon {
@@ -58,6 +58,12 @@ pub const CROP: Icon = icon!("crop");
 pub const CUT: Icon = icon!("cut");
 pub const PASTE: Icon = icon!("paste");
 pub const ERASE: Icon = icon!("erase");
+pub const SAVE: Icon = icon!("save");
+pub const SAVE_AS: Icon = icon!("save_as");
+pub const COPY: Icon = icon!("copy");
+pub const GRID: Icon = icon!("grid");
+pub const GRID_SNAP: Icon = icon!("grid_snap");
+pub const GRID_SETTINGS: Icon = icon!("grid_settings");
 pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
@@ -110,6 +116,7 @@ pub struct Icons {
 }
 
 impl Icons {
+    /// The icon to show [`ICON_SIZE`] wide.
     pub fn get(&mut self, ctx: &egui::Context, icon: Icon) -> &TextureHandle {
         self.get_sized(ctx, icon, ICON_SIZE.x)
     }
@@ -123,8 +130,7 @@ impl Icons {
         }
         self.textures.entry((icon.name, side.to_bits())).or_insert_with(|| {
             // The icons are part of the app, so one that cannot be drawn is a bug.
-            let scale = pixels_per_point * side / ICON_SIZE.x;
-            let image = render_svg(icon.svg, scale).expect("icons are valid SVG");
+            let image = render_svg_to_width(icon.svg, pixels_per_point * side).expect("icons are valid SVG");
             let size = [image.width() as usize, image.height() as usize];
             let pixels = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
             ctx.load_texture(format!("{} icon", icon.name), pixels, TextureOptions::LINEAR)

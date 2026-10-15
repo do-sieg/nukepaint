@@ -2589,6 +2589,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "eframe",
+ "naga",
  "power-paint-core",
  "rfd",
  "serde",

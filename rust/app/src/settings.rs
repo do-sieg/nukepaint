@@ -4,7 +4,7 @@ use std::{fs, path::{Path, PathBuf}};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{dock::DockLayout, tools::RightClick};
+use crate::{checkerboard::Checkerboard, dock::DockLayout, grid::Grid, tools::RightClick};
 
 const MAX_RECENT_FILES: usize = 10;
 
@@ -17,7 +17,10 @@ pub struct Settings {
     recent_files: Vec<PathBuf>,
     /// What the right button does with the tools that draw in a colour.
     right_click: RightClick,
-    /// Which dock each section is in. Last, as it is a table.
+    /// Last, as they are tables.
+    grid: Grid,
+    checkerboard: Checkerboard,
+    /// Which dock each section is in.
     dock: DockLayout,
 }
 
@@ -77,6 +80,24 @@ impl Settings {
 
     pub fn clear_recent_files(&mut self) {
         self.recent_files.clear();
+        self.save();
+    }
+
+    pub fn grid(&self) -> &Grid {
+        &self.grid
+    }
+
+    pub fn set_grid(&mut self, grid: Grid) {
+        self.grid = grid;
+        self.save();
+    }
+
+    pub fn checkerboard(&self) -> &Checkerboard {
+        &self.checkerboard
+    }
+
+    pub fn set_checkerboard(&mut self, checkerboard: Checkerboard) {
+        self.checkerboard = checkerboard;
         self.save();
     }
 
