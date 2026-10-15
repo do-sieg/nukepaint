@@ -194,6 +194,14 @@ struct Floating {
     base_texture: TiledTexture,
 }
 
+impl Floating {
+    fn new(ctx: &egui::Context, pixels: FloatingPixels) -> Self {
+        let texture = TiledTexture::new(ctx, "floating pixels", pixels.pixels());
+        let base_texture = TiledTexture::new(ctx, "floating base", pixels.base());
+        Self { pixels, texture, base_texture }
+    }
+}
+
 pub struct Transform {
     /// The box around the selection when the transform began, and the selection then.
     start: Bounds,
@@ -209,13 +217,23 @@ impl Transform {
     /// is nothing to move without a selection.
     pub fn begin(ctx: &egui::Context, selection: &Selection, layer: Option<&RgbaImage>) -> Option<Self> {
         let start = selection.bounds()?;
-        let floating = layer.and_then(|layer| {
-            let pixels = FloatingPixels::lift(layer, selection)?;
-            let texture = TiledTexture::new(ctx, "floating pixels", pixels.pixels());
-            let base_texture = TiledTexture::new(ctx, "floating base", pixels.base());
-            Some(Floating { pixels, texture, base_texture })
-        });
+        let floating = layer.and_then(|layer| FloatingPixels::lift(layer, selection));
+        let floating = floating.map(|pixels| Floating::new(ctx, pixels));
         Some(Self { start, selection_start: selection.clone(), floating, state: BoxState::around(start), drag: None })
+    }
+
+    /// Starts moving pasted pixels, selected all around.
+    pub fn begin_pasted(ctx: &egui::Context, pixels: FloatingPixels) -> Self {
+        let selection = Selection::rect(pixels.area());
+        // Pasted pixels are never empty, so neither is their selection.
+        let start = selection.bounds().expect("pasted pixels are selected");
+        let floating = Some(Floating::new(ctx, pixels));
+        Self { start, selection_start: selection, floating, state: BoxState::around(start), drag: None }
+    }
+
+    /// The selection the box holds.
+    pub fn selection(&self) -> Selection {
+        self.selection_start.transformed(&self.affine())
     }
 
     pub fn state(&self) -> BoxState {
@@ -268,10 +286,6 @@ impl Transform {
             self.state = drag.from;
         }
         self.selection()
-    }
-
-    fn selection(&self) -> Selection {
-        self.selection_start.transformed(&self.affine())
     }
 
     /// Maps the box as it was at first onto the box as it is now.

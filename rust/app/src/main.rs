@@ -10,8 +10,11 @@ mod view;
 
 use std::path::{Path, PathBuf};
 
-use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
-use power_paint_core::{Document, OPEN_EXTENSIONS, SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail};
+use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
+use power_paint_core::{
+    Affine, Document, FloatingPixels, OPEN_EXTENSIONS, RgbaImage, SAVE_EXTENSIONS, SelectionMode, is_savable,
+    thumbnail,
+};
 use icons::{ICON_SIZE, Icons};
 use settings::Settings;
 use tiled_texture::TiledTexture;
@@ -24,6 +27,13 @@ const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S)
 const SAVE_AS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+// Cut and the copies come as events of their own rather than as keys: these are for the menu.
+const CUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::X);
+const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
+const COPY_MERGED: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::C);
+const PASTE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::V);
+const PASTE_INTO_NEW_IMAGE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::V);
+const ERASE_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Delete);
 const ZOOM_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
 /// Plus is a shifted key on most keyboards, so the key it shares counts as well.
 const ZOOM_IN_EQUALS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
@@ -81,6 +91,17 @@ enum ViewCommand {
     ActualSize,
 }
 
+/// What the Edit menu and its shortcuts do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditCommand {
+    Cut,
+    Copy,
+    CopyMerged,
+    Paste,
+    PasteIntoNewImage,
+    EraseSelection,
+}
+
 /// What is being closed, waiting on the user to say what becomes of unsaved changes.
 enum Closing {
     Image(usize),
@@ -119,6 +140,8 @@ struct App {
     pointer_pixel: Option<(i64, i64)>,
     icons: Icons,
     tools: Tools,
+    /// The pixels copied last, kept in the app until the system clipboard takes images.
+    clipboard: Option<RgbaImage>,
 }
 
 impl App {
@@ -140,6 +163,7 @@ impl App {
             pointer_pixel: None,
             icons: Icons::default(),
             tools: Tools::default(),
+            clipboard: None,
         }
     }
 
@@ -171,17 +195,22 @@ impl App {
                     continue;
                 }
             };
-            let flat = document.flattened();
-            let texture = TiledTexture::new(ctx, &document.name(), &flat);
-            let view = View::new(texture.size());
-            let thumbnail = make_thumbnail(ctx, &document.name(), &flat);
             if let Some(dir) = path.parent() {
                 self.settings.set_last_dir(dir);
             }
             self.settings.add_recent_file(&path);
-            self.images.push(OpenImage { document, texture, thumbnail, view, transform: None });
-            self.select(self.images.len() - 1);
+            self.add_image(ctx, document);
         }
+    }
+
+    /// Shows the document as the current image, after the others.
+    fn add_image(&mut self, ctx: &egui::Context, document: Document) {
+        let flat = document.flattened();
+        let texture = TiledTexture::new(ctx, &document.name(), &flat);
+        let view = View::new(texture.size());
+        let thumbnail = make_thumbnail(ctx, &document.name(), &flat);
+        self.images.push(OpenImage { document, texture, thumbnail, view, transform: None });
+        self.select(self.images.len() - 1);
     }
 
     fn find_image(&self, path: &Path) -> Option<usize> {
@@ -361,6 +390,103 @@ impl App {
         });
     }
 
+    fn can_edit(&self, command: EditCommand) -> bool {
+        if command == EditCommand::PasteIntoNewImage {
+            return self.clipboard.is_some();
+        }
+        let Some(current) = self.current else {
+            return false;
+        };
+        match command {
+            // A drag would carry on with pixels that are no longer there, or not yet.
+            EditCommand::Paste => self.clipboard.is_some() && !self.is_dragging(),
+            EditCommand::Cut | EditCommand::EraseSelection if self.is_dragging() => false,
+            _ => !self.images[current].document.selection.is_empty(),
+        }
+    }
+
+    fn edit(&mut self, ctx: &egui::Context, command: EditCommand) {
+        if !self.can_edit(command) {
+            return;
+        }
+        match command {
+            EditCommand::Paste => self.paste(ctx),
+            EditCommand::PasteIntoNewImage => {
+                let mut document = Document::new(self.clipboard.clone().unwrap());
+                // Closing it asks whether to save it, as it is in no file.
+                document.unsaved = true;
+                self.add_image(ctx, document);
+            }
+            EditCommand::Cut | EditCommand::Copy | EditCommand::CopyMerged | EditCommand::EraseSelection => {
+                self.copy_or_erase(ctx, command);
+            }
+        }
+    }
+
+    fn copy_or_erase(&mut self, ctx: &egui::Context, command: EditCommand) {
+        let image = &mut self.images[self.current.unwrap()];
+        let document = &mut image.document;
+        let copied = match command {
+            EditCommand::Cut | EditCommand::Copy => document.copy(),
+            EditCommand::CopyMerged => document.copy_merged(),
+            _ => None,
+        };
+        // Nothing replaces what was copied before when the selection is off the image.
+        if copied.is_some() {
+            self.clipboard = copied;
+        }
+        if matches!(command, EditCommand::Cut | EditCommand::EraseSelection) && document.erase_selection() {
+            // A transform would go on from the pixels as they were before.
+            image.transform = None;
+            image.refresh(ctx);
+        }
+    }
+
+    /// Pastes into the active layer, at the selection's top left corner or the image's
+    /// without one. The pixels can then be moved, resized and rotated with the
+    /// selection's box, over what is under them, until the selection changes some other way.
+    fn paste(&mut self, ctx: &egui::Context) {
+        let Some(current) = self.current else {
+            return;
+        };
+        // Move Selection would move the outline of the pasted pixels, without them.
+        let tool = if self.tools.tool == Tool::MoveSelection { self.tools.last_select_tool } else { self.tools.tool };
+        // Which ends any transform, putting down the pixels it held.
+        self.set_tool(tool);
+        let image = &mut self.images[current];
+        let document = &mut image.document;
+        let bounds = document.selection.bounds();
+        let at = bounds.map_or((0, 0), |bounds| (bounds.left.floor() as i32, bounds.top.floor() as i32));
+        let layer = &mut document.layers[document.active_layer].pixels;
+        let floating = FloatingPixels::pasted(layer, self.clipboard.clone().unwrap(), at);
+        *layer = floating.place(&Affine::IDENTITY);
+        let transform = Transform::begin_pasted(ctx, floating);
+        document.selection = transform.selection();
+        document.unsaved = true;
+        image.transform = Some(transform);
+        image.refresh(ctx);
+    }
+
+    fn edit_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.menu_button("Edit", |ui| {
+            let items = [
+                ("Cut", CUT, EditCommand::Cut),
+                ("Copy", COPY, EditCommand::Copy),
+                ("Copy Merged", COPY_MERGED, EditCommand::CopyMerged),
+                ("Paste", PASTE, EditCommand::Paste),
+                ("Paste in to New Image", PASTE_INTO_NEW_IMAGE, EditCommand::PasteIntoNewImage),
+                ("Erase Selection", ERASE_SELECTION, EditCommand::EraseSelection),
+            ];
+            for (label, shortcut, command) in items {
+                let button = egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
+                if ui.add_enabled(self.can_edit(command), button).clicked() {
+                    self.edit(&ctx, command);
+                }
+            }
+        });
+    }
+
     /// The settings of the tool, under the menu bar.
     fn tool_options(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -479,6 +605,35 @@ impl App {
         }
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::MOVE_SELECTION_KEY)) {
             self.set_tool(Tool::MoveSelection);
+        }
+        let typing = ctx.memory(|memory| memory.focused().is_some());
+        if !typing {
+            let (cut, copy, shift) = ctx.input(|input| {
+                let has = |wanted: &Event| input.events.iter().any(|event| event == wanted);
+                (has(&Event::Cut), has(&Event::Copy), input.modifiers.shift)
+            });
+            if cut {
+                self.edit(ctx, EditCommand::Cut);
+            }
+            if copy {
+                self.edit(ctx, if shift { EditCommand::CopyMerged } else { EditCommand::Copy });
+            }
+            // Pressing Ctrl+V gives no event unless the system clipboard holds text, so
+            // pasting waits for the key to be let go.
+            let pasted = ctx.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command => {
+                        Some(modifiers.alt)
+                    }
+                    _ => None,
+                })
+            });
+            if let Some(alt) = pasted {
+                self.edit(ctx, if alt { EditCommand::PasteIntoNewImage } else { EditCommand::Paste });
+            }
+            if ctx.input_mut(|input| input.consume_shortcut(&ERASE_SELECTION)) {
+                self.edit(ctx, EditCommand::EraseSelection);
+            }
         }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN)) {
             self.show_open_dialog(ctx);
@@ -666,6 +821,7 @@ impl eframe::App for App {
             // The strip goes in the menu bar, which takes the whole row.
             egui::MenuBar::new().ui(ui, |ui| {
                 self.file_menu(ui);
+                self.edit_menu(ui);
                 self.view_menu(ui);
                 let action = image_strip::show(ui, &self.images, self.current, scroll_to_current, &self.checker);
                 match action {

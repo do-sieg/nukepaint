@@ -6,6 +6,7 @@ mod files;
 mod floating;
 mod layer;
 mod scale;
+mod selected_pixels;
 mod selection;
 
 pub use affine::Affine;
@@ -15,4 +16,5 @@ pub use floating::FloatingPixels;
 pub use image::RgbaImage;
 pub use layer::Layer;
 pub use scale::{halve, thumbnail};
+pub use selected_pixels::{copy_selected, erase_selected};
 pub use selection::{Bounds, PixelRect, Selection, SelectionMode};

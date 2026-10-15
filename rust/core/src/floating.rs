@@ -4,7 +4,7 @@
 
 use image::{Rgba, RgbaImage};
 
-use crate::{Affine, PixelRect, Selection};
+use crate::{Affine, PixelRect, Selection, copy_selected, erase_selected};
 
 pub struct FloatingPixels {
     /// Where on the layer the pixels were lifted from.
@@ -18,29 +18,18 @@ pub struct FloatingPixels {
 impl FloatingPixels {
     /// Lifts the selected pixels of the layer, if any of the selection is on it.
     pub fn lift(layer: &RgbaImage, selection: &Selection) -> Option<Self> {
-        let bounds = selection.bounds()?;
-        let area = PixelRect {
-            left: (bounds.left.floor() as i32).max(0),
-            top: (bounds.top.floor() as i32).max(0),
-            right: (bounds.right.ceil() as i32).min(layer.width() as i32),
-            bottom: (bounds.bottom.ceil() as i32).min(layer.height() as i32),
-        };
-        let spans = selection.spans(area);
-        if spans.is_empty() {
-            return None;
-        }
-        let mut pixels = RgbaImage::new(area.width() as u32, area.height() as u32);
+        let (area, pixels) = copy_selected(layer, selection)?;
         let mut base = layer.clone();
-        for span in spans {
-            for y in span.top..span.bottom {
-                for x in span.left..span.right {
-                    let (x, y) = (x as u32, y as u32);
-                    pixels.put_pixel(x - area.left as u32, y - area.top as u32, *layer.get_pixel(x, y));
-                    base.put_pixel(x, y, Rgba([0, 0, 0, 0]));
-                }
-            }
-        }
+        erase_selected(&mut base, selection);
         Some(Self { area, pixels, base })
+    }
+
+    /// Pixels put over the layer with their top left corner at `at`, which may leave
+    /// some of them off it.
+    pub fn pasted(layer: &RgbaImage, pixels: RgbaImage, at: (i32, i32)) -> Self {
+        let (width, height) = (pixels.width() as i32, pixels.height() as i32);
+        let area = PixelRect { left: at.0, top: at.1, right: at.0 + width, bottom: at.1 + height };
+        Self { area, pixels, base: layer.clone() }
     }
 
     pub fn area(&self) -> PixelRect {
@@ -170,6 +159,18 @@ mod tests {
         assert!(floating.pixels().pixels().all(|&pixel| pixel == RED));
         assert_eq!(*floating.base().get_pixel(2, 3), CLEAR);
         assert_eq!(*floating.base().get_pixel(4, 3), BLUE);
+    }
+
+    #[test]
+    fn pasting_keeps_what_is_under() {
+        let pasted = FloatingPixels::pasted(&layer(), RgbaImage::from_pixel(2, 2, RED), (6, 6));
+        assert_eq!(pasted.base(), &layer());
+        let placed = pasted.place(&Affine::IDENTITY);
+        assert_eq!(*placed.get_pixel(7, 7), RED);
+        // Moved away, the layer is as it was.
+        assert_eq!(pasted.place(&Affine::translation(-6.0, 0.0)).get_pixel(7, 7), &BLUE);
+        // Off the layer, nothing is placed.
+        assert_eq!(pasted.place(&Affine::translation(10.0, 10.0)), layer());
     }
 
     #[test]
