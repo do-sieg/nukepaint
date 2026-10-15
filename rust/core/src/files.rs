@@ -1,10 +1,22 @@
-use std::{fmt, fs, io, path::Path};
+use std::{
+    fmt,
+    fs::{self, File},
+    io::{self, BufWriter},
+    path::Path,
+};
 
-use image::RgbaImage;
+use image::{DynamicImage, ImageFormat, RgbaImage, codecs::jpeg::JpegEncoder};
 use resvg::{tiny_skia, usvg};
 
 /// File extensions that can be opened, lower case.
 pub const OPEN_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "webp", "tga", "svg"];
+
+/// File extensions that can be saved to, lower case. The first is the one to use
+/// when a file has none of them.
+pub const SAVE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tga"];
+
+/// How good JPEG files are made, from 1 to 100.
+const JPEG_QUALITY: u8 = 90;
 
 #[derive(Debug)]
 pub enum OpenError {
@@ -66,4 +78,55 @@ pub fn render_svg(data: &[u8], scale: f32) -> Result<RgbaImage, OpenError> {
         })
         .collect();
     Ok(RgbaImage::from_raw(size.width(), size.height(), pixels).expect("pixmap size matches"))
+}
+
+/// Whether a file of that name can be saved to, from its extension.
+pub fn is_savable(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        SAVE_EXTENSIONS.iter().any(|savable| extension.eq_ignore_ascii_case(savable))
+    })
+}
+
+/// Writes straight RGBA pixels to a file, in the format its extension names. JPEG
+/// files have no transparency, so it is dropped from them.
+pub fn save_image(path: &Path, image: &RgbaImage) -> Result<(), image::ImageError> {
+    let format = ImageFormat::from_path(path)?;
+    if format == ImageFormat::Jpeg {
+        let rgb = DynamicImage::ImageRgba8(image.clone()).into_rgb8();
+        let file = BufWriter::new(File::create(path)?);
+        return rgb.write_with_encoder(JpegEncoder::new_with_quality(file, JPEG_QUALITY));
+    }
+    image.save_with_format(path, format)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn savable_from_the_extension() {
+        assert!(is_savable(Path::new("a/b.PNG")));
+        assert!(is_savable(Path::new("b.jpeg")));
+        assert!(!is_savable(Path::new("b.svg")));
+        assert!(!is_savable(Path::new("png")));
+    }
+
+    #[test]
+    fn saved_pixels_open_again() {
+        let dir = std::env::temp_dir().join(format!("power-paint-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let image = RgbaImage::from_fn(3, 2, |x, y| image::Rgba([x as u8 * 80, y as u8 * 100, 50, 128]));
+        for extension in ["png", "webp", "tga"] {
+            let path = dir.join(format!("image.{extension}"));
+            save_image(&path, &image).unwrap();
+            assert_eq!(load_image(&path).unwrap(), image, "{extension}");
+        }
+        // JPEG keeps the size, not the transparency.
+        let path = dir.join("image.jpg");
+        save_image(&path, &image).unwrap();
+        let loaded = load_image(&path).unwrap();
+        assert_eq!(loaded.dimensions(), (3, 2));
+        assert!(loaded.pixels().all(|pixel| pixel[3] == 255));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

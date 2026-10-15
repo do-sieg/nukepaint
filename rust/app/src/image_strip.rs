@@ -1,6 +1,7 @@
 //! The open images, side by side as thumbnails in a row that scrolls. A click on
 //! one makes it the current image. Its close button, or a middle click, closes it.
-//! When they do not all fit, arrows at both ends scroll the row.
+//! When they do not all fit, arrows at both ends scroll the row. A dot marks the
+//! images with unsaved changes.
 
 use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, TextureHandle, Vec2};
 
@@ -12,6 +13,8 @@ pub const THUMBNAIL_SIZE: f32 = 48.0;
 const THUMBNAIL_MARGIN: f32 = 4.0;
 const CHECKER_CELL: f32 = 4.0;
 const CLOSE_SIZE: f32 = 16.0;
+const UNSAVED_DOT_RADIUS: f32 = 3.0;
+const UNSAVED_COLOR: Color32 = Color32::from_rgb(255, 191, 51);
 const ARROW_WIDTH: f32 = 16.0;
 /// How long, in seconds, an arrow is held before the row scrolls on its own.
 const ARROW_REPEAT_DELAY: f64 = 0.4;
@@ -117,6 +120,12 @@ fn thumbnail(ui: &mut egui::Ui, image: &OpenImage, selected: bool, checker: &Tex
     painter.image(image.thumbnail.id(), picture, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
     painter.rect_stroke(picture, 0.0, Stroke::new(1.0, Color32::from_black_alpha(128)), StrokeKind::Outside);
 
+    if image.document.unsaved {
+        // In the bottom left corner, as long as there are changes to save.
+        let center = rect.left_bottom() + Vec2::new(THUMBNAIL_MARGIN + 4.0, -THUMBNAIL_MARGIN - 4.0);
+        painter.circle(center, UNSAVED_DOT_RADIUS, UNSAVED_COLOR, Stroke::new(1.0, Color32::BLACK));
+    }
+
     // Only the current image, and the one under the pointer, show their close button.
     if selected || hovered {
         let background = if close.hovered() { Color32::from_black_alpha(200) } else { Color32::from_black_alpha(120) };
@@ -125,10 +134,13 @@ fn thumbnail(ui: &mut egui::Ui, image: &OpenImage, selected: bool, checker: &Tex
     }
 
     let document = &image.document;
-    let tooltip = match &document.path {
+    let mut tooltip = match &document.path {
         Some(path) => format!("{}\n{}", document.name(), path.display()),
         None => document.name(),
     };
+    if document.unsaved {
+        tooltip.push_str("\nUnsaved changes");
+    }
     let response = response.on_hover_text(tooltip);
     let close_requested = close.on_hover_text("Close").clicked() || response.middle_clicked();
     (response, close_requested)

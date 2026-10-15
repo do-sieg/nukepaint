@@ -10,7 +10,7 @@ mod selection;
 
 pub use affine::Affine;
 pub use document::Document;
-pub use files::{OPEN_EXTENSIONS, OpenError, load_image, render_svg};
+pub use files::{OPEN_EXTENSIONS, OpenError, SAVE_EXTENSIONS, is_savable, load_image, render_svg, save_image};
 pub use floating::FloatingPixels;
 pub use image::RgbaImage;
 pub use layer::Layer;

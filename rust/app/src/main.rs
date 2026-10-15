@@ -11,7 +11,7 @@ mod view;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
-use power_paint_core::{Document, OPEN_EXTENSIONS, SelectionMode, thumbnail};
+use power_paint_core::{Document, OPEN_EXTENSIONS, SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail};
 use icons::{ICON_SIZE, Icons};
 use settings::Settings;
 use tiled_texture::TiledTexture;
@@ -20,6 +20,8 @@ use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const SAVE_AS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const ZOOM_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
@@ -29,18 +31,20 @@ const ZOOM_OUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key
 const ZOOM_TO_WINDOW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 const ACTUAL_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0);
 
+const APP_NAME: &str = "Power Paint";
+
 /// Widest the list of recent files gets, in points.
 const WELCOME_WIDTH: f32 = 600.0;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Power Paint")
+            .with_title(APP_NAME)
             .with_inner_size([1280.0, 800.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("Power Paint", options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
+    eframe::run_native(APP_NAME, options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
 }
 
 /// A document with the textures that show it.
@@ -77,6 +81,21 @@ enum ViewCommand {
     ActualSize,
 }
 
+/// What is being closed, waiting on the user to say what becomes of unsaved changes.
+enum Closing {
+    Image(usize),
+    /// The whole app, once every image has been saved or given up on, as these ones were.
+    Quit { discarded: Vec<usize> },
+}
+
+/// What the user chose to do with unsaved changes.
+#[derive(Clone, Copy)]
+enum UnsavedChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
 struct App {
     images: Vec<OpenImage>,
     current: Option<usize>,
@@ -86,6 +105,14 @@ struct App {
     pending_paths: Vec<PathBuf>,
     /// Files that could not be opened, with why, until the user closes the message.
     open_errors: Vec<String>,
+    /// Files that could not be saved, with why, until the user closes the message.
+    save_errors: Vec<String>,
+    /// Set while asking whether to save the changes of what is being closed.
+    closing: Option<Closing>,
+    /// Set once the user has said what to do with every unsaved change, for the window to close.
+    may_quit: bool,
+    /// What the window's title was last set to.
+    title: String,
     settings: Settings,
     checker: TextureHandle,
     /// The pixel under the pointer, while it is over the image's view.
@@ -104,6 +131,10 @@ impl App {
             scroll_to_current: false,
             pending_paths: std::env::args_os().skip(1).map(PathBuf::from).collect(),
             open_errors: Vec::new(),
+            save_errors: Vec::new(),
+            closing: None,
+            may_quit: false,
+            title: APP_NAME.to_owned(),
             settings: Settings::load(),
             checker: canvas::checker_texture(ctx),
             pointer_pixel: None,
@@ -165,6 +196,70 @@ impl App {
         self.scroll_to_current = true;
     }
 
+    /// Saves the image to its own file, or to one the user picks when `ask_path` is set
+    /// or its own file cannot be saved to. Returns whether it was saved.
+    fn save(&mut self, index: usize, ask_path: bool) -> bool {
+        let document = &self.images[index].document;
+        let path = match &document.path {
+            Some(path) if !ask_path && is_savable(path) => path.clone(),
+            _ => match self.pick_save_path(document) {
+                Some(path) => path,
+                None => return false,
+            },
+        };
+        if let Err(error) = self.images[index].document.save(&path) {
+            self.save_errors.push(format!("{}: {error}", path.display()));
+            return false;
+        }
+        if let Some(dir) = path.parent() {
+            self.settings.set_last_dir(dir);
+        }
+        self.settings.add_recent_file(&path);
+        true
+    }
+
+    /// Asks where to save the document. A name without an extension that can be saved
+    /// to is saved as PNG.
+    fn pick_save_path(&self, document: &Document) -> Option<PathBuf> {
+        let own = document.path.as_deref();
+        let name = match own {
+            Some(path) if is_savable(path) => document.name(),
+            _ => {
+                let name = document.name();
+                let stem = Path::new(&name).file_stem().map(|stem| stem.to_string_lossy().into_owned());
+                format!("{}.{}", stem.unwrap_or(name), SAVE_EXTENSIONS[0])
+            }
+        };
+        let mut dialog = rfd::FileDialog::new()
+            .set_file_name(name)
+            .add_filter("Images", SAVE_EXTENSIONS)
+            .add_filter("PNG", &["png"])
+            .add_filter("JPEG", &["jpg", "jpeg"])
+            .add_filter("WebP", &["webp"])
+            .add_filter("BMP", &["bmp"])
+            .add_filter("TGA", &["tga"]);
+        if let Some(dir) = own.and_then(Path::parent).or(self.settings.last_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let path = dialog.save_file()?;
+        if is_savable(&path) {
+            return Some(path);
+        }
+        let mut path = path.into_os_string();
+        path.push(".");
+        path.push(SAVE_EXTENSIONS[0]);
+        Some(PathBuf::from(path))
+    }
+
+    /// Closes the image, first asking whether to save its changes if it has any.
+    fn request_close(&mut self, index: usize) {
+        if self.images[index].document.unsaved {
+            self.closing = Some(Closing::Image(index));
+        } else {
+            self.close(index);
+        }
+    }
+
     /// Closes the image. The one after it becomes current, or the last one if it was last.
     fn close(&mut self, index: usize) {
         self.images.remove(index);
@@ -201,9 +296,18 @@ impl App {
                 }
             });
             ui.separator();
+            let save = egui::Button::new("Save").shortcut_text(ctx.format_shortcut(&SAVE));
+            if ui.add_enabled(self.current.is_some(), save).clicked() {
+                self.save(self.current.unwrap(), false);
+            }
+            let save_as = egui::Button::new("Save As…").shortcut_text(ctx.format_shortcut(&SAVE_AS));
+            if ui.add_enabled(self.current.is_some(), save_as).clicked() {
+                self.save(self.current.unwrap(), true);
+            }
+            ui.separator();
             let close = egui::Button::new("Close").shortcut_text(ctx.format_shortcut(&CLOSE));
             if ui.add_enabled(self.current.is_some(), close).clicked() {
-                self.close(self.current.unwrap());
+                self.request_close(self.current.unwrap());
             }
             if ui.add(egui::Button::new("Quit").shortcut_text(ctx.format_shortcut(&QUIT))).clicked() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -352,6 +456,10 @@ impl App {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Nothing else happens while the user is asked about unsaved changes.
+        if self.closing.is_some() {
+            return;
+        }
         let view_shortcuts = [
             (ZOOM_IN, ViewCommand::ZoomIn),
             (ZOOM_IN_EQUALS, ViewCommand::ZoomIn),
@@ -375,10 +483,19 @@ impl App {
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN)) {
             self.show_open_dialog(ctx);
         }
+        // Not while a drag has yet to put the pixels where it takes them.
+        if let Some(current) = self.current.filter(|_| !self.is_dragging()) {
+            // Save would take Save As's keys as well, so it goes first.
+            if ctx.input_mut(|input| input.consume_shortcut(&SAVE_AS)) {
+                self.save(current, true);
+            } else if ctx.input_mut(|input| input.consume_shortcut(&SAVE)) {
+                self.save(current, false);
+            }
+        }
         if ctx.input_mut(|input| input.consume_shortcut(&CLOSE))
             && let Some(current) = self.current
         {
-            self.close(current);
+            self.request_close(current);
         }
         if ctx.input_mut(|input| input.consume_shortcut(&QUIT)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -416,21 +533,101 @@ impl App {
         }
     }
 
-    fn show_open_errors(&mut self, ctx: &egui::Context) {
-        if self.open_errors.is_empty() {
-            return;
-        }
-        let response = egui::Modal::new(egui::Id::new("open_errors")).show(ctx, |ui| {
-            ui.heading("Could not open");
-            for error in &self.open_errors {
-                ui.label(error);
+    /// Asks whether to save the changes of what is being closed, one image at a time,
+    /// and closes it once the user has said.
+    fn unsaved_prompt(&mut self, ctx: &egui::Context) {
+        let index = match &self.closing {
+            None => return,
+            Some(Closing::Image(index)) => *index,
+            Some(Closing::Quit { discarded }) => {
+                let next = (0..self.images.len())
+                    .find(|index| self.images[*index].document.unsaved && !discarded.contains(index));
+                let Some(index) = next else {
+                    self.closing = None;
+                    self.may_quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                };
+                index
             }
-            ui.add_space(8.0);
-            ui.button("OK").clicked()
-        });
-        if response.inner || response.should_close() {
-            self.open_errors.clear();
+        };
+        // The image asked about is the one in view.
+        if self.current != Some(index) {
+            self.select(index);
         }
+
+        let name = self.images[index].document.name();
+        let response = egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
+            ui.heading("Unsaved changes");
+            ui.label(format!("Save changes to {name}?"));
+            ui.add_space(8.0);
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let buttons =
+                    [("Save", UnsavedChoice::Save), ("Don't Save", UnsavedChoice::Discard), ("Cancel", UnsavedChoice::Cancel)];
+                for (label, button_choice) in buttons {
+                    if ui.button(label).clicked() {
+                        choice = Some(button_choice);
+                    }
+                }
+            });
+            choice
+        });
+        let choice = if response.should_close() { Some(UnsavedChoice::Cancel) } else { response.inner };
+
+        let quitting = matches!(self.closing, Some(Closing::Quit { .. }));
+        match choice {
+            None => {}
+            Some(UnsavedChoice::Cancel) => self.closing = None,
+            // Saving can be given up on as well, or fail.
+            Some(UnsavedChoice::Save) if !self.save(index, false) => self.closing = None,
+            // Quitting goes on to the next image with changes, closing none until then.
+            Some(UnsavedChoice::Save) if quitting => {}
+            Some(UnsavedChoice::Discard) if quitting => {
+                if let Some(Closing::Quit { discarded }) = &mut self.closing {
+                    discarded.push(index);
+                }
+            }
+            Some(UnsavedChoice::Save | UnsavedChoice::Discard) => {
+                self.closing = None;
+                self.close(index);
+            }
+        }
+    }
+
+    /// Shows the name of the current image in the window's title, marked when it has
+    /// unsaved changes.
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = match self.current {
+            Some(current) => {
+                let document = &self.images[current].document;
+                let mark = if document.unsaved { "*" } else { "" };
+                format!("{mark}{} — {APP_NAME}", document.name())
+            }
+            None => APP_NAME.to_owned(),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+    }
+}
+
+/// Shows why files could not be opened or saved, until the user closes the message.
+fn show_errors(ctx: &egui::Context, id: &str, heading: &str, errors: &mut Vec<String>) {
+    if errors.is_empty() {
+        return;
+    }
+    let response = egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
+        ui.heading(heading);
+        for error in errors.iter() {
+            ui.label(error);
+        }
+        ui.add_space(8.0);
+        ui.button("OK").clicked()
+    });
+    if response.inner || response.should_close() {
+        errors.clear();
     }
 }
 
@@ -454,6 +651,14 @@ impl eframe::App for App {
         if !paths.is_empty() {
             self.open_paths(&ctx, paths);
         }
+        // Closing the window, from its title bar or with Quit, first asks about unsaved changes.
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if close_requested && !self.may_quit && self.images.iter().any(|image| image.document.unsaved) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if !matches!(self.closing, Some(Closing::Quit { .. })) {
+                self.closing = Some(Closing::Quit { discarded: Vec::new() });
+            }
+        }
         self.handle_shortcuts(&ctx);
 
         let scroll_to_current = std::mem::take(&mut self.scroll_to_current);
@@ -465,13 +670,16 @@ impl eframe::App for App {
                 let action = image_strip::show(ui, &self.images, self.current, scroll_to_current, &self.checker);
                 match action {
                     Some(image_strip::Action::Select(index)) => self.select(index),
-                    Some(image_strip::Action::Close(index)) => self.close(index),
+                    Some(image_strip::Action::Close(index)) => self.request_close(index),
                     None => {}
                 }
             });
         });
 
-        egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
+        // The tools have nothing to work on until an image is open.
+        if self.current.is_some() {
+            egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
+        }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
 
         // The image goes right up to the panels around it.
@@ -491,6 +699,9 @@ impl eframe::App for App {
             }
         });
 
-        self.show_open_errors(&ctx);
+        self.unsaved_prompt(&ctx);
+        show_errors(&ctx, "open_errors", "Could not open", &mut self.open_errors);
+        show_errors(&ctx, "save_errors", "Could not save", &mut self.save_errors);
+        self.update_title(&ctx);
     }
 }

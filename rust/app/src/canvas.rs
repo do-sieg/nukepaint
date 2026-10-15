@@ -223,6 +223,7 @@ fn use_tool(
             if let Some(pixels) = placed {
                 let active = image.document.active_layer;
                 image.document.layers[active].pixels = pixels;
+                image.document.unsaved = true;
                 image.refresh(ui.ctx());
             }
             // A click on the box of a selection tool does what a click with the tool does.

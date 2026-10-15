@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use image::RgbaImage;
 
-use crate::{Layer, OpenError, Selection, load_image};
+use crate::{Layer, OpenError, Selection, load_image, save_image};
 
 /// An image being edited: its layers, bottom first, and the file it came from.
 pub struct Document {
@@ -11,6 +11,8 @@ pub struct Document {
     pub layers: Vec<Layer>,
     pub active_layer: usize,
     pub selection: Selection,
+    /// Whether the pixels changed since the document was opened or last saved.
+    pub unsaved: bool,
 }
 
 impl Document {
@@ -22,7 +24,17 @@ impl Document {
             layers: vec![Layer::new("Background", pixels)],
             active_layer: 0,
             selection: Selection::default(),
+            unsaved: false,
         })
+    }
+
+    /// Writes the image to a file, in the format its extension names, and makes that
+    /// file the document's own.
+    pub fn save(&mut self, path: &Path) -> Result<(), image::ImageError> {
+        save_image(path, &self.flattened())?;
+        self.path = Some(path.to_path_buf());
+        self.unsaved = false;
+        Ok(())
     }
 
     /// The file name, or "Untitled" for a document never saved.
