@@ -16,6 +16,7 @@ pub const PAN_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key
 pub const PAINTBRUSH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::B);
 pub const PENCIL_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::P);
 pub const ERASER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::E);
+pub const SPRAY_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::A);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -28,10 +29,11 @@ pub enum Tool {
     Paintbrush,
     Pencil,
     Eraser,
+    Spray,
 }
 
 impl Tool {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::MoveSelection,
@@ -40,6 +42,7 @@ impl Tool {
         Self::Paintbrush,
         Self::Pencil,
         Self::Eraser,
+        Self::Spray,
     ];
     const SELECT_TOOLS: [Self; 2] = [Self::RectangleSelect, Self::EllipseSelect];
 
@@ -53,6 +56,7 @@ impl Tool {
             Self::Paintbrush => "Paintbrush",
             Self::Pencil => "Pencil",
             Self::Eraser => "Eraser",
+            Self::Spray => "Spray",
         }
     }
 
@@ -66,6 +70,7 @@ impl Tool {
             Self::Paintbrush => icons::PAINTBRUSH,
             Self::Pencil => icons::PENCIL,
             Self::Eraser => icons::ERASER,
+            Self::Spray => icons::SPRAY,
         }
     }
 
@@ -78,6 +83,7 @@ impl Tool {
             Self::Paintbrush => PAINTBRUSH_KEY,
             Self::Pencil => PENCIL_KEY,
             Self::Eraser => ERASER_KEY,
+            Self::Spray => SPRAY_KEY,
         }
     }
 
@@ -116,6 +122,11 @@ impl Tool {
                  selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows by \
                  its corner to move it, or around it to rotate it."
             }
+            Self::Spray => {
+                "Hold to scatter dots of the colour around the pointer, which build up the longer it stays. With \
+                 a selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows \
+                 by its corner to move it, or around it to rotate it."
+            }
         }
     }
 
@@ -124,18 +135,24 @@ impl Tool {
         match self {
             Self::RectangleSelect => Some(Shape::Rectangle),
             Self::EllipseSelect => Some(Shape::Ellipse),
-            Self::MoveSelection | Self::Zoom | Self::Pan | Self::Paintbrush | Self::Pencil | Self::Eraser => None,
+            Self::MoveSelection
+            | Self::Zoom
+            | Self::Pan
+            | Self::Paintbrush
+            | Self::Pencil
+            | Self::Eraser
+            | Self::Spray => None,
         }
     }
 
-    /// Whether the tool draws lines on the active layer.
+    /// Whether the tool draws on the active layer.
     pub fn draws(self) -> bool {
-        matches!(self, Self::Paintbrush | Self::Pencil | Self::Eraser)
+        matches!(self, Self::Paintbrush | Self::Pencil | Self::Eraser | Self::Spray)
     }
 
     /// Whether the tool can draw with smooth edges.
     pub fn can_smooth(self) -> bool {
-        matches!(self, Self::Paintbrush | Self::Eraser)
+        matches!(self, Self::Paintbrush | Self::Eraser | Self::Spray)
     }
 }
 
@@ -149,10 +166,14 @@ pub struct Tools {
     pub zoom_drag: Option<ZoomDrag>,
     /// What the drawing tools draw with, in straight RGBA.
     pub color: Rgba<u8>,
-    /// How wide the Paintbrush, the Pencil and the Eraser draw, in pixels.
+    /// How wide the Paintbrush, the Pencil and the Eraser draw, and the Spray sprays,
+    /// in pixels.
     pub brush_size: u32,
     pub pencil_size: u32,
     pub eraser_size: u32,
+    pub spray_size: u32,
+    /// How fast the Spray leaves dots, as a percentage of the fastest it can.
+    pub spray_speed: u32,
     /// Whether the tools that can draw with smooth edges do.
     pub antialiasing: bool,
 }
@@ -169,6 +190,8 @@ impl Default for Tools {
             brush_size: 2,
             pencil_size: 1,
             eraser_size: 8,
+            spray_size: 32,
+            spray_speed: 25,
             antialiasing: true,
         }
     }
@@ -197,6 +220,7 @@ impl Tools {
         match self.tool {
             Tool::Paintbrush => self.brush_size,
             Tool::Eraser => self.eraser_size,
+            Tool::Spray => self.spray_size,
             _ => self.pencil_size,
         }
     }
@@ -207,11 +231,12 @@ impl Tools {
             Tool::Paintbrush => Some(&mut self.brush_size),
             Tool::Pencil => Some(&mut self.pencil_size),
             Tool::Eraser => Some(&mut self.eraser_size),
+            Tool::Spray => Some(&mut self.spray_size),
             _ => None,
         }
     }
 
-    /// What the tool leaves on the pixels it goes over, for the drawing tools.
+    /// What the tool leaves on the pixels it goes over, for the tools that draw lines.
     pub fn ink(&self) -> Option<Ink> {
         match self.tool {
             Tool::Paintbrush => Some(Ink::Paint(self.color)),

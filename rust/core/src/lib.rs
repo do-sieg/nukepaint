@@ -11,6 +11,7 @@ mod mask;
 mod scale;
 mod selected_pixels;
 mod selection;
+mod spray;
 mod stroke;
 
 pub use affine::Affine;
@@ -25,4 +26,5 @@ pub use mask::SelectionMask;
 pub use scale::{halve, thumbnail};
 pub use selected_pixels::{copy_selected, erase_selected};
 pub use selection::{Bounds, Frame, PixelRect, Selection, SelectionMode};
+pub use spray::{MAX_SPRAY_SIZE, Spray};
 pub use stroke::{BrushStroke, Ink, MAX_TIP_SIZE, hard_tip};

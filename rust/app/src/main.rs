@@ -15,10 +15,11 @@ mod view;
 
 use std::path::{Path, PathBuf};
 
+use canvas::Drawing;
 use dock::DockSide;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{
-    Affine, BrushStroke, Document, FloatingPixels, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, Rgba, RgbaImage,
+    Affine, Document, FloatingPixels, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, Rgba, RgbaImage,
     SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
@@ -84,8 +85,8 @@ pub struct OpenImage {
     pub view: View,
     /// The selection being moved, resized or rotated, and its pixels with the selection tools.
     pub transform: Option<Transform>,
-    /// The line being drawn on the active layer, until the button is let go.
-    pub stroke: Option<BrushStroke>,
+    /// What is being drawn on the active layer, until the button is let go.
+    pub stroke: Option<Drawing>,
 }
 
 impl OpenImage {
@@ -834,14 +835,21 @@ impl App {
         if let Some(size) = self.tools.tip_size_mut() {
             ui.separator();
             ui.label("Size:");
-            let size = egui::DragValue::new(size).range(1..=MAX_TIP_SIZE).suffix(" px");
+            let max = if tool == Tool::Spray { MAX_SPRAY_SIZE } else { MAX_TIP_SIZE };
+            let size = egui::DragValue::new(size).range(1..=max).suffix(" px");
             ui.add(size).on_hover_text(format!("How wide the {} draws.", tool.name()));
+        }
+        if tool == Tool::Spray {
+            ui.separator();
+            ui.label("Speed:");
+            let speed = egui::DragValue::new(&mut self.tools.spray_speed).range(1..=100).suffix(" %");
+            ui.add(speed).on_hover_text("How fast the Spray leaves dots, as a share of the fastest it can.");
         }
         if tool.can_smooth() {
             ui.separator();
             ui.checkbox(&mut self.tools.antialiasing, "Antialiasing").on_hover_text(
-                "On, the Paintbrush and the Eraser fade the edges of what they draw out over a pixel. Off, \
-                 their edges are hard, as the Pencil's always are.",
+                "On, the Paintbrush and the Eraser fade the edges of what they draw out over a pixel, and the \
+                 Spray's dots can land between pixels. Off, their edges are hard, as the Pencil's always are.",
             );
         }
         if tool != Tool::Eraser {
@@ -931,7 +939,8 @@ impl App {
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::SELECT_KEY)) {
             self.set_tool(self.tools.next_select_tool());
         }
-        for tool in [Tool::MoveSelection, Tool::Zoom, Tool::Pan, Tool::Paintbrush, Tool::Pencil, Tool::Eraser] {
+        // The selection tools share a key, which goes from one to the next.
+        for tool in Tool::ALL.into_iter().filter(|tool| tool.select_shape().is_none()) {
             if !busy && ctx.input_mut(|input| input.consume_shortcut(&tool.key())) {
                 self.set_tool(tool);
             }

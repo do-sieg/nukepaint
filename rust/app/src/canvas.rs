@@ -5,8 +5,9 @@
 //! rectangle or an ellipse, or move, resize and rotate the selected pixels from the
 //! selection's box, and Move Selection does the same to the selection alone. The Zoom
 //! tool zooms in on a left click or on the area a left drag frames, and out on a right
-//! click. The Paintbrush, the Pencil and the Eraser draw a line along a left drag, on
-//! the selected pixels alone if any are, or resize or move the selection from a handle
+//! click. The Paintbrush, the Pencil and the Eraser draw a line along a left drag, and
+//! the Spray leaves dots for as long as the left button is held, on the selected
+//! pixels alone if any are. They resize or move the selection from a handle
 //! of its box, or the one out from its bottom right corner, or rotate it from around
 //! the box. The selection shows as a tinted area in a dashed outline, with a button by it: with the
 //! selection tools and Move Selection, to go from one to the other, and with the other
@@ -16,7 +17,7 @@ use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
-use power_paint_core::{BrushStroke, Selection, SelectionMode, hard_tip};
+use power_paint_core::{BrushStroke, PixelRect, RgbaImage, Selection, SelectionMode, Spray, hard_tip};
 
 use crate::{
     OpenImage,
@@ -58,6 +59,35 @@ const OUTLINED_TIP: f32 = 8.0;
 /// and the point of theirs that draws, from its top left.
 const CURSOR_SIZE: Vec2 = Vec2::splat(24.0);
 const DRAWING_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
+const SPRAY_HOTSPOT: Vec2 = Vec2::new(6.0, 6.0);
+/// Longest a frame counts for while spraying, in seconds, so that a stall does not
+/// leave a burst of dots.
+const MAX_SPRAY_FRAME: f64 = 0.1;
+
+/// What a drawing tool is drawing on the active layer, until the button is let go.
+pub enum Drawing {
+    Line(BrushStroke),
+    Spray(Spray),
+}
+
+impl Drawing {
+    /// Whether it changed any pixel yet.
+    pub fn changed(&self) -> bool {
+        match self {
+            Self::Line(stroke) => stroke.changed(),
+            Self::Spray(spray) => spray.changed(),
+        }
+    }
+
+    /// Takes it on to the point `at` of the image, after `seconds` went by. Returns the
+    /// area it changed, if any of it is on the image.
+    fn go_to(&mut self, image: &mut RgbaImage, at: (f64, f64), seconds: f64) -> Option<PixelRect> {
+        match self {
+            Self::Line(stroke) => stroke.draw_to(image, at),
+            Self::Spray(spray) => spray.spray(image, at, seconds),
+        }
+    }
+}
 /// The point of the rotate cursor that is on the pointer, its middle.
 const ROTATE_HOTSPOT: Vec2 = Vec2::new(12.0, 12.0);
 
@@ -152,12 +182,13 @@ pub fn show(
     }
     if let Some(at) = drawing_at {
         paint_tip(&painter, &image.view, at, tools);
-        let cursor = match tools.tool {
-            Tool::Paintbrush => icons::CURSOR_PAINTBRUSH,
-            Tool::Eraser => icons::CURSOR_ERASER,
-            _ => icons::CURSOR_PENCIL,
+        let (cursor, hotspot) = match tools.tool {
+            Tool::Paintbrush => (icons::CURSOR_PAINTBRUSH, DRAWING_HOTSPOT),
+            Tool::Eraser => (icons::CURSOR_ERASER, DRAWING_HOTSPOT),
+            Tool::Spray => (icons::CURSOR_SPRAY, SPRAY_HOTSPOT),
+            _ => (icons::CURSOR_PENCIL, DRAWING_HOTSPOT),
         };
-        paint_cursor(ui, icons, cursor, DRAWING_HOTSPOT, at);
+        paint_cursor(ui, icons, cursor, hotspot, at);
     }
     let box_shown = box_state(image, tools);
     if let Some(state) = box_shown {
@@ -346,8 +377,8 @@ fn use_zoom(ui: &egui::Ui, response: &egui::Response, view: &mut View, tools: &m
     }
 }
 
-/// Works a drawing tool: a left drag draws a line on the active layer, which is a step
-/// once let go if it changed anything. A left drag from a handle of the selection's
+/// Works a drawing tool: a left drag draws a line on the active layer, or sprays dots
+/// for as long as it is held, which is a step once let go if it changed anything. A left drag from a handle of the selection's
 /// box resizes the selection instead, and one from the handle out from its bottom
 /// right corner moves it, and one from around the box rotates it, without its pixels,
 /// as Move Selection does.
@@ -379,20 +410,36 @@ fn use_drawing_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenIm
             let mask = image.document.selection_mask();
             let at = image.view.point_at(press);
             let layer = &mut image.document.active_mut().pixels;
-            let ink = tools.ink().expect("a drawing tool has ink");
-            let (stroke, area) = BrushStroke::begin(layer, at, ink, tools.tip_size(), tools.smooth(), mask);
+            let (drawing, area) = match tools.ink() {
+                Some(ink) => {
+                    let (stroke, area) = BrushStroke::begin(layer, at, ink, tools.tip_size(), tools.smooth(), mask);
+                    (Drawing::Line(stroke), area)
+                }
+                None => {
+                    let (size, speed, smooth) = (tools.spray_size, tools.spray_speed, tools.smooth());
+                    let (spray, area) = Spray::begin(layer, at, tools.color, size, speed, smooth, mask, seed());
+                    (Drawing::Spray(spray), area)
+                }
+            };
             // Nothing to show again while all it went over was left as it was.
-            if let Some(area) = area.filter(|_| stroke.changed()) {
+            if let Some(area) = area.filter(|_| drawing.changed()) {
                 image.refresh_area(area);
             }
-            image.stroke = Some(stroke);
+            image.stroke = Some(drawing);
         }
     }
-    let dragged = response.dragged_by(PointerButton::Primary) && response.drag_delta() != Vec2::ZERO;
-    if dragged && let Some(at) = response.interact_pointer_pos() {
-        if let Some(stroke) = &mut image.stroke
-            && let Some(area) = stroke.draw_to(&mut image.document.active_mut().pixels, image.view.point_at(at))
-            && stroke.changed()
+    let held = response.dragged_by(PointerButton::Primary) && !response.drag_started();
+    let moved = held && response.drag_delta() != Vec2::ZERO;
+    // The Spray leaves dots as time goes by, whether the pointer moves or not.
+    let spraying = held && matches!(image.stroke, Some(Drawing::Spray(_)));
+    if spraying {
+        ui.ctx().request_repaint();
+    }
+    if (moved || spraying) && let Some(at) = response.interact_pointer_pos() {
+        let seconds = ui.input(|input| input.stable_dt as f64).min(MAX_SPRAY_FRAME);
+        if let Some(drawing) = &mut image.stroke
+            && let Some(area) = drawing.go_to(&mut image.document.active_mut().pixels, image.view.point_at(at), seconds)
+            && drawing.changed()
         {
             image.refresh_area(area);
         }
@@ -438,10 +485,12 @@ fn paint_tip(painter: &Painter, view: &View, at: Pos2, tools: &Tools) {
     });
     let pixel = 1.0 / painter.pixels_per_point();
     let tip_side = tools.tip_size() as f32 * view.zoom;
-    if tools.smooth() {
-        // A smooth tip is round about the point itself, not about a pixel.
+    if tools.smooth() || tools.tool == Tool::Spray {
+        // A smooth tip is round about the point itself, not about a pixel, and so is
+        // the area the Spray covers, which is left empty: it only fills up little by
+        // little.
         let radius = tools.tip_size() as f32 / 2.0 * view.zoom * pixel;
-        if let Some(fill) = fill {
+        if let Some(fill) = fill.filter(|_| tools.tool != Tool::Spray) {
             painter.circle_filled(at, radius, fill);
         }
         let ring = if tip_side >= OUTLINED_TIP { radius } else { radius + 1.5 * pixel };
@@ -501,6 +550,12 @@ fn paint_tip(painter: &Painter, view: &View, at: Pos2, tools: &Tools) {
             painter.rect_filled(bar, 0.0, color);
         }
     }
+}
+
+/// A different seed each time, for the Spray's dots to fall differently.
+fn seed() -> u64 {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    since.map_or(0, |since| since.as_nanos() as u64)
 }
 
 /// Shows a cursor drawn from `cursor` in place of the pointer, `hotspot` on it, over

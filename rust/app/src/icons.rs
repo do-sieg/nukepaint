@@ -30,9 +30,11 @@ pub const PAN: Icon = icon!("pan");
 pub const PAINTBRUSH: Icon = icon!("paintbrush");
 pub const PENCIL: Icon = icon!("pencil");
 pub const ERASER: Icon = icon!("eraser");
+pub const SPRAY: Icon = icon!("spray");
 pub const CURSOR_PAINTBRUSH: Icon = icon!("cursor_paintbrush");
 pub const CURSOR_PENCIL: Icon = icon!("cursor_pencil");
 pub const CURSOR_ERASER: Icon = icon!("cursor_eraser");
+pub const CURSOR_SPRAY: Icon = icon!("cursor_spray");
 pub const CURSOR_ROTATE: Icon = icon!("cursor_rotate");
 pub const SELECT_ALL: Icon = icon!("select_all");
 pub const DESELECT: Icon = icon!("deselect");
@@ -55,7 +57,7 @@ pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
 /// Those the history can list steps with, which it keeps by name.
-const STEP_ICONS: [Icon; 22] = [
+const STEP_ICONS: [Icon; 23] = [
     RECT_SELECT,
     ELLIPSE_SELECT,
     MOVE_SELECTION,
@@ -78,6 +80,7 @@ const STEP_ICONS: [Icon; 22] = [
     PAINTBRUSH,
     PENCIL,
     ERASER,
+    SPRAY,
 ];
 
 impl Icon {
