@@ -4,7 +4,7 @@ use std::{fs, path::{Path, PathBuf}};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{dock::DockSide, tools::RightClick};
+use crate::{dock::DockLayout, tools::RightClick};
 
 const MAX_RECENT_FILES: usize = 10;
 
@@ -15,18 +15,21 @@ pub struct Settings {
     last_dir: Option<PathBuf>,
     /// Files last opened, most recent first.
     recent_files: Vec<PathBuf>,
-    dock_side: DockSide,
     /// What the right button does with the tools that draw in a colour.
     right_click: RightClick,
+    /// Which dock each section is in. Last, as it is a table.
+    dock: DockLayout,
 }
 
 impl Settings {
     /// Reads the settings, or starts from the defaults if there are none or they cannot be read.
     pub fn load() -> Self {
-        file_path()
+        let mut settings: Self = file_path()
             .and_then(|path| fs::read_to_string(path).ok())
             .and_then(|text| toml::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings.dock.normalize();
+        settings
     }
 
     fn save(&self) {
@@ -77,12 +80,12 @@ impl Settings {
         self.save();
     }
 
-    pub fn dock_side(&self) -> DockSide {
-        self.dock_side
+    pub fn dock(&self) -> &DockLayout {
+        &self.dock
     }
 
-    pub fn set_dock_side(&mut self, side: DockSide) {
-        self.dock_side = side;
+    pub fn set_dock(&mut self, dock: DockLayout) {
+        self.dock = dock;
         self.save();
     }
 

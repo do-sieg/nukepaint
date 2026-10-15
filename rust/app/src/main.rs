@@ -19,7 +19,7 @@ mod view;
 use std::path::{Path, PathBuf};
 
 use canvas::Drawing;
-use dock::DockSide;
+use dock::{DockLayout, DockSide, Section};
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{
     Affine, Document, FloatingPixels, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, RgbaImage,
@@ -497,10 +497,15 @@ impl App {
             ui.separator();
             ui.menu_button("Dock", |ui| {
                 for side in DockSide::ALL {
-                    let selected = self.settings.dock_side() == side;
-                    if ui.radio(selected, format!("On the {}", side.name())).clicked() {
-                        self.settings.set_dock_side(side);
+                    if ui.button(format!("All Sections on the {}", side.name())).clicked() {
+                        let mut dock = self.settings.dock().clone();
+                        dock.move_all(side);
+                        self.settings.set_dock(dock);
                     }
+                }
+                ui.separator();
+                if ui.button("Reset").clicked() {
+                    self.settings.set_dock(DockLayout::default());
                 }
             });
         });
@@ -1365,23 +1370,23 @@ impl eframe::App for App {
             let (checker, icons) = (&self.checker, &mut self.icons);
             let (colors, right_click) = (&mut self.tools.colors, &mut self.tools.right_click);
             let right_click_before = *right_click;
-            let moved = dock::show(ui, self.settings.dock_side(), |ui| {
-                dock::section(ui, "Tools", |ui| tool_clicked = tools_panel::show(ui, icons, tool));
-                dock::section(ui, "Colors", |ui| colors.show(ui, right_click));
-                dock::section(ui, "History", |ui| {
+            let moved = dock::show(ui, self.settings.dock(), |ui, section| match section {
+                Section::Tools => tool_clicked = tools_panel::show(ui, icons, tool),
+                Section::Colors => colors.show(ui, right_click),
+                Section::History => {
                     let document = &image.document;
                     history_action = history_panel::show(ui, document, icons, !busy, scroll_to_current);
-                });
-                dock::section(ui, "Layers", |ui| {
+                }
+                Section::Layers => {
                     let enabled = |command: LayerCommand| !busy && command.can_run(&image.document);
                     layers_action = layers_panel::show(ui, image, checker, icons, enabled);
-                });
+                }
             });
             if self.tools.right_click != right_click_before {
                 self.settings.set_right_click(self.tools.right_click);
             }
-            if let Some(side) = moved {
-                self.settings.set_dock_side(side);
+            if let Some(dock) = moved {
+                self.settings.set_dock(dock);
             }
             if let Some(tool) = tool_clicked {
                 self.set_tool(tool);
