@@ -1,7 +1,7 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::{Ink, Interpolation, Overlaps, Rgba, SelectionMode, ShapeKind, ShapeStyle};
+use power_paint_core::{Ink, Interpolation, Overlaps, Retouch, Rgba, SelectionMode, ShapeKind, ShapeStyle};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -36,6 +36,8 @@ pub const ERASER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, 
 pub const SPRAY_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::A);
 pub const COLOR_PICKER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::K);
 pub const PAINT_BUCKET_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F);
+/// Goes from the Blur to the Sharpen and the Jumble.
+pub const RETOUCH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::R);
 /// Goes from the Line to the Curve and back.
 pub const LINE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::L);
 /// Goes from one of the Rectangles and the Ellipses to the next.
@@ -60,6 +62,9 @@ pub enum Tool {
     ColorPicker,
     Spray,
     PaintBucket,
+    Blur,
+    Sharpen,
+    Jumble,
     Line,
     Curve,
     Rectangle,
@@ -71,7 +76,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 25] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::LassoSelect,
@@ -86,6 +91,9 @@ impl Tool {
         Self::ColorPicker,
         Self::Spray,
         Self::PaintBucket,
+        Self::Blur,
+        Self::Sharpen,
+        Self::Jumble,
         Self::Line,
         Self::Curve,
         Self::Rectangle,
@@ -112,6 +120,9 @@ impl Tool {
             Self::ColorPicker => "Color Picker",
             Self::Spray => "Spray",
             Self::PaintBucket => "Paint Bucket",
+            Self::Blur => "Blur",
+            Self::Sharpen => "Sharpen",
+            Self::Jumble => "Jumble",
             Self::Line => "Line",
             Self::Curve => "Curve",
             Self::Rectangle => "Rectangle",
@@ -139,6 +150,9 @@ impl Tool {
             Self::ColorPicker => icons::COLOR_PICKER,
             Self::Spray => icons::SPRAY,
             Self::PaintBucket => icons::PAINT_BUCKET,
+            Self::Blur => icons::BLUR,
+            Self::Sharpen => icons::SHARPEN,
+            Self::Jumble => icons::JUMBLE,
             Self::Line => icons::LINE,
             Self::Curve => icons::CURVE,
             Self::Rectangle => icons::RECTANGLE,
@@ -164,6 +178,7 @@ impl Tool {
             Self::ColorPicker => COLOR_PICKER_KEY,
             Self::Spray => SPRAY_KEY,
             Self::PaintBucket => PAINT_BUCKET_KEY,
+            Self::Blur | Self::Sharpen | Self::Jumble => RETOUCH_KEY,
             Self::Line | Self::Curve => LINE_KEY,
             Self::Rectangle | Self::FilledRectangle | Self::Ellipse | Self::FilledEllipse => RECTANGLE_KEY,
             Self::Contour | Self::Polygon => CONTOUR_KEY,
@@ -243,6 +258,21 @@ impl Tool {
                  the secondary colour, or to pick the colour of the active layer, as Right click says. With a \
                  selection, only the selected pixels change."
             }
+            Self::Blur => {
+                "Drag over the active layer to soften it. Going over the same place again blurs it more. With a \
+                 selection, only the selected pixels change. With Selection controls on, drag a handle of its box to \
+                 resize it, the arrows by its corner to move it, or around it to rotate it."
+            }
+            Self::Sharpen => {
+                "Drag over the active layer to bring out its edges and details. Going over the same place again \
+                 sharpens it more. With a selection, only the selected pixels change. With Selection controls on, \
+                 drag a handle of its box to resize it, the arrows by its corner to move it, or around it to rotate it."
+            }
+            Self::Jumble => {
+                "Drag over the active layer to scatter its pixels, which makes no new colour. Faster strokes drag \
+                 them further along. With a selection, only the selected pixels change. With Selection controls on, \
+                 drag a handle of its box to resize it, the arrows by its corner to move it, or around it to rotate it."
+            }
             Self::Line => shape_help!("Drag to draw a line, at steps of 15° with Shift."),
             Self::Curve => shape_help!(
                 "Drag to draw a line, at steps of 15° with Shift, then drag the handles along it to bend it."
@@ -277,6 +307,9 @@ impl Tool {
             | Self::ColorPicker
             | Self::Spray
             | Self::PaintBucket
+            | Self::Blur
+            | Self::Sharpen
+            | Self::Jumble
             | Self::Line
             | Self::Curve
             | Self::Rectangle
@@ -327,9 +360,19 @@ impl Tool {
         matches!(self, Self::MagicWand | Self::PaintBucket)
     }
 
-    /// Whether the tool draws on the active layer.
+    /// What the tool does to the pixels it goes over, for the retouch tools.
+    pub fn retouch(self) -> Option<Retouch> {
+        match self {
+            Self::Blur => Some(Retouch::Blur),
+            Self::Sharpen => Some(Retouch::Sharpen),
+            Self::Jumble => Some(Retouch::Jumble),
+            _ => None,
+        }
+    }
+
+    /// Whether the tool draws on the active layer, or retouches it.
     pub fn draws(self) -> bool {
-        matches!(self, Self::Paintbrush | Self::Pencil | Self::Eraser | Self::Spray)
+        matches!(self, Self::Paintbrush | Self::Pencil | Self::Eraser | Self::Spray) || self.retouch().is_some()
     }
 
     /// Whether the tool draws in a colour, which the right button can change.
@@ -396,12 +439,22 @@ pub struct Tools {
     pub zoom_drag: Option<ZoomDrag>,
     /// The primary colour, which the drawing tools draw with, and the secondary one.
     pub colors: Colors,
-    /// How wide the Paintbrush, the Pencil and the Eraser draw, and the Spray sprays,
-    /// in pixels.
+    /// How wide the Paintbrush, the Pencil and the Eraser draw, the Spray sprays, and
+    /// the retouch tools go over, in pixels.
     pub brush_size: u32,
     pub pencil_size: u32,
     pub eraser_size: u32,
     pub spray_size: u32,
+    pub blur_size: u32,
+    pub sharpen_size: u32,
+    pub jumble_size: u32,
+    /// How much each pass of the Blur and the Sharpen does, as a percentage: at 100%,
+    /// the Blur makes each pixel the average of the 3 × 3 pixels around it, and the
+    /// Sharpen takes it as far again from that average. For the Jumble, the share of the
+    /// pixels gone over that each pass swaps for one nearby.
+    pub blur_strength: u32,
+    pub sharpen_strength: u32,
+    pub jumble_strength: u32,
     /// How fast the Spray leaves dots, as a percentage of the fastest it can.
     pub spray_speed: u32,
     /// Whether the tools that can draw with smooth edges do.
@@ -445,6 +498,12 @@ impl Default for Tools {
             pencil_size: 1,
             eraser_size: 8,
             spray_size: 32,
+            blur_size: 16,
+            sharpen_size: 16,
+            jumble_size: 16,
+            blur_strength: 50,
+            sharpen_strength: 50,
+            jumble_strength: 50,
             spray_speed: 25,
             antialiasing: true,
             right_click: RightClick::default(),
@@ -493,6 +552,9 @@ impl Tools {
             Tool::Paintbrush => self.brush_size,
             Tool::Eraser => self.eraser_size,
             Tool::Spray => self.spray_size,
+            Tool::Blur => self.blur_size,
+            Tool::Sharpen => self.sharpen_size,
+            Tool::Jumble => self.jumble_size,
             _ => self.pencil_size,
         }
     }
@@ -504,6 +566,28 @@ impl Tools {
             Tool::Pencil => Some(&mut self.pencil_size),
             Tool::Eraser => Some(&mut self.eraser_size),
             Tool::Spray => Some(&mut self.spray_size),
+            Tool::Blur => Some(&mut self.blur_size),
+            Tool::Sharpen => Some(&mut self.sharpen_size),
+            Tool::Jumble => Some(&mut self.jumble_size),
+            _ => None,
+        }
+    }
+
+    /// How much each pass of the retouch tool does, as a percentage.
+    pub fn strength(&self) -> u32 {
+        match self.tool {
+            Tool::Sharpen => self.sharpen_strength,
+            Tool::Jumble => self.jumble_strength,
+            _ => self.blur_strength,
+        }
+    }
+
+    /// How much each pass of the tool does, as a percentage, for the retouch tools.
+    pub fn strength_mut(&mut self) -> Option<&mut u32> {
+        match self.tool {
+            Tool::Blur => Some(&mut self.blur_strength),
+            Tool::Sharpen => Some(&mut self.sharpen_strength),
+            Tool::Jumble => Some(&mut self.jumble_strength),
             _ => None,
         }
     }
@@ -583,5 +667,10 @@ mod tests {
         assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::FilledEllipse, "the one used last");
         assert_eq!(tools.next_tool(LINE_KEY), Tool::Line);
         assert_eq!(tools.next_tool(PENCIL_KEY), Tool::Pencil);
+        assert_eq!(tools.next_tool(RETOUCH_KEY), Tool::Blur);
+        tools.set_tool(Tool::Blur);
+        assert_eq!(tools.next_tool(RETOUCH_KEY), Tool::Sharpen);
+        tools.set_tool(Tool::Sharpen);
+        assert_eq!(tools.next_tool(RETOUCH_KEY), Tool::Jumble);
     }
 }

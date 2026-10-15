@@ -123,17 +123,17 @@ impl Spray {
     }
 }
 
-/// Numbers that look random enough to scatter dots with: xorshift64*.
-struct Random(u64);
+/// Numbers that look random enough to scatter dots and jumble pixels with: xorshift64*.
+pub(crate) struct Random(u64);
 
 impl Random {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         // Never zero, which it would stay at.
         Self(seed | 1)
     }
 
     /// A number from 0 up to 1, not 1 itself.
-    fn next(&mut self) -> f64 {
+    pub(crate) fn next(&mut self) -> f64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;

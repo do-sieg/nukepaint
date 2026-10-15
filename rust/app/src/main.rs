@@ -1330,7 +1330,8 @@ impl App {
         }
     }
 
-    /// The drawing tool's width and whether it smooths its edges, as far as it has them.
+    /// The drawing tool's width and whether it smooths its edges, as far as it has them,
+    /// and whether the selection's controls show, while there is a selection.
     fn drawing_options(&mut self, ui: &mut egui::Ui) {
         let tool = self.tools.tool;
         if let Some(size) = self.tools.tip_size_mut() {
@@ -1338,7 +1339,8 @@ impl App {
             ui.label("Size:");
             let max = if tool == Tool::Spray { MAX_SPRAY_SIZE } else { MAX_TIP_SIZE };
             let size = egui::DragValue::new(size).range(1..=max).suffix(" px");
-            ui.add(size).on_hover_text(format!("How wide the {} draws.", tool.name()));
+            let verb = if tool.retouch().is_some() { "goes over" } else { "draws" };
+            ui.add(size).on_hover_text(format!("How wide the {} {verb}.", tool.name()));
         }
         if tool == Tool::Spray {
             ui.separator();
@@ -1346,8 +1348,23 @@ impl App {
             let speed = egui::DragValue::new(&mut self.tools.spray_speed).range(1..=100).suffix(" %");
             ui.add(speed).on_hover_text("How fast the Spray leaves dots, as a share of the fastest it can.");
         }
+        if let Some(strength) = self.tools.strength_mut() {
+            ui.separator();
+            ui.label("Strength:");
+            let help = match tool {
+                Tool::Jumble => "The share of the pixels gone over that each pass swaps for one nearby.",
+                Tool::Sharpen => "How much each pass sharpens. Going over the same place again sharpens it more.",
+                _ => "How much each pass blurs. Going over the same place again blurs it more.",
+            };
+            ui.add(egui::DragValue::new(strength).range(1..=100).suffix(" %")).on_hover_text(help);
+        }
         if tool.can_smooth() {
             self.antialiasing_option(ui);
+        }
+        // Without a selection, there is nothing for them to control.
+        let selected = self.current.is_some_and(|current| !self.images[current].document.selection.is_empty());
+        if !selected {
+            return;
         }
         ui.separator();
         let controls = ui.checkbox(&mut self.tools.selection_controls, "Selection controls").on_hover_text(

@@ -5,9 +5,9 @@
 //! rectangle or an ellipse, or move, resize and rotate the selected pixels from the
 //! selection's box, and Move Selection does the same to the selection alone. The Zoom
 //! tool zooms in on a left click or on the area a left drag frames, and out on a right
-//! click. The Paintbrush, the Pencil and the Eraser draw a line along a left drag, and
-//! the Spray leaves dots for as long as the left button is held, on the selected
-//! pixels alone if any are. Unless their selection controls are off, they resize or move the selection from a handle
+//! click. The Paintbrush, the Pencil and the Eraser draw a line along a left drag, the
+//! Blur, the Sharpen and the Jumble retouch the pixels along it, and the Spray leaves
+//! dots for as long as the left button is held, on the selected pixels alone if any are. Unless their selection controls are off, they resize or move the selection from a handle
 //! of its box, or the one out from its bottom right corner, or rotate it from around
 //! the box. The shape tools draw their shape, which their handles then change until it
 //! is finished. The selection shows as a tinted area in a dashed outline, with a button by it: with the
@@ -20,8 +20,8 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
 use power_paint_core::{
-    BrushStroke, FloodFill, PixelRect, Rgba, RgbaImage, Selection, SelectionMask, SelectionMode, ShapeKind, Spray,
-    hard_tip,
+    BrushStroke, FloodFill, PixelRect, RetouchStroke, Rgba, RgbaImage, Selection, SelectionMask, SelectionMode,
+    ShapeKind, Spray, hard_tip,
 };
 
 use crate::{
@@ -71,6 +71,8 @@ const OUTLINED_TIP: f32 = 8.0;
 const CURSOR_SIZE: Vec2 = Vec2::splat(24.0);
 const DRAWING_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
 const SPRAY_HOTSPOT: Vec2 = Vec2::new(6.0, 6.0);
+const RETOUCH_HOTSPOT: Vec2 = Vec2::new(12.0, 3.0);
+const JUMBLE_HOTSPOT: Vec2 = Vec2::new(4.0, 4.0);
 const COLOR_PICKER_HOTSPOT: Vec2 = Vec2::new(5.0, 19.0);
 const PAINT_BUCKET_HOTSPOT: Vec2 = Vec2::new(20.0, 21.0);
 const MAGIC_WAND_HOTSPOT: Vec2 = Vec2::new(8.0, 8.0);
@@ -82,6 +84,7 @@ const MAX_SPRAY_FRAME: f64 = 0.1;
 pub enum Drawing {
     Line(BrushStroke),
     Spray(Spray),
+    Retouch(RetouchStroke),
 }
 
 impl Drawing {
@@ -90,6 +93,7 @@ impl Drawing {
         match self {
             Self::Line(stroke) => stroke.changed(),
             Self::Spray(spray) => spray.changed(),
+            Self::Retouch(stroke) => stroke.changed(),
         }
     }
 
@@ -99,6 +103,7 @@ impl Drawing {
         match self {
             Self::Line(stroke) => stroke.draw_to(image, at),
             Self::Spray(spray) => spray.spray(image, at, seconds),
+            Self::Retouch(stroke) => stroke.draw_to(image, at),
         }
     }
 }
@@ -214,6 +219,9 @@ pub fn show(
             Tool::Paintbrush => (icons::CURSOR_PAINTBRUSH, DRAWING_HOTSPOT),
             Tool::Eraser => (icons::CURSOR_ERASER, DRAWING_HOTSPOT),
             Tool::Spray => (icons::CURSOR_SPRAY, SPRAY_HOTSPOT),
+            Tool::Blur => (icons::CURSOR_BLUR, RETOUCH_HOTSPOT),
+            Tool::Sharpen => (icons::CURSOR_SHARPEN, RETOUCH_HOTSPOT),
+            Tool::Jumble => (icons::CURSOR_JUMBLE, JUMBLE_HOTSPOT),
             _ => (icons::CURSOR_PENCIL, DRAWING_HOTSPOT),
         };
         paint_cursor(ui, icons, cursor, hotspot, at);
@@ -1066,12 +1074,17 @@ fn use_drawing_tool(
             let at = image.view.point_at(press);
             let layer = &mut image.document.active_mut().pixels;
             let color = if primary { tools.colors.primary } else { tools.colors.secondary };
-            let (drawing, area) = match tools.ink(color) {
-                Some(ink) => {
+            let (drawing, area) = match (tools.tool.retouch(), tools.ink(color)) {
+                (Some(retouch), _) => {
+                    let (size, strength) = (tools.tip_size(), tools.strength());
+                    let (stroke, area) = RetouchStroke::begin(layer, at, retouch, size, strength, mask, seed());
+                    (Drawing::Retouch(stroke), area)
+                }
+                (None, Some(ink)) => {
                     let (stroke, area) = BrushStroke::begin(layer, at, ink, tools.tip_size(), tools.smooth(), mask);
                     (Drawing::Line(stroke), area)
                 }
-                None => {
+                (None, None) => {
                     let (size, speed, smooth) = (tools.spray_size, tools.spray_speed, tools.smooth());
                     let (spray, area) = Spray::begin(layer, at, color, size, speed, smooth, mask, seed());
                     (Drawing::Spray(spray), area)
@@ -1143,16 +1156,17 @@ fn use_drawing_tool(
 /// edge. That would hide a smaller one, down to a single pixel, which is ringed from
 /// outside instead.
 fn paint_tip(painter: &Painter, view: &View, at: Pos2, tools: &Tools) {
-    let fill = (tools.tool != Tool::Eraser).then(|| {
+    let retouching = tools.tool.retouch().is_some();
+    let fill = (tools.tool != Tool::Eraser && !retouching).then(|| {
         let [red, green, blue, alpha] = tools.colors.primary.0;
         Color32::from_rgba_unmultiplied(red, green, blue, alpha)
     });
     let pixel = 1.0 / painter.pixels_per_point();
     let tip_side = tools.tip_size() as f32 * view.zoom;
-    if tools.smooth() || tools.tool == Tool::Spray {
-        // A smooth tip is round about the point itself, not about a pixel, and so is
-        // the area the Spray covers, which is left empty: it only fills up little by
-        // little.
+    if tools.smooth() || tools.tool == Tool::Spray || retouching {
+        // A smooth tip is round about the point itself, not about a pixel, and so are
+        // the areas the retouch tools go over, and the area the Spray covers, which is
+        // left empty: it only fills up little by little.
         let radius = tools.tip_size() as f32 / 2.0 * view.zoom * pixel;
         if let Some(fill) = fill.filter(|_| tools.tool != Tool::Spray) {
             painter.circle_filled(at, radius, fill);
