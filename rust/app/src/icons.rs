@@ -36,6 +36,14 @@ pub const ERASER: Icon = icon!("eraser");
 pub const SPRAY: Icon = icon!("spray");
 pub const COLOR_PICKER: Icon = icon!("color_picker");
 pub const PAINT_BUCKET: Icon = icon!("paint_bucket");
+pub const LINE: Icon = icon!("line");
+pub const CURVE: Icon = icon!("curve");
+pub const RECTANGLE: Icon = icon!("rectangle");
+pub const FILLED_RECTANGLE: Icon = icon!("filled_rectangle");
+pub const ELLIPSE: Icon = icon!("ellipse");
+pub const FILLED_ELLIPSE: Icon = icon!("filled_ellipse");
+pub const CONTOUR: Icon = icon!("contour");
+pub const POLYGON: Icon = icon!("polygon");
 pub const CURSOR_PAINTBRUSH: Icon = icon!("cursor_paintbrush");
 pub const CURSOR_PENCIL: Icon = icon!("cursor_pencil");
 pub const CURSOR_ERASER: Icon = icon!("cursor_eraser");
@@ -72,7 +80,7 @@ pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
 /// Those the history can list steps with, which it keeps by name.
-const STEP_ICONS: [Icon; 28] = [
+const STEP_ICONS: [Icon; 36] = [
     RECT_SELECT,
     LASSO_SELECT,
     ELLIPSE_SELECT,
@@ -101,6 +109,14 @@ const STEP_ICONS: [Icon; 28] = [
     ERASER,
     SPRAY,
     PAINT_BUCKET,
+    LINE,
+    CURVE,
+    RECTANGLE,
+    FILLED_RECTANGLE,
+    ELLIPSE,
+    FILLED_ELLIPSE,
+    CONTOUR,
+    POLYGON,
 ];
 
 impl Icon {

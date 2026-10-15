@@ -153,6 +153,11 @@ impl History {
         self.current
     }
 
+    /// The content of the current step's layers.
+    pub(crate) fn current_content(&self) -> usize {
+        self.states[self.current].content
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.states.len()
     }

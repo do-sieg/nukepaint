@@ -215,6 +215,13 @@ impl Composite {
     /// Sends the layer at `index` to the GPU again after its pixels changed over `area`,
     /// or anywhere without one, and blends the image again there.
     pub fn update_layer(&mut self, layers: &[Layer], index: usize, area: Option<PixelRect>) {
+        self.show_layer_as(layers, index, &layers[index].pixels, area);
+    }
+
+    /// Shows the layer at `index` with `pixels` in place of its own over `area`, or
+    /// anywhere without one, blending the image again there: for what is drawn on it
+    /// before it is part of it.
+    pub fn show_layer_as(&mut self, layers: &[Layer], index: usize, pixels: &RgbaImage, area: Option<PixelRect>) {
         let area = area.map_or(self.whole(), |area| intersect(area, self.whole()));
         if area.is_empty() {
             return;
@@ -223,7 +230,7 @@ impl Composite {
         for (tile, texture) in self.tiles.iter().zip(&self.layers[index]) {
             let part = intersect(tile.rect, area);
             if !part.is_empty() {
-                upload(&shared.queue, texture, &layers[index].pixels, tile.rect, part);
+                upload(&shared.queue, texture, pixels, tile.rect, part);
             }
         }
         self.blend(layers, area);

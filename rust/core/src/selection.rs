@@ -264,10 +264,18 @@ impl Selection {
     /// pixels, which can cross itself, as `overlaps` says. Nothing if it goes around
     /// no pixel's middle.
     pub fn polygon(corners: &[(i32, i32)], overlaps: Overlaps) -> Self {
-        if corners.len() < 3 {
+        let points: Vec<(f64, f64)> = corners.iter().map(|&(x, y)| (x as f64, y as f64)).collect();
+        Self::enclosed(&points, overlaps)
+    }
+
+    /// Selects the pixels whose middle is inside an outline through points of the image,
+    /// which can cross itself, as `overlaps` says. Nothing if it goes around no pixel's
+    /// middle.
+    pub fn enclosed(points: &[(f64, f64)], overlaps: Overlaps) -> Self {
+        if points.len() < 3 {
             return Self::default();
         }
-        let outline: Vec<[f64; 2]> = corners.iter().map(|&(x, y)| [x as f64, y as f64]).collect();
+        let outline: Vec<[f64; 2]> = points.iter().map(|&(x, y)| [x, y]).collect();
         let fill = match overlaps {
             Overlaps::Add => FillRule::NonZero,
             Overlaps::Subtract => FillRule::EvenOdd,

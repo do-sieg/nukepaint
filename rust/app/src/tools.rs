@@ -1,7 +1,7 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::{Ink, Interpolation, Overlaps, Rgba, SelectionMode};
+use power_paint_core::{Ink, Interpolation, Overlaps, Rgba, SelectionMode, ShapeKind, ShapeStyle};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -11,6 +11,19 @@ use crate::{
     icons::{self, Icon},
     lasso::LassoKind,
 };
+
+/// What the shape tools' help ends with, after how to draw the shape.
+macro_rules! shape_help {
+    ($drawing:literal) => {
+        concat!(
+            $drawing,
+            " It is drawn in the primary colour, or the secondary one with the right button, unless that picks \
+             a colour, as Right click says. Until Enter or Escape finishes it, drag its handles to change it, the \
+             shape itself to move it, or around it to rotate it, in steps of 15° with Shift, or the arrow keys \
+             to nudge it, and another colour, size or antialiasing redraws it. Hold Ctrl to draw another over it. With a selection, only the selected pixels change."
+        )
+    };
+}
 
 /// Goes from one selection tool to the next.
 pub const SELECT_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::S);
@@ -23,6 +36,12 @@ pub const ERASER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, 
 pub const SPRAY_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::A);
 pub const COLOR_PICKER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::K);
 pub const PAINT_BUCKET_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F);
+/// Goes from the Line to the Curve and back.
+pub const LINE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::L);
+/// Goes from one of the Rectangles and the Ellipses to the next.
+pub const RECTANGLE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::U);
+/// Goes from the Contour to the Polygon and back.
+pub const CONTOUR_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::O);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -41,10 +60,18 @@ pub enum Tool {
     ColorPicker,
     Spray,
     PaintBucket,
+    Line,
+    Curve,
+    Rectangle,
+    FilledRectangle,
+    Ellipse,
+    FilledEllipse,
+    Contour,
+    Polygon,
 }
 
 impl Tool {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 22] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::LassoSelect,
@@ -59,9 +86,15 @@ impl Tool {
         Self::ColorPicker,
         Self::Spray,
         Self::PaintBucket,
+        Self::Line,
+        Self::Curve,
+        Self::Rectangle,
+        Self::FilledRectangle,
+        Self::Ellipse,
+        Self::FilledEllipse,
+        Self::Contour,
+        Self::Polygon,
     ];
-    const SELECT_TOOLS: [Self; 5] =
-        [Self::RectangleSelect, Self::EllipseSelect, Self::LassoSelect, Self::PolygonSelect, Self::MagicWand];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -79,6 +112,14 @@ impl Tool {
             Self::ColorPicker => "Color Picker",
             Self::Spray => "Spray",
             Self::PaintBucket => "Paint Bucket",
+            Self::Line => "Line",
+            Self::Curve => "Curve",
+            Self::Rectangle => "Rectangle",
+            Self::FilledRectangle => "Filled Rectangle",
+            Self::Ellipse => "Ellipse",
+            Self::FilledEllipse => "Filled Ellipse",
+            Self::Contour => "Contour",
+            Self::Polygon => "Polygon",
         }
     }
 
@@ -98,6 +139,14 @@ impl Tool {
             Self::ColorPicker => icons::COLOR_PICKER,
             Self::Spray => icons::SPRAY,
             Self::PaintBucket => icons::PAINT_BUCKET,
+            Self::Line => icons::LINE,
+            Self::Curve => icons::CURVE,
+            Self::Rectangle => icons::RECTANGLE,
+            Self::FilledRectangle => icons::FILLED_RECTANGLE,
+            Self::Ellipse => icons::ELLIPSE,
+            Self::FilledEllipse => icons::FILLED_ELLIPSE,
+            Self::Contour => icons::CONTOUR,
+            Self::Polygon => icons::POLYGON,
         }
     }
 
@@ -115,6 +164,9 @@ impl Tool {
             Self::ColorPicker => COLOR_PICKER_KEY,
             Self::Spray => SPRAY_KEY,
             Self::PaintBucket => PAINT_BUCKET_KEY,
+            Self::Line | Self::Curve => LINE_KEY,
+            Self::Rectangle | Self::FilledRectangle | Self::Ellipse | Self::FilledEllipse => RECTANGLE_KEY,
+            Self::Contour | Self::Polygon => CONTOUR_KEY,
         }
     }
 
@@ -191,6 +243,20 @@ impl Tool {
                  the secondary colour, or to pick the colour of the active layer, as Right click says. With a \
                  selection, only the selected pixels change."
             }
+            Self::Line => shape_help!("Drag to draw a line, at steps of 15° with Shift."),
+            Self::Curve => shape_help!(
+                "Drag to draw a line, at steps of 15° with Shift, then drag the handles along it to bend it."
+            ),
+            Self::Rectangle => shape_help!("Drag to draw a rectangle, a square with Shift."),
+            Self::FilledRectangle => shape_help!("Drag to draw a filled rectangle, a square with Shift."),
+            Self::Ellipse => shape_help!("Drag to draw an ellipse, a circle with Shift."),
+            Self::FilledEllipse => shape_help!("Drag to draw a filled ellipse, a circle with Shift."),
+            Self::Contour => shape_help!("Drag around the area to fill."),
+            Self::Polygon => shape_help!(
+                "Click to put down corners. Double-click, click the first corner or press Enter to fill what they \
+                 go around; Backspace takes back the last corner, and Escape gives up. Then click an edge to add \
+                 a corner there, or right click a corner to remove it."
+            ),
         }
     }
 
@@ -210,7 +276,30 @@ impl Tool {
             | Self::Eraser
             | Self::ColorPicker
             | Self::Spray
-            | Self::PaintBucket => None,
+            | Self::PaintBucket
+            | Self::Line
+            | Self::Curve
+            | Self::Rectangle
+            | Self::FilledRectangle
+            | Self::Ellipse
+            | Self::FilledEllipse
+            | Self::Contour
+            | Self::Polygon => None,
+        }
+    }
+
+    /// What the tool draws, for the shape tools.
+    pub fn shape(self) -> Option<ShapeKind> {
+        match self {
+            Self::Line => Some(ShapeKind::Line),
+            Self::Curve => Some(ShapeKind::Curve),
+            Self::Rectangle => Some(ShapeKind::Rectangle),
+            Self::FilledRectangle => Some(ShapeKind::FilledRectangle),
+            Self::Ellipse => Some(ShapeKind::Ellipse),
+            Self::FilledEllipse => Some(ShapeKind::FilledEllipse),
+            Self::Contour => Some(ShapeKind::Contour),
+            Self::Polygon => Some(ShapeKind::Polygon),
+            _ => None,
         }
     }
 
@@ -245,12 +334,12 @@ impl Tool {
 
     /// Whether the tool draws in a colour, which the right button can change.
     pub fn draws_in_color(self) -> bool {
-        matches!(self, Self::Paintbrush | Self::Pencil | Self::Spray | Self::PaintBucket)
+        matches!(self, Self::Paintbrush | Self::Pencil | Self::Spray | Self::PaintBucket) || self.shape().is_some()
     }
 
     /// Whether the tool can draw with smooth edges.
     pub fn can_smooth(self) -> bool {
-        matches!(self, Self::Paintbrush | Self::Eraser | Self::Spray | Self::PaintBucket)
+        matches!(self, Self::Paintbrush | Self::Eraser | Self::Spray | Self::PaintBucket) || self.shape().is_some()
     }
 }
 
@@ -329,8 +418,13 @@ pub struct Tools {
     /// for the Magic Wand and the Paint Bucket to take it in.
     pub tolerance: u32,
     pub sample_source: SampleSource,
-    /// What the lassos' outlines shut in where they cross themselves.
+    /// What the lassos' outlines shut in where they cross themselves, and the Contour
+    /// and the Polygon fill.
     pub overlaps: Overlaps,
+    /// How wide the shape tools draw, in pixels.
+    pub shape_size: u32,
+    /// The tools used last, the latest last, one of each of those that share a key.
+    pub last_tools: Vec<Tool>,
     /// How the selection tools redraw the pixels they move, once they are not just
     /// moved by whole pixels.
     pub resampling: Interpolation,
@@ -359,6 +453,8 @@ impl Default for Tools {
             tolerance: 50,
             sample_source: SampleSource::default(),
             overlaps: Overlaps::default(),
+            shape_size: 2,
+            last_tools: Vec::new(),
             resampling: Interpolation::Bilinear,
             snap: None,
         }
@@ -381,6 +477,8 @@ impl Tools {
         if tool.selects() {
             self.last_select_tool = tool;
         }
+        self.last_tools.retain(|other| other.key() != tool.key());
+        self.last_tools.push(tool);
     }
 
     /// The selection tool that moves the selected pixels that Move Selection's button
@@ -425,13 +523,25 @@ impl Tools {
         self.antialiasing && self.tool.can_smooth()
     }
 
+    /// How the shape tools draw, in the secondary colour or the primary one.
+    pub fn shape_style(&self, secondary: bool) -> ShapeStyle {
+        let color = if secondary { self.colors.secondary } else { self.colors.primary };
+        ShapeStyle { color, size: self.shape_size, smooth: self.antialiasing, overlaps: self.overlaps }
+    }
+
     /// The next selection tool, or the one used last from another tool.
     pub fn next_select_tool(&self) -> Tool {
-        if !self.tool.selects() {
-            return self.last_select_tool;
+        self.next_tool(SELECT_KEY)
+    }
+
+    /// The tool a key goes to: from one of the tools that share it, the next of them,
+    /// and from another tool, the one of them used last, or the first.
+    pub fn next_tool(&self, key: KeyboardShortcut) -> Tool {
+        let sharing: Vec<Tool> = Tool::ALL.into_iter().filter(|tool| tool.key() == key).collect();
+        match sharing.iter().position(|&tool| tool == self.tool) {
+            Some(index) => sharing[(index + 1) % sharing.len()],
+            None => self.last_tools.iter().rev().copied().find(|tool| tool.key() == key).unwrap_or(sharing[0]),
         }
-        let index = Tool::SELECT_TOOLS.iter().position(|&tool| tool == self.tool).unwrap_or(0);
-        Tool::SELECT_TOOLS[(index + 1) % Tool::SELECT_TOOLS.len()]
     }
 }
 
@@ -459,5 +569,19 @@ mod tests {
         tools.set_tool(Tool::MoveSelection);
         assert_eq!(tools.next_select_tool(), Tool::MagicWand);
         assert_eq!(tools.box_select_tool(), Tool::RectangleSelect, "the wand has no box to move pixels with");
+    }
+
+    #[test]
+    fn tools_that_share_a_key_go_round_and_back() {
+        let mut tools = Tools::default();
+        assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::Rectangle);
+        tools.set_tool(Tool::Rectangle);
+        assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::FilledRectangle);
+        tools.set_tool(Tool::FilledEllipse);
+        assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::Rectangle);
+        tools.set_tool(Tool::Curve);
+        assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::FilledEllipse, "the one used last");
+        assert_eq!(tools.next_tool(LINE_KEY), Tool::Line);
+        assert_eq!(tools.next_tool(PENCIL_KEY), Tool::Pencil);
     }
 }

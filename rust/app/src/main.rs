@@ -16,6 +16,7 @@ mod layer_properties;
 mod layers_panel;
 mod resample_preview;
 mod settings;
+mod shapes;
 mod tiled_texture;
 mod tools;
 mod tools_panel;
@@ -39,6 +40,7 @@ use lasso::{Lasso, LassoKind, PolygonEdit};
 use layer_commands::LayerCommand;
 use layer_properties::Properties;
 use settings::Settings;
+use shapes::ShapeEdit;
 use tools::{SampleSource, Tool, Tools};
 use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
@@ -115,6 +117,8 @@ pub struct OpenImage {
     pub lasso: Option<Lasso>,
     /// Polygon Select's corners, to go on changing.
     pub polygon: Option<PolygonEdit>,
+    /// The shape a shape tool is drawing, or drew, to go on changing.
+    pub shape: Option<ShapeEdit>,
 }
 
 impl OpenImage {
@@ -130,6 +134,7 @@ impl OpenImage {
             stroke: None,
             lasso: None,
             polygon: None,
+            shape: None,
         };
         image.refresh_layer_thumbnails(ctx);
         image
@@ -176,6 +181,28 @@ impl OpenImage {
             || self.stroke.is_some()
             || self.lasso.as_ref().is_some_and(|lasso| lasso.kind == LassoKind::Freehand)
             || self.polygon.as_ref().is_some_and(PolygonEdit::is_dragging)
+            || self.shape.as_ref().is_some_and(ShapeEdit::is_dragging)
+    }
+
+    /// Shows an area of the layer the shape is on as the shape tool draws it there,
+    /// before it is part of the layer.
+    pub fn show_shape(&mut self, area: Option<PixelRect>) {
+        if let Some(shape) = self.shape.as_ref().filter(|shape| shape.layer() < self.document.layers.len())
+            && area.is_some()
+        {
+            self.texture.show_layer_as(&self.document.layers, shape.layer(), shape.pixels(), area);
+        }
+    }
+
+    /// Leaves the shape a shape tool drew as it is, to change no more, or gives up the
+    /// one it is drawing or changing, showing its layer as it is again.
+    pub fn drop_shape(&mut self) {
+        if let Some(shape) = self.shape.take()
+            && (shape.is_drawing() || shape.is_dragging())
+            && shape.layer() < self.document.layers.len()
+        {
+            self.texture.update_layer(&self.document.layers, shape.layer(), None);
+        }
     }
 
     /// Gives up the outline a lasso is drawing, putting the selection back as it was.
@@ -514,6 +541,9 @@ impl App {
     fn select(&mut self, index: usize) {
         for image in &mut self.images {
             image.cancel_lasso();
+            if image.shape.as_ref().is_some_and(ShapeEdit::is_drawing) {
+                image.drop_shape();
+            }
         }
         self.current = Some(index);
         self.scroll_to_current = true;
@@ -1187,6 +1217,8 @@ impl App {
                 self.drawing_options(ui);
             } else if self.tools.tool.floods() {
                 self.flood_options(ui);
+            } else if self.tools.tool.shape().is_some() {
+                self.shape_options(ui);
             }
             if self.tools.tool.selects() {
                 self.selection_options(ui);
@@ -1218,21 +1250,11 @@ impl App {
                 "What selecting does to what is already selected.\nWhatever this says, holding Ctrl adds to it.",
             );
         if self.tools.tool.lasso().is_some() {
-            ui.separator();
-            ui.label("Overlaps:");
-            egui::ComboBox::from_id_salt("overlaps")
-                .selected_text(self.tools.overlaps.name())
-                .show_ui(ui, |ui| {
-                    for overlaps in Overlaps::ALL {
-                        ui.selectable_value(&mut self.tools.overlaps, overlaps, overlaps.name());
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "What is selected where the outline crosses itself and goes around an area more than once. \
-                     Add takes in all it goes around. Subtract leaves out what it goes around an even number of \
-                     times.",
-                );
+            self.overlaps_option(
+                ui,
+                "What is selected where the outline crosses itself and goes around an area more than once. Add \
+                 takes in all it goes around. Subtract leaves out what it goes around an even number of times.",
+            );
         }
         // The Magic Wand moves no pixels.
         if !self.tools.tool.has_box() {
@@ -1272,6 +1294,39 @@ impl App {
                 document.amend();
                 image.refresh(ctx);
             }
+        }
+    }
+
+    /// What the lassos' outlines shut in, and the Contour and the Polygon fill, where they
+    /// cross themselves.
+    fn overlaps_option(&mut self, ui: &mut egui::Ui, help: &str) {
+        ui.separator();
+        ui.label("Overlaps:");
+        egui::ComboBox::from_id_salt("overlaps")
+            .selected_text(self.tools.overlaps.name())
+            .show_ui(ui, |ui| {
+                for overlaps in Overlaps::ALL {
+                    ui.selectable_value(&mut self.tools.overlaps, overlaps, overlaps.name());
+                }
+            })
+            .response
+            .on_hover_text(help);
+    }
+
+    /// The shape tools' settings: how wide they draw, whether they smooth their edges,
+    /// and what the Contour and the Polygon fill where they cross themselves.
+    fn shape_options(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label("Size:");
+        let size = egui::DragValue::new(&mut self.tools.shape_size).range(1..=MAX_TIP_SIZE).suffix(" px");
+        ui.add(size).on_hover_text("How wide the shapes' lines are.");
+        self.antialiasing_option(ui);
+        if matches!(self.tools.tool, Tool::Contour | Tool::Polygon) {
+            self.overlaps_option(
+                ui,
+                "What is filled where the outline crosses itself and goes around an area more than once. Add \
+                 fills all it goes around. Subtract leaves out what it goes around an even number of times.",
+            );
         }
     }
 
@@ -1342,9 +1397,9 @@ impl App {
     fn antialiasing_option(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.checkbox(&mut self.tools.antialiasing, "Antialiasing").on_hover_text(
-            "On, the Paintbrush and the Eraser fade the edges of what they draw out over a pixel, the Spray's dots \
-             can land between pixels, and the Paint Bucket fades the edge of what it fills over the colours just \
-             too different. Off, their edges are hard, as the Pencil's always are.",
+            "On, the Paintbrush, the Eraser and the shapes fade the edges of what they draw out over a pixel, the \
+             Spray's dots can land between pixels, and the Paint Bucket fades the edge of what it fills over the \
+             colours just too different. Off, their edges are hard, as the Pencil's always are.",
         );
     }
 
@@ -1358,6 +1413,7 @@ impl App {
         for image in &mut self.images {
             image.transform = None;
             image.cancel_lasso();
+            image.drop_shape();
         }
     }
 
@@ -1427,10 +1483,16 @@ impl App {
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::SELECT_KEY)) {
             self.set_tool(self.tools.next_select_tool());
         }
-        // The selection tools share a key, which goes from one to the next.
+        // Tools that share a key, as the selection tools do, go from one to the next.
+        let mut keys: Vec<KeyboardShortcut> = Vec::new();
         for tool in Tool::ALL.into_iter().filter(|tool| !tool.selects()) {
-            if !busy && ctx.input_mut(|input| input.consume_shortcut(&tool.key())) {
-                self.set_tool(tool);
+            if !keys.contains(&tool.key()) {
+                keys.push(tool.key());
+            }
+        }
+        for key in keys {
+            if !busy && ctx.input_mut(|input| input.consume_shortcut(&key)) {
+                self.set_tool(self.tools.next_tool(key));
             }
         }
         // The arrow keys nudge the selection's box, by ten pixels with Shift.

@@ -91,6 +91,14 @@ impl Document {
         self.history.current()
     }
 
+    /// Which content of the layers the current step left. A step shares it with the one
+    /// before it only while it leaves the layers as that one did, and no other step
+    /// ever has it: with [`Document::current_step`], it tells apart a step from one
+    /// recorded in its place after undoing it.
+    pub fn current_content(&self) -> usize {
+        self.history.current_content()
+    }
+
     pub fn can_undo(&self) -> bool {
         self.history.current() > 0
     }

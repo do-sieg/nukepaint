@@ -9,7 +9,8 @@
 //! the Spray leaves dots for as long as the left button is held, on the selected
 //! pixels alone if any are. Unless their selection controls are off, they resize or move the selection from a handle
 //! of its box, or the one out from its bottom right corner, or rotate it from around
-//! the box. The selection shows as a tinted area in a dashed outline, with a button by it: with the
+//! the box. The shape tools draw their shape, which their handles then change until it
+//! is finished. The selection shows as a tinted area in a dashed outline, with a button by it: with the
 //! selection tools and Move Selection, to go from one to the other, and with the other
 //! tools, to deselect. The grid shows over the image; while snapping to it, the
 //! selection tools put their corners on its cells' corners.
@@ -19,7 +20,8 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
 use power_paint_core::{
-    BrushStroke, FloodFill, PixelRect, Rgba, RgbaImage, Selection, SelectionMask, SelectionMode, Spray, hard_tip,
+    BrushStroke, FloodFill, PixelRect, Rgba, RgbaImage, Selection, SelectionMask, SelectionMode, ShapeKind, Spray,
+    hard_tip,
 };
 
 use crate::{
@@ -27,8 +29,9 @@ use crate::{
     grid::{self, Cells, Grid},
     icons::{self, Icon, Icons},
     lasso::{Lasso, LassoKind},
+    shapes::{self, Handle, ShapeEdit},
     tools::{RightClick, SampleSource, Tool, Tools, ZoomDrag},
-    transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, PIVOT_RADIUS, Transform},
+    transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, PIVOT_RADIUS, ROTATE_REACH, Transform},
     view::View,
 };
 
@@ -191,6 +194,8 @@ pub fn show(
         filling_at = pointer.filter(|_| use_paint_bucket(ui, &response, image, tools, space));
     } else if tools.tool == Tool::MagicWand {
         wand_at = pointer.filter(|_| use_magic_wand(ui, &response, image, tools, space));
+    } else if tools.tool.shape().is_some() {
+        use_shape_tool(ui, &response, image, tools, pointer, space);
     } else if tools.tool != Tool::Pan {
         use_tool(ui, &response, image, tools, pointer, space);
     }
@@ -199,6 +204,7 @@ pub fn show(
     let tint = if tools.tool == Tool::MoveSelection { MOVE_SELECTION_TINT } else { SELECTION_TINT };
     paint_selection(&painter, &image.view, &image.document.selection, tint);
     paint_lasso(&painter, image, tools);
+    paint_shape(&painter, image, tools);
     if let Some(drag) = tools.zoom_drag.as_ref().filter(|drag| drag.framing) {
         paint_zoom_frame(&painter, &image.view, drag);
     }
@@ -482,11 +488,15 @@ fn polygon_hit_at(view: &View, corners: &[(i32, i32)], at: Pos2) -> Option<Polyg
         return Some(PolygonHit::Corner(index));
     }
     let mut to_edges = (0..screen.len()).map(|index| {
-        let (a, b) = (screen[index], screen[(index + 1) % screen.len()]);
-        let along = (at - a).dot(b - a) / (b - a).length_sq().max(f32::EPSILON);
-        (index, (a + (b - a) * along.clamp(0.0, 1.0)).distance(at))
+        (index, distance_to_segment(at, screen[index], screen[(index + 1) % screen.len()]))
     });
     nearest(&mut to_edges, EDGE_REACH).map(PolygonHit::Edge)
+}
+
+/// How far a point of the screen is from the nearest point of the segment from `a` to `b`.
+fn distance_to_segment(at: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let along = (at - a).dot(b - a) / (b - a).length_sq().max(f32::EPSILON);
+    (a + (b - a) * along.clamp(0.0, 1.0)).distance(at)
 }
 
 /// Polygon Select puts down a corner where it is pressed, or closes its outline on its
@@ -522,6 +532,272 @@ fn close_lasso(image: &mut OpenImage, tools: &Tools) {
     });
 }
 
+/// What of a shape a press is on.
+#[derive(Clone, Copy)]
+enum ShapeHit {
+    Handle(Handle),
+    /// The Polygon's edge from the corner at that index to the next one.
+    Edge(usize),
+}
+
+/// Works a shape tool: a drag draws its shape, and the Polygon puts down a corner at
+/// each click, in the primary colour, or in the secondary one with the right button
+/// unless that picks a colour as the Color Picker does. Once drawn, a press on one of
+/// the shape's handles, on the Polygon's edges, on the shape itself or around it
+/// changes it instead, unless Ctrl is held, and a right click on a Polygon's corner
+/// removes it.
+/// Enter and Escape finish it. Escape gives up what is being drawn or dragged instead,
+/// and Backspace takes back the Polygon's last corner.
+fn use_shape_tool(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    image: &mut OpenImage,
+    tools: &mut Tools,
+    pointer: Option<Pos2>,
+    space: bool,
+) {
+    let Some(kind) = tools.tool.shape() else {
+        return;
+    };
+    let ctx = ui.ctx();
+    let (name, icon) = (tools.tool.name(), Some(tools.tool.icon().name()));
+    let (command, shift) = ui.input(|input| (input.modifiers.command, input.modifiers.shift));
+    // A shape being drawn is given up once anything else changes the layers.
+    if image.shape.as_ref().is_some_and(|shape| shape.is_drawing() && !shape.is_current(&image.document)) {
+        image.drop_shape();
+    }
+    let drawing_polygon = |image: &OpenImage| {
+        image.shape.as_ref().is_some_and(|shape| shape.is_drawing() && shape.kind() == ShapeKind::Polygon)
+    };
+    let (escape, enter, backspace) = ui.input(|input| {
+        (input.key_pressed(Key::Escape), input.key_pressed(Key::Enter), input.key_pressed(Key::Backspace))
+    });
+    if escape {
+        if image.shape.as_ref().is_some_and(|shape| shape.dragged_handle().is_some()) {
+            let area = image.shape.as_mut().and_then(ShapeEdit::cancel_drag);
+            image.show_shape(area);
+        } else {
+            image.drop_shape();
+        }
+    }
+    if enter {
+        if drawing_polygon(image) {
+            finish_shape(ctx, image, tools);
+        } else if !image.is_dragging() {
+            image.drop_shape();
+        }
+    }
+    if backspace && drawing_polygon(image) {
+        let shape = image.shape.as_mut().expect("drawing");
+        if shape.corners().len() == 1 {
+            image.drop_shape();
+        } else {
+            let area = shape.remove_last();
+            image.show_shape(area);
+        }
+    }
+    // Another colour, size or antialiasing draws the shape again that way.
+    if !image.is_dragging()
+        && let Some(shape) = image.shape.as_mut()
+    {
+        let style = tools.shape_style(shape.secondary);
+        if shape.is_drawing() {
+            let area = shape.restyle_draft(style);
+            image.show_shape(area);
+        } else if shape.kind() == kind && shape.restyle(&mut image.document, style) {
+            image.refresh(ctx);
+        }
+    }
+    if drawing_polygon(image) {
+        let to = pointer.map(|at| shape_pixel(&image.view, at));
+        let area = image.shape.as_mut().and_then(|shape| shape.reach(to));
+        image.show_shape(area);
+    }
+    // Ctrl draws another shape, wherever it is pressed.
+    let hit_at = |image: &OpenImage, at: Pos2| if command { None } else { shape_hit_at(image, kind, at) };
+    let picking = tools.right_click == RightClick::PickColor;
+
+    let started = [PointerButton::Primary, PointerButton::Secondary]
+        .into_iter()
+        .find(|&button| response.drag_started_by(button));
+    if let Some(button) = started
+        && !space
+        && let Some(press) = ui.input(|input| input.pointer.press_origin())
+    {
+        let (at, point) = (shape_pixel(&image.view, press), image.view.point_at(press));
+        let polygon_open = drawing_polygon(image);
+        let hit = if polygon_open { None } else { hit_at(image, press) };
+        match (button, hit) {
+            (PointerButton::Primary, _) if polygon_open => put_shape_corner(ctx, image, tools, press),
+            _ if polygon_open => {}
+            (PointerButton::Primary, Some(ShapeHit::Edge(index))) => {
+                let area = image.shape.as_mut().and_then(|shape| shape.press_edge(&image.document, index, point));
+                image.show_shape(area);
+            }
+            (PointerButton::Primary, Some(ShapeHit::Handle(handle))) => {
+                if let Some(shape) = &mut image.shape {
+                    shape.press(&image.document, handle, point);
+                }
+            }
+            (PointerButton::Secondary, Some(ShapeHit::Handle(Handle::Point(index)))) if kind == ShapeKind::Polygon => {
+                if let Some(shape) = &mut image.shape
+                    && shape.remove_corner(&mut image.document, index, name, icon)
+                {
+                    image.refresh(ctx);
+                }
+            }
+            (PointerButton::Secondary, _) if picking => {}
+            _ => {
+                // Which leaves the shape drawn before as it is.
+                image.drop_shape();
+                let secondary = button == PointerButton::Secondary;
+                let style = tools.shape_style(secondary);
+                let (shape, area) = ShapeEdit::begin(&image.document, kind, at, style, secondary);
+                image.shape = Some(shape);
+                image.show_shape(area);
+            }
+        }
+    }
+    if picking
+        && !space
+        && response.dragged_by(PointerButton::Secondary)
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(color) = color_at(image, at)
+    {
+        tools.colors.pick(color, false);
+    }
+
+    let dragged = response.dragged() && response.drag_delta() != Vec2::ZERO;
+    if dragged && let Some(at) = response.interact_pointer_pos() {
+        let (pixel, point) = (shape_pixel(&image.view, at), image.view.point_at(at));
+        let area = image.shape.as_mut().and_then(|shape| match shape.is_drawing() {
+            true => shape.draw_to(pixel, shift),
+            false => shape.drag_to(point, shift),
+        });
+        image.show_shape(area);
+    }
+
+    if response.drag_stopped() {
+        let drawing = image.shape.as_ref().filter(|shape| shape.is_drawing()).map(ShapeEdit::kind);
+        // A double click finishes the Polygon.
+        let double_click = ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary));
+        if drawing.is_some_and(|drawing| drawing != ShapeKind::Polygon || double_click) {
+            finish_shape(ctx, image, tools);
+        } else if let Some(shape) = &mut image.shape
+            && shape.release(&mut image.document, name, icon)
+        {
+            image.refresh(ctx);
+        }
+    }
+
+    // The pointer shows what a press would do.
+    let dragged_handle = image.shape.as_ref().and_then(ShapeEdit::dragged_handle);
+    let hovered = pointer.filter(|_| !image.is_dragging());
+    let hit = dragged_handle.map(ShapeHit::Handle).or_else(|| hovered.and_then(|at| hit_at(image, at)));
+    let angle = image.shape.as_ref().and_then(|shape| shape.shape(&image.document)).map_or(0.0, |shape| shape.angle);
+    let cursor = match hit {
+        Some(ShapeHit::Handle(Handle::Box(x, y))) => DragKind::Resize((x, y)).cursor(angle),
+        Some(ShapeHit::Handle(Handle::Rotate)) => DragKind::Rotate.cursor(angle),
+        Some(ShapeHit::Handle(Handle::Body)) => CursorIcon::Move,
+        Some(ShapeHit::Handle(Handle::Point(_))) if dragged_handle.is_some() => CursorIcon::Grabbing,
+        Some(ShapeHit::Handle(Handle::Point(_))) => CursorIcon::Grab,
+        Some(ShapeHit::Edge(_)) => CursorIcon::Copy,
+        None => CursorIcon::Crosshair,
+    };
+    if response.hovered() || image.is_dragging() {
+        ui.ctx().set_cursor_icon(cursor);
+    }
+}
+
+/// The pixel at a point of the screen, which the shape tools put their points on.
+fn shape_pixel(view: &View, at: Pos2) -> (i32, i32) {
+    let (x, y) = view.pixel_at(at);
+    (x as i32, y as i32)
+}
+
+/// What of the shape the tool can change a point of the screen is on, if any: the
+/// nearest of its handles, or else of the Polygon's edges, or else the shape itself,
+/// its line or what it goes around, or else the band around its box that turns it.
+fn shape_hit_at(image: &OpenImage, kind: ShapeKind, at: Pos2) -> Option<ShapeHit> {
+    let edit = image.shape.as_ref().filter(|edit| edit.kind() == kind)?;
+    let shape = edit.shape(&image.document)?;
+    let view = &image.view;
+    let screen = |(x, y): (f64, f64)| view.to_screen(x as f32, y as f32);
+    let nearest = |distances: &mut dyn Iterator<Item = (usize, f32)>, reach: f32| {
+        distances.filter(|&(_, distance)| distance <= reach).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(index, _)| index)
+    };
+    let handles = shapes::handles(shape);
+    let mut to_handles = handles.iter().map(|&(_, point)| screen(point).distance(at)).enumerate();
+    if let Some(index) = nearest(&mut to_handles, CORNER_REACH) {
+        return Some(ShapeHit::Handle(handles[index].0));
+    }
+    let outline: Vec<Pos2> = shape.outline().into_iter().map(screen).collect();
+    let segment = |index: usize| distance_to_segment(at, outline[index], outline[(index + 1) % outline.len()]);
+    if kind == ShapeKind::Polygon {
+        let mut to_edges = (0..outline.len()).map(|index| (index, segment(index)));
+        if let Some(index) = nearest(&mut to_edges, EDGE_REACH) {
+            return Some(ShapeHit::Edge(index));
+        }
+    }
+    // On its line, as wide as it is drawn, or within reach of it if that is wider.
+    let half_width = edit.size(&image.document).unwrap_or(1) as f32 / 2.0 / view.pixels_per_screen_point() as f32;
+    let segments = if kind.is_closed() { outline.len() } else { outline.len().saturating_sub(1) };
+    let on_line = (0..segments).any(|index| segment(index) <= half_width.max(EDGE_REACH));
+    if on_line || (kind.is_closed() && encloses(&outline, at)) {
+        return Some(ShapeHit::Handle(Handle::Body));
+    }
+    let (center, half, angle) = shapes::frame(shape);
+    let (x, y) = view.point_at(at);
+    let (sin, cos) = (-angle).sin_cos();
+    let (dx, dy) = (x - center.0, y - center.1);
+    let local = (dx * cos - dy * sin, dx * sin + dy * cos);
+    let outside = (local.0.abs() - half.0).max(local.1.abs() - half.1) / view.pixels_per_screen_point();
+    (outside > 0.0 && outside <= ROTATE_REACH).then_some(ShapeHit::Handle(Handle::Rotate))
+}
+
+/// Whether a point is inside an outline, going around it an odd number of times.
+fn encloses(outline: &[Pos2], at: Pos2) -> bool {
+    let mut inside = false;
+    for (i, &a) in outline.iter().enumerate() {
+        let b = outline[(i + 1) % outline.len()];
+        if (a.y > at.y) != (b.y > at.y) && at.x < a.x + (at.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+/// The Polygon puts down a corner where it is pressed, or is finished on its first
+/// corner once it has three.
+fn put_shape_corner(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools, press: Pos2) {
+    let at = shape_pixel(&image.view, press);
+    let Some(shape) = &mut image.shape else {
+        return;
+    };
+    let &first = shape.corners().first().expect("a polygon being drawn has a corner");
+    let first_on_screen = image.view.to_screen(first.0 as f32 + 0.5, first.1 as f32 + 0.5);
+    let on_first = at == first || first_on_screen.distance(press) <= CORNER_REACH;
+    if shape.corners().len() >= 3 && on_first {
+        finish_shape(ctx, image, tools);
+    } else {
+        let area = shape.add_corner(at);
+        image.show_shape(area);
+    }
+}
+
+/// Finishes the shape being drawn, which becomes part of the layer as a step, to go on
+/// changing, if it changes any pixel, and is given up otherwise.
+fn finish_shape(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools) {
+    let Some(shape) = &mut image.shape else {
+        return;
+    };
+    if !shape.finish(&mut image.document, tools.tool.name(), Some(tools.tool.icon().name())) {
+        image.shape = None;
+    }
+    // The layer shows as it is, in place of what was drawn over it.
+    image.refresh(ctx);
+}
+
 /// The selection's box moved, as a step: with `placed`, the active layer with the
 /// selected pixels drawn where they now are.
 fn commit_transform(ctx: &egui::Context, image: &mut OpenImage, placed: Option<RgbaImage>) {
@@ -541,9 +817,19 @@ fn commit_transform(ctx: &egui::Context, image: &mut OpenImage, placed: Option<R
 }
 
 /// Nudges the selection's box by `offset`, in pixels, with the selected pixels with the
-/// selection tools, as a step. Nothing happens while the tool shows no box, or drags it.
+/// selection tools, as a step, or the shape a shape tool can change. Nothing happens
+/// while the tool shows no box, or drags it.
 pub fn nudge(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools, offset: (i32, i32)) {
-    if image.is_dragging() || tools.frame_select.is_dragging() || box_state(image, tools).is_none() {
+    if image.is_dragging() || tools.frame_select.is_dragging() {
+        return;
+    }
+    if let Some(shape) = image.shape.as_mut().filter(|shape| tools.tool.shape() == Some(shape.kind())) {
+        if shape.nudge(&mut image.document, offset, tools.tool.name(), Some(tools.tool.icon().name())) {
+            image.refresh(ctx);
+        }
+        return;
+    }
+    if box_state(image, tools).is_none() {
         return;
     }
     if image.transform.is_none() {
@@ -1041,10 +1327,65 @@ fn paint_lasso(painter: &Painter, image: &OpenImage, tools: &Tools) {
     } else {
         polygon_corners(image, tools).unwrap_or_default().iter().map(on_screen).collect()
     };
-    let pixel = 1.0 / painter.pixels_per_point();
     for center in handles {
-        painter.circle_filled(center, CORNER_RADIUS, Color32::WHITE);
-        painter.circle_stroke(center, CORNER_RADIUS, Stroke::new(pixel, Color32::BLACK));
+        paint_corner_handle(painter, center);
+    }
+}
+
+/// A round handle, on a corner or another point that can be moved.
+fn paint_corner_handle(painter: &Painter, center: Pos2) {
+    let pixel = 1.0 / painter.pixels_per_point();
+    painter.circle_filled(center, CORNER_RADIUS, Color32::WHITE);
+    painter.circle_stroke(center, CORNER_RADIUS, Stroke::new(pixel, Color32::BLACK));
+}
+
+/// The handles of the shape the tool can change: round on the points that place a
+/// Line, a Curve or a Polygon, with lines from a Curve's ends to the points it bends
+/// towards, and square on the box around a Rectangle, an Ellipse or a Contour, which
+/// shows as well. Or, while the Polygon is being drawn, a handle on its first corner,
+/// a click on which finishes it.
+fn paint_shape(painter: &Painter, image: &OpenImage, tools: &Tools) {
+    let Some(edit) = image.shape.as_ref().filter(|edit| tools.tool.shape() == Some(edit.kind())) else {
+        return;
+    };
+    let pixel = 1.0 / painter.pixels_per_point();
+    let on_screen = |(x, y): (f64, f64)| {
+        let point = image.view.to_screen(x as f32, y as f32);
+        Pos2::new(painter.round_to_pixel_center(point.x), painter.round_to_pixel_center(point.y))
+    };
+    let middle = |(x, y): (i32, i32)| (x as f64 + 0.5, y as f64 + 0.5);
+    if edit.is_drawing() {
+        if edit.kind() == ShapeKind::Polygon
+            && let Some(&first) = edit.corners().first()
+        {
+            paint_corner_handle(painter, on_screen(middle(first)));
+        }
+        return;
+    }
+    let Some(shape) = edit.shape(&image.document) else {
+        return;
+    };
+    if shape.kind == ShapeKind::Curve {
+        for (end, bend) in [(0, 2), (1, 3)] {
+            let line = [on_screen(middle(shape.points[end])), on_screen(middle(shape.points[bend]))];
+            painter.line_segment(line, Stroke::new(3.0 * pixel, Color32::WHITE));
+            painter.line_segment(line, Stroke::new(pixel, Color32::BLACK));
+        }
+    }
+    let handles = shapes::handles(shape);
+    let corner = |x, y| handles.iter().find(|(handle, _)| *handle == Handle::Box(x, y)).map(|&(_, point)| on_screen(point));
+    let frame: Vec<Pos2> = [(-1, -1), (1, -1), (1, 1), (-1, 1)].into_iter().filter_map(|(x, y)| corner(x, y)).collect();
+    if !frame.is_empty() {
+        paint_outline(painter, &frame);
+    }
+    for (handle, point) in handles {
+        if let Handle::Box(..) = handle {
+            let square = Rect::from_center_size(on_screen(point), Vec2::splat(HANDLE_SIZE));
+            painter.rect_filled(square, 0.0, Color32::WHITE);
+            painter.rect_stroke(square, 0.0, Stroke::new(pixel, Color32::BLACK), egui::StrokeKind::Inside);
+        } else {
+            paint_corner_handle(painter, on_screen(point));
+        }
     }
 }
 

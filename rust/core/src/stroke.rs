@@ -195,12 +195,12 @@ pub fn hard_tip(at: (i64, i64), size: u32) -> impl Iterator<Item = (i64, i64, i6
 }
 
 /// The pixel a point of the image is on.
-fn pixel_of(point: (f64, f64)) -> (i64, i64) {
+pub(crate) fn pixel_of(point: (f64, f64)) -> (i64, i64) {
     (point.0.floor() as i64, point.1.floor() as i64)
 }
 
 /// How far `point` is from the nearest point of the segment from `from` to `to`.
-fn distance_to_segment(point: (f64, f64), from: (f64, f64), to: (f64, f64)) -> f64 {
+pub(crate) fn distance_to_segment(point: (f64, f64), from: (f64, f64), to: (f64, f64)) -> f64 {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let length_squared = dx * dx + dy * dy;
     let along = if length_squared > 0.0 {
@@ -214,7 +214,7 @@ fn distance_to_segment(point: (f64, f64), from: (f64, f64), to: (f64, f64)) -> f
 
 /// The pixels a round tip `size` pixels wide covers, as rows from the top left of the
 /// square it fits in.
-fn tip(size: u32) -> Vec<(i64, i64)> {
+pub(crate) fn tip(size: u32) -> Vec<(i64, i64)> {
     let middle = (size as f64 - 1.0) / 2.0;
     // A little short of the true radius, which keeps small tips from looking square.
     let reach = (size as f64 * size as f64 / 4.0 - 0.5).max(0.0);
