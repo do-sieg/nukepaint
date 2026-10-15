@@ -29,7 +29,7 @@ use layer_commands::LayerCommand;
 use layer_properties::Properties;
 use settings::Settings;
 use tiled_texture::TiledTexture;
-use tools::{RightClick, Tool, Tools};
+use tools::{SampleSource, Tool, Tools};
 use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
 
@@ -836,9 +836,22 @@ impl App {
         }
     }
 
-    /// The settings of the tool, under the menu bar.
+    /// The row under the menu bar: Undo and Redo, the tools, and the settings of the tool.
     fn tool_options(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let ctx = ui.ctx().clone();
+            for (icon, label, shortcut, command) in
+                [(icons::UNDO, "Undo", UNDO, EditCommand::Undo), (icons::REDO, "Redo", REDO, EditCommand::Redo)]
+            {
+                let texture = self.icons.get(&ctx, icon);
+                let tint = ui.visuals().strong_text_color();
+                let icon = egui::Image::new(texture).fit_to_exact_size(ICON_SIZE).tint(tint);
+                let tooltip = format!("{label} ({})", ctx.format_shortcut(&shortcut));
+                if ui.add_enabled(self.can_edit(command), egui::Button::image(icon)).on_hover_text(tooltip).clicked() {
+                    self.edit(&ctx, command);
+                }
+            }
+            ui.separator();
             for tool in Tool::ALL {
                 let texture = self.icons.get(ui.ctx(), tool.icon());
                 // The icons are light gray lines, made the colour of the text to suit either theme.
@@ -853,6 +866,8 @@ impl App {
             }
             if self.tools.tool.draws() {
                 self.drawing_options(ui);
+            } else if self.tools.tool == Tool::PaintBucket {
+                self.fill_options(ui);
             }
             if self.tools.tool.select_shape().is_none() {
                 return;
@@ -897,33 +912,47 @@ impl App {
             ui.add(speed).on_hover_text("How fast the Spray leaves dots, as a share of the fastest it can.");
         }
         if tool.can_smooth() {
-            ui.separator();
-            ui.checkbox(&mut self.tools.antialiasing, "Antialiasing").on_hover_text(
-                "On, the Paintbrush and the Eraser fade the edges of what they draw out over a pixel, and the \
-                 Spray's dots can land between pixels. Off, their edges are hard, as the Pencil's always are.",
+            self.antialiasing_option(ui);
+        }
+    }
+
+    /// The Paint Bucket's settings: which pixels it fills, and how.
+    fn fill_options(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.checkbox(&mut self.tools.contiguous, "Contiguous").on_hover_text(
+            "On, only the pixels of similar colour that touch the one clicked through others like it are filled. \
+             Off, all those in the image are. Holding Shift does the other.",
+        );
+        ui.separator();
+        ui.label("Tolerance:");
+        let tolerance = egui::DragValue::new(&mut self.tools.tolerance).range(0..=100).suffix(" %");
+        ui.add(tolerance).on_hover_text(
+            "How different a colour can be from the one clicked to be filled. 0% fills only the same colour, \
+             100% any.",
+        );
+        ui.separator();
+        ui.label("Sampling:");
+        egui::ComboBox::from_id_salt("sample_source")
+            .selected_text(self.tools.sample_source.name())
+            .show_ui(ui, |ui| {
+                for source in SampleSource::ALL {
+                    ui.selectable_value(&mut self.tools.sample_source, source, source.name());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Whose colours are looked at: the active layer's, or those of all the visible layers blended together.",
             );
-        }
-        if tool.draws_in_color() {
-            ui.separator();
-            ui.label("Right click:");
-            let mut right_click = self.tools.right_click;
-            egui::ComboBox::from_id_salt("right_click")
-                .selected_text(right_click.name())
-                .show_ui(ui, |ui| {
-                    for option in RightClick::ALL {
-                        ui.selectable_value(&mut right_click, option, option.name());
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "What a right drag does with the Paintbrush, the Pencil and the Spray: draw in the secondary \
-                     color, or pick the color of the active layer as the one the Colors section is editing.",
-                );
-            if right_click != self.tools.right_click {
-                self.tools.right_click = right_click;
-                self.settings.set_right_click(right_click);
-            }
-        }
+        self.antialiasing_option(ui);
+    }
+
+    fn antialiasing_option(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.checkbox(&mut self.tools.antialiasing, "Antialiasing").on_hover_text(
+            "On, the Paintbrush and the Eraser fade the edges of what they draw out over a pixel, the Spray's dots \
+             can land between pixels, and the Paint Bucket fades the edge of what it fills over the colours just \
+             too different. Off, their edges are hard, as the Pencil's always are.",
+        );
     }
 
     /// Changes the tool, which ends any transform: the next one starts from the
@@ -1344,28 +1373,28 @@ impl eframe::App for App {
             let (mut history_action, mut layers_action) = (None, None);
             let busy = self.is_dragging() || self.has_dialog();
             let image = &self.images[current];
-            let (checker, icons, colors) = (&self.checker, &mut self.icons, &mut self.tools.colors);
-            let tooltip = |label: &str, shortcut| format!("{label} ({})", ctx.format_shortcut(&shortcut));
-            let (undo, redo) = (tooltip("Undo", UNDO), tooltip("Redo", REDO));
+            let (checker, icons) = (&self.checker, &mut self.icons);
+            let (colors, right_click) = (&mut self.tools.colors, &mut self.tools.right_click);
+            let right_click_before = *right_click;
             let moved = dock::show(ui, self.settings.dock_side(), |ui| {
-                dock::section(ui, "Colors", |ui| colors.show(ui));
+                dock::section(ui, "Colors", |ui| colors.show(ui, right_click));
                 dock::section(ui, "History", |ui| {
                     let document = &image.document;
-                    history_action = history_panel::show(ui, document, icons, !busy, scroll_to_current, &undo, &redo);
+                    history_action = history_panel::show(ui, document, icons, !busy, scroll_to_current);
                 });
                 dock::section(ui, "Layers", |ui| {
                     let enabled = |command: LayerCommand| !busy && command.can_run(&image.document);
                     layers_action = layers_panel::show(ui, image, checker, icons, enabled);
                 });
             });
+            if self.tools.right_click != right_click_before {
+                self.settings.set_right_click(self.tools.right_click);
+            }
             if let Some(side) = moved {
                 self.settings.set_dock_side(side);
             }
-            match history_action {
-                Some(history_panel::Action::GoTo(index)) => self.go_to_step(&ctx, index),
-                Some(history_panel::Action::Undo) => self.edit(&ctx, EditCommand::Undo),
-                Some(history_panel::Action::Redo) => self.edit(&ctx, EditCommand::Redo),
-                None => {}
+            if let Some(index) = history_action {
+                self.go_to_step(&ctx, index);
             }
             if let Some(action) = layers_action {
                 self.layers_panel_action(&ctx, action);

@@ -17,13 +17,15 @@ use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
-use power_paint_core::{BrushStroke, PixelRect, Rgba, RgbaImage, Selection, SelectionMode, Spray, hard_tip};
+use power_paint_core::{
+    BrushStroke, FloodFill, PixelRect, Rgba, RgbaImage, Selection, SelectionMode, Spray, hard_tip,
+};
 
 use crate::{
     OpenImage,
     frame_select::Shape,
     icons::{self, Icon, Icons},
-    tools::{RightClick, Tool, Tools, ZoomDrag},
+    tools::{RightClick, SampleSource, Tool, Tools, ZoomDrag},
     transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, Transform},
     view::View,
 };
@@ -61,6 +63,7 @@ const CURSOR_SIZE: Vec2 = Vec2::splat(24.0);
 const DRAWING_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
 const SPRAY_HOTSPOT: Vec2 = Vec2::new(6.0, 6.0);
 const COLOR_PICKER_HOTSPOT: Vec2 = Vec2::new(5.0, 19.0);
+const PAINT_BUCKET_HOTSPOT: Vec2 = Vec2::new(20.0, 21.0);
 /// Longest a frame counts for while spraying, in seconds, so that a stall does not
 /// leave a burst of dots.
 const MAX_SPRAY_FRAME: f64 = 0.1;
@@ -159,7 +162,7 @@ pub fn show(
     let busy = tools.frame_select.is_dragging() || tools.zoom_drag.is_some() || image.is_dragging();
     let hand = space || tools.tool == Tool::Pan;
     // Where the pointer is over the image while it works a drawing tool, or the Color Picker.
-    let (mut drawing_at, mut picking_at) = (None, None);
+    let (mut drawing_at, mut picking_at, mut filling_at) = (None, None, None);
     let panning = response.dragged_by(PointerButton::Middle)
         || (hand && response.dragged_by(PointerButton::Primary) && !busy);
     if panning {
@@ -173,6 +176,8 @@ pub fn show(
         drawing_at = pointer.filter(|_| use_drawing_tool(ui, &response, image, tools, space));
     } else if tools.tool == Tool::ColorPicker {
         picking_at = pointer.filter(|_| use_color_picker(&response, image, tools, space));
+    } else if tools.tool == Tool::PaintBucket {
+        filling_at = pointer.filter(|_| use_paint_bucket(ui, &response, image, tools, space));
     } else if tools.tool != Tool::Pan {
         use_tool(ui, &response, image, tools, pointer, space);
     }
@@ -195,6 +200,9 @@ pub fn show(
     }
     if let Some(at) = picking_at {
         paint_cursor(ui, icons, icons::CURSOR_COLOR_PICKER, COLOR_PICKER_HOTSPOT, at);
+    }
+    if let Some(at) = filling_at {
+        paint_cursor(ui, icons, icons::CURSOR_PAINT_BUCKET, PAINT_BUCKET_HOTSPOT, at);
     }
     let box_shown = box_state(image, tools);
     if let Some(state) = box_shown {
@@ -398,6 +406,62 @@ fn use_color_picker(response: &egui::Response, image: &OpenImage, tools: &mut To
         }
     }
     response.hovered() || response.dragged()
+}
+
+/// Works the Paint Bucket: a click fills the pixels of similar colour around the one
+/// clicked, or all those in the image as the contiguous setting says, or the other way
+/// while Shift is held, with the primary colour. With a selection, only the selected
+/// pixels are filled, from a click on one of them. The right button fills with the
+/// secondary colour, or picks a colour as the Color Picker does, as the right click
+/// option says. Returns whether the pointer is the tool's, over the image.
+fn use_paint_bucket(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    image: &mut OpenImage,
+    tools: &mut Tools,
+    space: bool,
+) -> bool {
+    let started = [PointerButton::Primary, PointerButton::Secondary]
+        .into_iter()
+        .find(|&button| response.drag_started_by(button));
+    let picking = tools.right_click == RightClick::PickColor;
+    if picking
+        && !space
+        && response.dragged_by(PointerButton::Secondary)
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(color) = color_at(image, at)
+    {
+        tools.colors.pick(color, false);
+    }
+    let Some(button) = started.filter(|&button| !space && (button == PointerButton::Primary || !picking)) else {
+        return response.hovered();
+    };
+    let Some(press) = ui.input(|input| input.pointer.press_origin()) else {
+        return response.hovered();
+    };
+    let (x, y) = image.view.pixel_at(press);
+    let (width, height) = image.document.size();
+    let mask = image.document.selection_mask();
+    let on_image = (0..width as i64).contains(&x) && (0..height as i64).contains(&y);
+    if !on_image || mask.as_ref().is_some_and(|mask| !mask.contains(x as u32, y as u32)) {
+        return response.hovered();
+    }
+    let sample = match tools.sample_source {
+        SampleSource::Layer => None,
+        SampleSource::Image => Some(image.document.flattened()),
+    };
+    let sample = sample.as_ref().unwrap_or(&image.document.active().pixels);
+    let contiguous = tools.contiguous != ui.input(|input| input.modifiers.shift);
+    let tolerance = tools.tolerance as f32 / 100.0;
+    let fill = FloodFill::new(sample, (x as u32, y as u32), tolerance, contiguous, mask.as_ref());
+    let color = if button == PointerButton::Primary { tools.colors.primary } else { tools.colors.secondary };
+    // A transform would go on from the pixels as they were before.
+    image.transform = None;
+    if fill.paint(&mut image.document.active_mut().pixels, color, tools.smooth()).is_some() {
+        image.document.commit(Tool::PaintBucket.name(), Some(Tool::PaintBucket.icon().name()));
+        image.refresh(ui.ctx());
+    }
+    response.hovered()
 }
 
 /// The colour of the active layer at a point of the screen, if it is over the image.

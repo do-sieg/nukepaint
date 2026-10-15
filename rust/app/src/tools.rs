@@ -20,6 +20,7 @@ pub const PENCIL_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, 
 pub const ERASER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::E);
 pub const SPRAY_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::A);
 pub const COLOR_PICKER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::K);
+pub const PAINT_BUCKET_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -34,10 +35,11 @@ pub enum Tool {
     Eraser,
     ColorPicker,
     Spray,
+    PaintBucket,
 }
 
 impl Tool {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::MoveSelection,
@@ -48,6 +50,7 @@ impl Tool {
         Self::Eraser,
         Self::ColorPicker,
         Self::Spray,
+        Self::PaintBucket,
     ];
     const SELECT_TOOLS: [Self; 2] = [Self::RectangleSelect, Self::EllipseSelect];
 
@@ -63,6 +66,7 @@ impl Tool {
             Self::Eraser => "Eraser",
             Self::ColorPicker => "Color Picker",
             Self::Spray => "Spray",
+            Self::PaintBucket => "Paint Bucket",
         }
     }
 
@@ -78,6 +82,7 @@ impl Tool {
             Self::Eraser => icons::ERASER,
             Self::ColorPicker => icons::COLOR_PICKER,
             Self::Spray => icons::SPRAY,
+            Self::PaintBucket => icons::PAINT_BUCKET,
         }
     }
 
@@ -92,6 +97,7 @@ impl Tool {
             Self::Eraser => ERASER_KEY,
             Self::ColorPicker => COLOR_PICKER_KEY,
             Self::Spray => SPRAY_KEY,
+            Self::PaintBucket => PAINT_BUCKET_KEY,
         }
     }
 
@@ -142,6 +148,12 @@ impl Tool {
                  click says. With a selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows \
                  by its corner to move it, or around it to rotate it."
             }
+            Self::PaintBucket => {
+                "Click to fill the pixels of similar colour around the one clicked with the primary colour, or \
+                 all those in the image while Contiguous is off. Shift does the other. Right click to fill with \
+                 the secondary colour, or to pick the colour of the active layer, as Right click says. With a \
+                 selection, only the selected pixels change."
+            }
         }
     }
 
@@ -157,7 +169,8 @@ impl Tool {
             | Self::Pencil
             | Self::Eraser
             | Self::ColorPicker
-            | Self::Spray => None,
+            | Self::Spray
+            | Self::PaintBucket => None,
         }
     }
 
@@ -168,12 +181,33 @@ impl Tool {
 
     /// Whether the tool draws in a colour, which the right button can change.
     pub fn draws_in_color(self) -> bool {
-        matches!(self, Self::Paintbrush | Self::Pencil | Self::Spray)
+        matches!(self, Self::Paintbrush | Self::Pencil | Self::Spray | Self::PaintBucket)
     }
 
     /// Whether the tool can draw with smooth edges.
     pub fn can_smooth(self) -> bool {
-        matches!(self, Self::Paintbrush | Self::Eraser | Self::Spray)
+        matches!(self, Self::Paintbrush | Self::Eraser | Self::Spray | Self::PaintBucket)
+    }
+}
+
+/// Whose colours the Paint Bucket looks at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SampleSource {
+    /// The active layer's.
+    #[default]
+    Layer,
+    /// Those of all the visible layers blended together.
+    Image,
+}
+
+impl SampleSource {
+    pub const ALL: [Self; 2] = [Self::Layer, Self::Image];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Layer => "Layer",
+            Self::Image => "Image",
+        }
     }
 }
 
@@ -220,6 +254,13 @@ pub struct Tools {
     /// Whether the tools that can draw with smooth edges do.
     pub antialiasing: bool,
     pub right_click: RightClick,
+    /// Whether the Paint Bucket only fills the pixels like the one clicked that reach it
+    /// through others like it, rather than all those like it in the image.
+    pub contiguous: bool,
+    /// How different a pixel's colour can be from the one clicked, as a percentage,
+    /// for the Paint Bucket to fill it.
+    pub tolerance: u32,
+    pub sample_source: SampleSource,
 }
 
 impl Default for Tools {
@@ -238,6 +279,9 @@ impl Default for Tools {
             spray_speed: 25,
             antialiasing: true,
             right_click: RightClick::default(),
+            contiguous: true,
+            tolerance: 50,
+            sample_source: SampleSource::default(),
         }
     }
 }

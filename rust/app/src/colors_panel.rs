@@ -1,7 +1,8 @@
 //! The Colors section of the dock: the primary colour, which the tools draw with, and
 //! the secondary one. A click on either swatch picks which one the wheel edits; More
 //! shows sliders and fields to set it to the exact value. A click on the palette sets the primary
-//! colour, a right click the secondary one.
+//! colour, a right click the secondary one. The section also says what the right button
+//! does with the tools that draw in a colour.
 
 use std::f32::consts::TAU;
 
@@ -9,6 +10,8 @@ use eframe::egui::{
     self, Color32, Key, KeyboardShortcut, Mesh, Modifiers, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2,
 };
 use power_paint_core::Rgba;
+
+use crate::tools::RightClick;
 
 pub const SWAP_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::X);
 pub const RESET_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::D);
@@ -181,8 +184,9 @@ impl Colors {
         *edited = Rgba([red, green, blue, edited[3]]);
     }
 
-    /// Shows the section.
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// Shows the section, with `right_click`, what the right button does with the tools
+    /// that draw in a colour.
+    pub fn show(&mut self, ui: &mut egui::Ui, right_click: &mut RightClick) {
         self.follow_edited();
         ui.horizontal(|ui| {
             self.swatches(ui);
@@ -199,6 +203,7 @@ impl Colors {
                 }
             });
         });
+        right_click_option(ui, right_click);
         self.follow_edited();
         self.wheel(ui);
         self.palette(ui);
@@ -505,6 +510,25 @@ fn slider_row(
         changed
     })
     .inner
+}
+
+/// What the right button does with the tools that draw in a colour.
+fn right_click_option(ui: &mut egui::Ui, right_click: &mut RightClick) {
+    ui.horizontal(|ui| {
+        ui.label("Right click:");
+        egui::ComboBox::from_id_salt("right_click")
+            .selected_text(right_click.name())
+            .show_ui(ui, |ui| {
+                for option in RightClick::ALL {
+                    ui.selectable_value(right_click, option, option.name());
+                }
+            })
+            .response
+            .on_hover_text(
+                "What the right button does with the Paintbrush, the Pencil, the Spray and the Paint Bucket: \
+                 draw in the secondary color, or pick the color of the active layer as the one being edited here.",
+            );
+    });
 }
 
 /// A square of a colour, over light and dark quarters for a see-through one to show as one.

@@ -1,12 +1,11 @@
 //! The steps the current image went through, oldest first, each with its icon and
 //! name. The step the image is as of stands out, and those undone after it are dimmed.
 //! A click on a step undoes or redoes as many steps as it takes to get back to it.
-//! Buttons under the list undo and redo one step.
 
 use eframe::egui::{self, Pos2, Rect, Sense, TextStyle, TextWrapMode, Vec2, WidgetText};
 use power_paint_core::Document;
 
-use crate::icons::{self, ICON_SIZE, Icon, Icons};
+use crate::icons::{ICON_SIZE, Icon, Icons};
 
 /// Room around the parts of a row, in points.
 const ROW_MARGIN: f32 = 4.0;
@@ -16,49 +15,24 @@ const LIST_MAX_HEIGHT: f32 = 200.0;
 /// How much of their colour the undone steps keep.
 const UNDONE_OPACITY: f32 = 0.4;
 
-/// What a button or a step clicked asks for.
-pub enum Action {
-    GoTo(usize),
-    Undo,
-    Redo,
-}
-
-/// Shows the list and the buttons under it, which do nothing unless `enabled`.
-/// `undo` and `redo` are the tooltips of the buttons. The current step is brought
-/// into view when it changes, and with `image_changed`.
+/// Shows the list, which does nothing unless `enabled`. The current step is brought
+/// into view when it changes, and with `image_changed`. Returns the step clicked.
 pub fn show(
     ui: &mut egui::Ui,
     document: &Document,
     icons: &mut Icons,
     enabled: bool,
     image_changed: bool,
-    undo: &str,
-    redo: &str,
-) -> Option<Action> {
-    let mut action = None;
+) -> Option<usize> {
+    let mut clicked = None;
     egui::ScrollArea::vertical()
         .id_salt("history")
         .max_height(LIST_MAX_HEIGHT)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            ui.add_enabled_ui(enabled, |ui| action = list(ui, document, icons, image_changed).map(Action::GoTo));
+            ui.add_enabled_ui(enabled, |ui| clicked = list(ui, document, icons, image_changed));
         });
-    ui.add_space(ROW_MARGIN);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        let tint = ui.visuals().strong_text_color();
-        let buttons = [
-            (icons::UNDO, undo, document.can_undo(), Action::Undo),
-            (icons::REDO, redo, document.can_redo(), Action::Redo),
-        ];
-        for (icon, tooltip, can, button_action) in buttons {
-            let icon = egui::Image::new(icons.get(ui.ctx(), icon)).fit_to_exact_size(ICON_SIZE).tint(tint);
-            if ui.add_enabled(enabled && can, egui::Button::image(icon)).on_hover_text(tooltip).clicked() {
-                action = Some(button_action);
-            }
-        }
-    });
-    action
+    clicked
 }
 
 /// Returns the step clicked.
