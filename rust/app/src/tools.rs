@@ -85,7 +85,8 @@ impl Tool {
             }
             Self::Pencil => {
                 "Drag to draw hard-edged lines in the colour, which replaces the pixels under it. With a \
-                 selection, only the selected pixels change."
+                 selection, only the selected pixels change. Drag a handle of its box to resize it, the \
+                 arrows by its corner to move it, or around it to rotate it."
             }
         }
     }

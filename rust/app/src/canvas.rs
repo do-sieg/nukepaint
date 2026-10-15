@@ -6,8 +6,11 @@
 //! selection's box, and Move Selection does the same to the selection alone. The Zoom
 //! tool zooms in on a left click or on the area a left drag frames, and out on a right
 //! click. The Pencil draws a line along a left drag, on the selected pixels alone if
-//! any are. The selection shows as a tinted area in a dashed outline, with a button by
-//! it to go from one to the other.
+//! any are, or resizes or moves the selection from a handle of its box, or the one
+//! out from its bottom right corner, or rotates it from around the box. The
+//! selection shows as a tinted area in a dashed outline, with a button by it: with the
+//! selection tools and Move Selection, to go from one to the other, and with the other
+//! tools, to deselect.
 
 use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -18,9 +21,9 @@ use power_paint_core::{PencilStroke, Selection, SelectionMode, pencil_tip};
 use crate::{
     OpenImage,
     frame_select::Shape,
-    icons::{self, Icons},
+    icons::{self, Icon, Icons},
     tools::{Tool, Tools, ZoomDrag},
-    transform::{BoxState, DragKind, Transform},
+    transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, Transform},
     view::View,
 };
 
@@ -38,8 +41,10 @@ const ZOOM_DRAG_THRESHOLD: f32 = 4.0;
 /// from its holes. Move Selection tints it more, as a sign that only the outline moves.
 const SELECTION_TINT: Color32 = Color32::from_rgba_unmultiplied_const(51, 128, 255, 31);
 const MOVE_SELECTION_TINT: Color32 = Color32::from_rgba_unmultiplied_const(51, 128, 255, 64);
-/// Side of the handles on the selection's box, in points.
-const HANDLE_SIZE: f32 = 6.0;
+/// Side of the handles on the selection's box, in points, and of the arrows on the
+/// one that moves it.
+const HANDLE_SIZE: f32 = 8.0;
+const MOVE_HANDLE_ARROWS: f32 = 10.0;
 /// Room between the selection and the button by it, in points.
 const BUTTON_GAP: f32 = 4.0;
 /// Size of the icon on the button by the selection, and the room around it, in points:
@@ -53,6 +58,8 @@ const OUTLINED_TIP: f32 = 8.0;
 /// and the point of the Pencil's that draws, from its top left.
 const CURSOR_SIZE: Vec2 = Vec2::splat(24.0);
 const PENCIL_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
+/// The point of the rotate cursor that is on the pointer, its middle.
+const ROTATE_HOTSPOT: Vec2 = Vec2::new(12.0, 12.0);
 
 /// A 2 × 2 checkerboard that repeats, to stretch over transparent areas.
 pub fn checker_texture(ctx: &egui::Context) -> TextureHandle {
@@ -77,6 +84,8 @@ pub struct Output {
     pub pointer_pixel: Option<(i64, i64)>,
     /// The tool the button by the selection asks for.
     pub tool_requested: Option<Tool>,
+    /// Set when the Deselect button by the selection is clicked.
+    pub deselect_requested: bool,
 }
 
 /// Shows the image, and works the current tool on it.
@@ -143,31 +152,43 @@ pub fn show(
     }
     if let Some(at) = drawing_at {
         paint_tip(&painter, &image.view, image.view.pixel_at(at), tools);
-        paint_cursor(ui, icons, at);
+        paint_cursor(ui, icons, icons::CURSOR_PENCIL, PENCIL_HOTSPOT, at);
     }
-    let mut tool_requested = None;
-    if let Some(state) = box_state(image, tools) {
-        paint_handles(&painter, &image.view, state);
-        let idle = !tools.frame_select.is_dragging() && !image.transform.as_ref().is_some_and(Transform::is_dragging);
-        if idle {
-            tool_requested = switch_button(ui, image, tools, icons, viewport);
+    let box_shown = box_state(image, tools);
+    if let Some(state) = box_shown {
+        paint_handles(&painter, &image.view, state, icons);
+    }
+    let (mut tool_requested, mut deselect_requested) = (None, false);
+    let idle = !tools.frame_select.is_dragging() && tools.zoom_drag.is_none() && !image.is_dragging();
+    if idle && let Some(clicked) = selection_button(ui, image, tools, icons, viewport, box_shown) {
+        match clicked {
+            SelectionButton::Deselect => deselect_requested = true,
+            SelectionButton::Switch(tool) => tool_requested = Some(tool),
         }
     }
-    Output { pointer_pixel: pointer.map(|pointer| image.view.pixel_at(pointer)), tool_requested }
+    // The pointer egui has to turn a box is drawn here as a turning arrow.
+    if ui.ctx().output(|output| output.cursor_icon) == CursorIcon::Alias
+        && let Some(at) = ui.ctx().pointer_latest_pos()
+    {
+        paint_cursor(ui, icons, icons::CURSOR_ROTATE, ROTATE_HOTSPOT, at);
+    }
+    let pointer_pixel = pointer.map(|pointer| image.view.pixel_at(pointer));
+    Output { pointer_pixel, tool_requested, deselect_requested }
 }
 
 /// The selection's box, if the tool shows one: Move Selection's moves the outline
 /// alone, and the selection tools' moves the selected pixels, except while they draw
-/// a new selection.
+/// a new selection. The Pencil's resizes the outline by its handles, moves it by the
+/// one out from its bottom right corner, and rotates it from around it.
 fn box_state(image: &OpenImage, tools: &Tools) -> Option<BoxState> {
-    let shown = tools.tool == Tool::MoveSelection
+    let shown = matches!(tools.tool, Tool::MoveSelection | Tool::Pencil)
         || (tools.tool.select_shape().is_some() && !tools.frame_select.is_dragging());
     if !shown {
         return None;
     }
     match &image.transform {
         Some(transform) => Some(transform.state()),
-        None => image.document.selection.bounds().map(BoxState::around),
+        None => BoxState::of(&image.document.selection),
     }
 }
 
@@ -320,39 +341,81 @@ fn use_zoom(ui: &egui::Ui, response: &egui::Response, view: &mut View, tools: &m
 }
 
 /// Works the Pencil: a left drag draws a line on the active layer, which is a step
-/// once let go if it changed anything.
+/// once let go if it changed anything. A left drag from a handle of the selection's
+/// box resizes the selection instead, and one from the handle out from its bottom
+/// right corner moves it, and one from around the box rotates it, without its pixels,
+/// as Move Selection does.
 /// Returns whether the pointer is the Pencil's, over the image or drawing.
 fn use_pencil(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, tools: &Tools, space: bool) -> bool {
+    let reach = image.view.pixels_per_screen_point();
+    let handle_at = |image: &OpenImage, point: Pos2| {
+        box_state(image, tools)?.handle_at(image.view.point_at(point), reach)
+    };
+    if ui.input(|input| input.key_pressed(Key::Escape))
+        && let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging())
+    {
+        image.document.selection = transform.cancel();
+    }
     if response.drag_started_by(PointerButton::Primary)
         && !space
         && let Some(press) = ui.input(|input| input.pointer.press_origin())
     {
-        // A transform would go on from the pixels as they were before.
-        image.transform = None;
-        let mask = image.document.selection_mask();
-        let at = image.view.pixel_at(press);
-        let layer = &mut image.document.active_mut().pixels;
-        let (stroke, area) = PencilStroke::begin(layer, at, tools.color, tools.pencil_size, mask);
-        // Nothing to show again while all it went over was left as it was.
-        if let Some(area) = area.filter(|_| stroke.changed()) {
+        if let Some(kind) = handle_at(image, press) {
+            if image.transform.is_none() {
+                image.transform = Transform::begin(ui.ctx(), &image.document, false);
+            }
+            if let Some(transform) = &mut image.transform {
+                transform.press(kind, image.view.point_at(press));
+            }
+        } else {
+            // A transform would go on from the selection as it was before.
+            image.transform = None;
+            let mask = image.document.selection_mask();
+            let at = image.view.pixel_at(press);
+            let layer = &mut image.document.active_mut().pixels;
+            let (stroke, area) = PencilStroke::begin(layer, at, tools.color, tools.pencil_size, mask);
+            // Nothing to show again while all it went over was left as it was.
+            if let Some(area) = area.filter(|_| stroke.changed()) {
+                image.refresh_area(area);
+            }
+            image.stroke = Some(stroke);
+        }
+    }
+    let dragged = response.dragged_by(PointerButton::Primary) && response.drag_delta() != Vec2::ZERO;
+    if dragged && let Some(at) = response.interact_pointer_pos() {
+        if let Some(stroke) = &mut image.stroke
+            && let Some(area) = stroke.draw_to(&mut image.document.active_mut().pixels, image.view.pixel_at(at))
+            && stroke.changed()
+        {
             image.refresh_area(area);
         }
-        image.stroke = Some(stroke);
+        let shift = ui.input(|input| input.modifiers.shift);
+        if let Some(transform) = image.transform.as_mut()
+            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift)
+        {
+            image.document.selection = selection;
+        }
     }
-    if let Some(stroke) = &mut image.stroke
-        && response.dragged_by(PointerButton::Primary)
-        && let Some(at) = response.interact_pointer_pos()
-        && let Some(area) = stroke.draw_to(&mut image.document.active_mut().pixels, image.view.pixel_at(at))
-        && stroke.changed()
-    {
-        image.refresh_area(area);
+    if response.drag_stopped() {
+        if let Some(stroke) = image.stroke.take()
+            && stroke.changed()
+        {
+            image.document.commit(Tool::Pencil.name(), Some(Tool::Pencil.icon().name()));
+            image.refresh(ui.ctx());
+        }
+        if let Some(transform) = image.transform.as_mut()
+            && transform.release().0
+        {
+            image.document.commit(Tool::MoveSelection.name(), Some(Tool::MoveSelection.icon().name()));
+        }
     }
-    if response.drag_stopped()
-        && let Some(stroke) = image.stroke.take()
-        && stroke.changed()
-    {
-        image.document.commit(Tool::Pencil.name(), Some(Tool::Pencil.icon().name()));
-        image.refresh(ui.ctx());
+    // A handle shows what dragging it would do, in place of the Pencil.
+    let angle = box_state(image, tools).map_or(0.0, |state| state.angle);
+    let resizing = image.transform.as_ref().and_then(Transform::drag_kind);
+    let on_handle = || ui.ctx().pointer_hover_pos().and_then(|at| handle_at(image, at));
+    if let Some(kind) = resizing.or_else(|| if image.stroke.is_none() { on_handle() } else { None }) {
+        ui.ctx().set_cursor_icon(kind.cursor(angle));
+        return false;
     }
     response.hovered() || image.stroke.is_some()
 }
@@ -416,13 +479,14 @@ fn paint_tip(painter: &Painter, view: &View, at: (i64, i64), tools: &Tools) {
     }
 }
 
-/// Shows the Pencil in place of the pointer, its point on it, over all else.
-fn paint_cursor(ui: &egui::Ui, icons: &mut Icons, at: Pos2) {
+/// Shows a cursor drawn from `cursor` in place of the pointer, `hotspot` on it, over
+/// all else.
+fn paint_cursor(ui: &egui::Ui, icons: &mut Icons, cursor: Icon, hotspot: Vec2, at: Pos2) {
     ui.ctx().set_cursor_icon(CursorIcon::None);
     // At the size its file is drawn for, as the icons are at theirs.
-    let texture = icons.get(ui.ctx(), icons::CURSOR_PENCIL);
+    let texture = icons.get(ui.ctx(), cursor);
     let layer = egui::LayerId::new(egui::Order::Tooltip, ui.id().with("tool_cursor"));
-    let corner = (at - PENCIL_HOTSPOT).round_to_pixels(ui.ctx().pixels_per_point());
+    let corner = (at - hotspot).round_to_pixels(ui.ctx().pixels_per_point());
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     ui.ctx().layer_painter(layer).image(texture.id(), Rect::from_min_size(corner, CURSOR_SIZE), uv, Color32::WHITE);
 }
@@ -481,42 +545,118 @@ fn paint_selection(painter: &Painter, view: &View, selection: &Selection, tint: 
     }
 }
 
-/// A handle on each corner of the box and in the middle of each edge.
-fn paint_handles(painter: &Painter, view: &View, state: BoxState) {
+/// A handle on each corner of the box and in the middle of each edge, and out from its
+/// bottom right corner, the one that moves it, with arrows on it.
+fn paint_handles(painter: &Painter, view: &View, state: BoxState, icons: &mut Icons) {
     let pixel = 1.0 / painter.pixels_per_point();
-    for (x, y) in state.handles() {
-        let center = view.to_screen(x as f32, y as f32).round_to_pixels(painter.pixels_per_point());
-        let handle = Rect::from_center_size(center, Vec2::splat(HANDLE_SIZE));
+    let on_screen = |(x, y): (f64, f64)| view.to_screen(x as f32, y as f32).round_to_pixels(painter.pixels_per_point());
+    for point in state.handles() {
+        let handle = Rect::from_center_size(on_screen(point), Vec2::splat(HANDLE_SIZE));
         painter.rect_filled(handle, 0.0, Color32::WHITE);
         painter.rect_stroke(handle, 0.0, Stroke::new(pixel, Color32::BLACK), egui::StrokeKind::Inside);
     }
+    let center = on_screen(state.move_handle(view.pixels_per_screen_point()));
+    let handle = Rect::from_center_size(center, Vec2::splat(MOVE_HANDLE_SIZE as f32));
+    painter.rect_filled(handle, 2.0, Color32::WHITE);
+    painter.rect_stroke(handle, 2.0, Stroke::new(pixel, Color32::BLACK), egui::StrokeKind::Inside);
+    let arrows = Rect::from_center_size(center, Vec2::splat(MOVE_HANDLE_ARROWS));
+    let texture = icons.get_sized(painter.ctx(), icons::MOVE, MOVE_HANDLE_ARROWS);
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    // The icons are light gray lines, which the tint makes black.
+    painter.image(texture.id(), arrows, uv, Color32::BLACK);
 }
 
-/// Shows a button just right of the selection's top right corner, or just inside it
-/// where the view ends there: Move Selection with the selection tools, and back to
-/// the selection tool used last with Move Selection. Returns the tool it asks for.
-fn switch_button(ui: &egui::Ui, image: &OpenImage, tools: &Tools, icons: &mut Icons, viewport: Rect) -> Option<Tool> {
-    let bounds = image.document.selection.bounds()?;
-    let target = if tools.tool == Tool::MoveSelection { tools.last_select_tool } else { Tool::MoveSelection };
-    let tooltip = match target {
-        Tool::MoveSelection => format!("{} ({})", target.name(), ui.ctx().format_shortcut(&target.key())),
-        _ => format!("Back to {} ({})", target.name(), ui.ctx().format_shortcut(&target.key())),
+/// A button by the selection.
+#[derive(Clone, Copy)]
+enum SelectionButton {
+    Deselect,
+    /// Move Selection with the selection tools, and back to the selection tool used
+    /// last with Move Selection.
+    Switch(Tool),
+}
+
+/// Shows a button by the selection: with the selection tools and Move Selection, one
+/// showing what the box moves, the selected pixels or the selection alone, which goes
+/// to the tool that moves the other; and with the other tools Deselect. It goes just
+/// right of where the selection ends, level with its rightmost handle but the bottom
+/// right corner, or else point of the outline, the highest of those as far right, and
+/// above the handle that moves the box if that is in the way. Where the view ends
+/// there, it goes just inside that handle instead. Returns whether it was clicked, as
+/// what.
+fn selection_button(
+    ui: &egui::Ui,
+    image: &OpenImage,
+    tools: &Tools,
+    icons: &mut Icons,
+    viewport: Rect,
+    box_state: Option<BoxState>,
+) -> Option<SelectionButton> {
+    let points: Vec<(f64, f64)> = match box_state {
+        Some(state) => state.handles(),
+        None => image.document.selection.outlines().iter().flatten().copied().collect(),
     };
-    let corner = image.view.to_screen(bounds.right as f32, bounds.top as f32);
+    let to_screen = |(x, y): (f64, f64)| image.view.to_screen(x as f32, y as f32);
+    let screen: Vec<Pos2> = points.into_iter().map(to_screen).collect();
+    // Not the corner the handle that moves the box is by, which the button would cover.
+    let move_corner = box_state.map(|state| to_screen(state.move_corner()));
+    let anchors = screen.iter().filter(|&&point| Some(point) != move_corner);
+    let corner = *anchors.max_by(|a, b| match a.x - b.x {
+        apart if apart.abs() > 0.5 => apart.total_cmp(&0.0),
+        _ => b.y.total_cmp(&a.y),
+    })?;
+    // Where the selection ends on the right, which a turned box can reach further than
+    // that corner.
+    let right = screen.iter().map(|point| point.x).fold(corner.x, f32::max);
+
+    let shortcut = |key| ui.ctx().format_shortcut(&key);
+    let selecting = tools.tool == Tool::MoveSelection || tools.tool.select_shape().is_some();
+    // It shows what the box moves now, and switches to moving the other.
+    let (button, icon, tooltip) = if tools.tool == Tool::MoveSelection {
+        let target = tools.last_select_tool;
+        let tooltip = format!(
+            "Moving the selection alone.\nClick to move the selected pixels instead, with {} ({}).",
+            target.name(),
+            shortcut(target.key())
+        );
+        (SelectionButton::Switch(target), icons::MOVE_SELECTION, tooltip)
+    } else if selecting {
+        let target = Tool::MoveSelection;
+        let tooltip = format!(
+            "Moving the selected pixels.\nClick to move the selection alone, with {} ({}).",
+            target.name(),
+            shortcut(target.key())
+        );
+        (SelectionButton::Switch(target), icons::MOVE_PIXELS, tooltip)
+    } else {
+        (SelectionButton::Deselect, icons::DESELECT, format!("Deselect ({})", shortcut(crate::DESELECT)))
+    };
+
     let size = BUTTON_ICON_SIZE + BUTTON_PADDING * 2.0;
-    let mut place = Pos2::new(corner.x + BUTTON_GAP, corner.y);
+    // Clear of the handle on the corner.
+    let gap = BUTTON_GAP + HANDLE_SIZE / 2.0;
+    let mut place = Pos2::new(right + gap, corner.y);
+    // Above the handle that moves the box, if it is in the way.
+    let reach = image.view.pixels_per_screen_point();
+    let move_handle = box_state.map(|state| {
+        Rect::from_center_size(to_screen(state.move_handle(reach)), Vec2::splat(MOVE_HANDLE_SIZE as f32))
+    });
+    if let Some(handle) = move_handle.map(|handle| handle.expand(BUTTON_GAP))
+        && handle.intersects(Rect::from_min_size(place, size))
+    {
+        place.y = handle.top() - size.y;
+    }
     if place.x + size.x > viewport.right() {
-        place = Pos2::new(corner.x - size.x - BUTTON_GAP, corner.y + BUTTON_GAP);
+        place = Pos2::new(corner.x - size.x - gap, corner.y + gap);
     }
     let place = place.clamp(viewport.min, (viewport.max - size).max(viewport.min));
-    let texture = icons.get_sized(ui.ctx(), target.icon(), BUTTON_ICON_SIZE.x).clone();
+    let texture = icons.get_sized(ui.ctx(), icon, BUTTON_ICON_SIZE.x).clone();
     let tint = ui.visuals().strong_text_color();
-    let area = egui::Area::new(ui.id().with("switch_selection_tool")).fixed_pos(place).show(ui.ctx(), |ui| {
+    let area = egui::Area::new(ui.id().with("selection_button")).fixed_pos(place).show(ui.ctx(), |ui| {
         ui.spacing_mut().button_padding = BUTTON_PADDING;
         let icon = egui::Image::new(&texture).fit_to_exact_size(BUTTON_ICON_SIZE).tint(tint);
         ui.add(egui::Button::image(icon)).on_hover_text(tooltip).on_hover_cursor(CursorIcon::PointingHand).clicked()
     });
-    area.inner.then_some(target)
+    area.inner.then_some(button)
 }
 
 /// Draws a closed outline. Black dashes over a white line stay visible on any image.

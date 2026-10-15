@@ -78,6 +78,16 @@ impl Bounds {
     }
 }
 
+/// A rectangle on the image's plane: its middle, its width and height, and how far it
+/// is turned about its middle, in radians clockwise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub center: (f64, f64),
+    /// Negative along an axis it has been mirrored on.
+    pub size: (f64, f64),
+    pub angle: f64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Selection {
     /// Closed outlines, in pixels of the image, which do not cross each other. They
@@ -85,6 +95,9 @@ pub struct Selection {
     /// there. A pixel is selected if its middle is inside an odd number of them, so an
     /// outline inside another is a hole in it.
     outlines: Vec<Vec<(f64, f64)>>,
+    /// The turned box the outlines were last moved, resized or turned in, kept to
+    /// carry on from: the box around them is upright.
+    frame: Option<Frame>,
 }
 
 impl Selection {
@@ -98,7 +111,7 @@ impl Selection {
     }
 
     fn from_corners(corners: Vec<(i32, i32)>) -> Self {
-        Self { outlines: vec![corners.into_iter().map(|(x, y)| (x as f64, y as f64)).collect()] }
+        Self { outlines: vec![corners.into_iter().map(|(x, y)| (x as f64, y as f64)).collect()], frame: None }
     }
 
     /// Selects the pixels whose middle is in the ellipse that fits in a rectangle, or
@@ -162,10 +175,22 @@ impl Selection {
         }))
     }
 
-    /// The selection carried somewhere else by `map`.
+    /// The turned box the selection was last moved, resized or turned in, if it was
+    /// turned.
+    pub fn frame(&self) -> Option<Frame> {
+        self.frame
+    }
+
+    /// The selection, noted as being in a box, which is kept if it is turned.
+    pub fn with_frame(self, frame: Frame) -> Self {
+        Self { frame: (frame.angle != 0.0).then_some(frame), ..self }
+    }
+
+    /// The selection carried somewhere else by `map`, out of any box it was in.
     pub fn transformed(&self, map: &Affine) -> Selection {
         let outlines = self.outlines.iter();
-        Self { outlines: outlines.map(|outline| outline.iter().map(|&point| map.apply(point)).collect()).collect() }
+        let outlines = outlines.map(|outline| outline.iter().map(|&point| map.apply(point)).collect()).collect();
+        Self { outlines, frame: None }
     }
 
     /// What a selection tool leaves selected after drawing `drawn` over this one.
@@ -190,7 +215,8 @@ impl Selection {
         let shapes = self.points().overlay(&other.points(), rule, FillRule::EvenOdd);
         // A shape is an outline and the outlines of its holes, which even-odd filling tells apart.
         let outlines = shapes.into_iter().flatten();
-        Self { outlines: outlines.map(|outline| outline.into_iter().map(|[x, y]| (x, y)).collect()).collect() }
+        let outlines = outlines.map(|outline| outline.into_iter().map(|[x, y]| (x, y)).collect()).collect();
+        Self { outlines, frame: None }
     }
 
     fn points(&self) -> Vec<Vec<[f64; 2]>> {

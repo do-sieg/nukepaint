@@ -25,4 +25,4 @@ pub use mask::SelectionMask;
 pub use pencil::{MAX_PENCIL_SIZE, PencilStroke, pencil_tip};
 pub use scale::{halve, thumbnail};
 pub use selected_pixels::{copy_selected, erase_selected};
-pub use selection::{Bounds, PixelRect, Selection, SelectionMode};
+pub use selection::{Bounds, Frame, PixelRect, Selection, SelectionMode};

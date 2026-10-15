@@ -12,14 +12,23 @@
 use std::f64::consts::PI;
 
 use eframe::egui::{self, CursorIcon, Pos2};
-use power_paint_core::{Affine, Bounds, Document, FloatingPixels, Layer, MAX_OPACITY, RgbaImage, Selection, composite};
+use power_paint_core::{
+    Affine, Bounds, Document, FloatingPixels, Frame, Layer, MAX_OPACITY, RgbaImage, Selection, composite,
+};
 
 use crate::{tiled_texture::TiledTexture, view::View};
 
 /// How far from an edge of the box, in points, a press still grabs that edge.
-pub const GRIP_REACH: f64 = 4.0;
+pub const GRIP_REACH: f64 = 7.0;
+/// How far from a handle, in points, a press still grabs it, with the tools that
+/// only resize the box by its handles.
+pub const HANDLE_REACH: f64 = 9.0;
+/// Side of the handle that moves the box, in points, and how far its middle is out
+/// from the box's bottom right corner along each side.
+pub const MOVE_HANDLE_SIZE: f64 = 14.0;
+const MOVE_HANDLE_OFFSET: f64 = 18.0;
 /// How far outside the box, in points, a press still rotates it.
-pub const ROTATE_REACH: f64 = 24.0;
+pub const ROTATE_REACH: f64 = 30.0;
 /// Rotation step while Shift is held.
 const ROTATE_SNAP: f64 = PI / 12.0;
 
@@ -37,6 +46,13 @@ impl BoxState {
         Self { center: bounds.center(), size: (bounds.width(), bounds.height()), angle: 0.0 }
     }
 
+    /// The box of a selection: the turned one it was last left in, or else the one
+    /// around it. Nothing if nothing is selected.
+    pub fn of(selection: &Selection) -> Option<Self> {
+        let bounds = selection.bounds()?;
+        Some(selection.frame().map_or_else(|| Self::around(bounds), Self::from))
+    }
+
     /// The middle of each edge and each corner, on the image.
     pub fn handles(&self) -> Vec<(f64, f64)> {
         let half = (self.size.0.abs() / 2.0, self.size.1.abs() / 2.0);
@@ -51,9 +67,33 @@ impl BoxState {
         handles
     }
 
+    /// The bottom right corner, as the box is turned, which the handle that moves it
+    /// is by.
+    pub fn move_corner(&self) -> (f64, f64) {
+        let half = (self.size.0.abs() / 2.0, self.size.1.abs() / 2.0);
+        add(self.center, rotate(half, self.angle))
+    }
+
+    /// The middle of the handle that moves the box, on the image, out from its bottom
+    /// right corner. `reach` is how many pixels of the image a point of the screen takes.
+    pub fn move_handle(&self, reach: f64) -> (f64, f64) {
+        let half = (self.size.0.abs() / 2.0, self.size.1.abs() / 2.0);
+        let out = MOVE_HANDLE_OFFSET * reach;
+        add(self.center, rotate((half.0 + out, half.1 + out), self.angle))
+    }
+
+    /// Whether a point of the image is on the handle that moves the box.
+    pub fn on_move_handle(&self, point: (f64, f64), reach: f64) -> bool {
+        let (dx, dy) = sub(point, self.move_handle(reach));
+        dx.abs().max(dy.abs()) <= MOVE_HANDLE_SIZE / 2.0 * reach
+    }
+
     /// What a press at a point of the image would do to the box. `reach` is how many
     /// pixels of the image a point of the screen takes.
     pub fn drag_at(&self, point: (f64, f64), reach: f64) -> Option<DragKind> {
+        if self.on_move_handle(point, reach) {
+            return Some(DragKind::Move);
+        }
         let local = rotate(sub(point, self.center), -self.angle);
         let outside = (local.0.abs() - self.size.0.abs() / 2.0, local.1.abs() - self.size.1.abs() / 2.0);
         let distance = outside.0.max(outside.1);
@@ -68,6 +108,29 @@ impl BoxState {
             return Some(DragKind::Resize(grip));
         }
         Some(if distance <= 0.0 { DragKind::Move } else { DragKind::Rotate })
+    }
+
+    /// What a press at a point of the image does with the tools that only work the box
+    /// from its handles: on a handle of an edge or corner, it resizes the box by them;
+    /// on the handle that moves it, it moves it; and in the band around it that rotates
+    /// it with the other tools, it rotates it. Elsewhere, nothing. `reach` is how many pixels of the image a point
+    /// of the screen takes.
+    pub fn handle_at(&self, point: (f64, f64), reach: f64) -> Option<DragKind> {
+        let on_handle = self.handles().into_iter().any(|handle| {
+            let (dx, dy) = sub(point, handle);
+            dx.abs().max(dy.abs()) <= HANDLE_REACH * reach
+        });
+        let grip = self.grip_at(point, HANDLE_REACH * reach);
+        if on_handle && grip != (0, 0) {
+            return Some(DragKind::Resize(grip));
+        }
+        if self.on_move_handle(point, reach) {
+            return Some(DragKind::Move);
+        }
+        // Around the box, as with the other tools.
+        let local = rotate(sub(point, self.center), -self.angle);
+        let outside = (local.0.abs() - self.size.0.abs() / 2.0).max(local.1.abs() - self.size.1.abs() / 2.0);
+        (outside > 0.0 && outside <= ROTATE_REACH * reach).then_some(DragKind::Rotate)
     }
 
     /// Which edges of the box are within `reach` of a point: -1 for the left or top
@@ -133,6 +196,18 @@ impl BoxState {
     }
 }
 
+impl From<Frame> for BoxState {
+    fn from(Frame { center, size, angle }: Frame) -> Self {
+        Self { center, size, angle }
+    }
+}
+
+impl From<BoxState> for Frame {
+    fn from(BoxState { center, size, angle }: BoxState) -> Self {
+        Self { center, size, angle }
+    }
+}
+
 /// Which end of a span from `-half` to `half` a value is within `reach` of.
 fn edge_at(value: f64, half: f64, reach: f64) -> i32 {
     // Inside a small box the reach shrinks, so its middle can still be grabbed to move it.
@@ -160,7 +235,7 @@ impl DragKind {
     pub fn cursor(self, angle: f64) -> CursorIcon {
         match self {
             Self::Move => CursorIcon::Move,
-            // The closest there is to a turning arrow.
+            // There is no turning arrow: this stands for one, which the canvas draws.
             Self::Rotate => CursorIcon::Alias,
             Self::Resize((x, y)) => {
                 // The arrow that best matches the way the grabbed edge faces on screen.
@@ -218,8 +293,8 @@ impl Floating {
 }
 
 pub struct Transform {
-    /// The box around the selection when the transform began, and the selection then.
-    start: Bounds,
+    /// The selection's box when the transform began, and the selection then.
+    start: BoxState,
     selection_start: Selection,
     /// The pixels being moved; none when only the outline is.
     floating: Option<Floating>,
@@ -232,24 +307,24 @@ impl Transform {
     /// holds with `with_pixels`. There is nothing to move without a selection.
     pub fn begin(ctx: &egui::Context, document: &Document, with_pixels: bool) -> Option<Self> {
         let selection = &document.selection;
-        let start = selection.bounds()?;
+        let start = BoxState::of(selection)?;
         let floating = with_pixels.then(|| FloatingPixels::lift(&document.active().pixels, selection)).flatten();
         let floating = floating.map(|pixels| Floating::new(ctx, pixels, document));
-        Some(Self { start, selection_start: selection.clone(), floating, state: BoxState::around(start), drag: None })
+        Some(Self { start, selection_start: selection.clone(), floating, state: start, drag: None })
     }
 
     /// Starts moving pixels pasted on the document's active layer, selected all around.
     pub fn begin_pasted(ctx: &egui::Context, pixels: FloatingPixels, document: &Document) -> Self {
         let selection = Selection::rect(pixels.area());
         // Pasted pixels are never empty, so neither is their selection.
-        let start = selection.bounds().expect("pasted pixels are selected");
+        let start = BoxState::of(&selection).expect("pasted pixels are selected");
         let floating = Some(Floating::new(ctx, pixels, document));
-        Self { start, selection_start: selection, floating, state: BoxState::around(start), drag: None }
+        Self { start, selection_start: selection, floating, state: start, drag: None }
     }
 
-    /// The selection the box holds.
+    /// The selection the box holds, which keeps the box if it is turned.
     pub fn selection(&self) -> Selection {
-        self.selection_start.transformed(&self.affine())
+        self.selection_start.transformed(&self.affine()).with_frame(self.state.into())
     }
 
     pub fn state(&self) -> BoxState {
@@ -306,9 +381,10 @@ impl Transform {
 
     /// Maps the box as it was at first onto the box as it is now.
     fn affine(&self) -> Affine {
-        let (start_x, start_y) = self.start.center();
-        let scale = (self.state.size.0 / self.start.width(), self.state.size.1 / self.start.height());
+        let (start_x, start_y) = self.start.center;
+        let scale = (self.state.size.0 / self.start.size.0, self.state.size.1 / self.start.size.1);
         Affine::translation(-start_x, -start_y)
+            .then(Affine::rotation(-self.start.angle))
             .then(Affine::scale(scale.0, scale.1))
             .then(Affine::rotation(self.state.angle))
             .then(Affine::translation(self.state.center.0, self.state.center.1))
@@ -342,7 +418,7 @@ impl Transform {
             view.to_screen(x as f32, y as f32)
         };
         // About how many screen pixels each of the pixels takes, to draw from the copy that suits.
-        let scale = (self.state.size.0.abs() / self.start.width()).max(self.state.size.1.abs() / self.start.height());
+        let scale = (self.state.size.0 / self.start.size.0).abs().max((self.state.size.1 / self.start.size.1).abs());
         floating.texture.paint_mapped(painter, to_screen, scale as f32 * view.zoom, opacity);
     }
 }
@@ -378,6 +454,37 @@ mod tests {
         assert_eq!(state.drag_at((50.0, 90.0), 1.0), None);
         // Zoomed in four times, the reaches cover fewer pixels.
         assert_eq!(state.drag_at((50.0, 60.0), 0.25), None);
+    }
+
+    #[test]
+    fn handles_alone_work_the_box() {
+        let state = upright(0.0, 0.0, 100.0, 50.0);
+        assert_eq!(state.handle_at((101.0, 49.0), 1.0), Some(DragKind::Resize((1, 1))));
+        assert_eq!(state.handle_at((50.0, -3.0), 1.0), Some(DragKind::Resize((0, -1))));
+        // Along an edge, away from its handles, or inside.
+        assert_eq!(state.handle_at((100.0, 12.0), 1.0), None);
+        assert_eq!(state.handle_at((30.0, 25.0), 1.0), None);
+        // The handle out from the bottom right corner moves it, and around it, it rotates.
+        assert_eq!(state.move_handle(1.0), (118.0, 68.0));
+        assert_eq!(state.handle_at((121.0, 64.0), 1.0), Some(DragKind::Move));
+        assert_eq!(state.handle_at((103.0, 68.0), 1.0), Some(DragKind::Rotate));
+        // All around the box, it rotates, but no further.
+        assert_eq!(state.handle_at((110.0, -10.0), 1.0), Some(DragKind::Rotate));
+        assert_eq!(state.handle_at((50.0, -15.0), 1.0), Some(DragKind::Rotate));
+        assert_eq!(state.handle_at((140.0, -40.0), 1.0), None);
+    }
+
+    #[test]
+    fn the_move_handle_moves_the_box() {
+        let state = upright(0.0, 0.0, 100.0, 50.0);
+        assert_eq!(state.drag_at((118.0, 68.0), 1.0), Some(DragKind::Move));
+        // Around it, the box rotates, as all around the box.
+        assert_eq!(state.drag_at((128.0, 78.0), 1.0), Some(DragKind::Rotate));
+        // Further out when zoomed out, and on a turned box, out from its turned corner.
+        assert_eq!(state.move_handle(2.0), (136.0, 86.0));
+        let turned = BoxState { angle: PI / 2.0, ..state };
+        let (x, y) = turned.move_handle(1.0);
+        assert!((x - (50.0 - 43.0)).abs() < 1e-9 && (y - (25.0 + 68.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -438,5 +545,34 @@ mod tests {
         let wider = transform.drag_to((23.0, 5.0), false).unwrap();
         assert_eq!(wider.bounds(), Some(Bounds { left: 3.0, top: 0.0, right: 23.0, bottom: 10.0 }));
         assert_eq!(transform.cancel().bounds(), moved.bounds());
+    }
+
+    #[test]
+    fn a_turned_box_is_kept_by_the_selection() {
+        let mut document = Document::new(RgbaImage::new(40, 40));
+        document.selection = Selection::rect(power_paint_core::PixelRect { left: 10, top: 10, right: 30, bottom: 20 });
+        let ctx = egui::Context::default();
+        let mut transform = Transform::begin(&ctx, &document, false).unwrap();
+        transform.press(DragKind::Rotate, (30.0, 15.0));
+        let turned = transform.drag_to((20.0, 25.0), false).unwrap();
+        transform.release();
+        let state = transform.state();
+        assert_eq!(BoxState::of(&turned), Some(state));
+        // Left and taken up again, by undoing a Deselect, the box carries on as it was.
+        document.selection = turned.clone();
+        let mut again = Transform::begin(&ctx, &document, false).unwrap();
+        assert_eq!(again.state(), state);
+        again.press(DragKind::Move, (20.0, 15.0));
+        let moved = again.drag_to((22.0, 15.0), false).unwrap();
+        let expected = turned.transformed(&Affine::translation(2.0, 0.0));
+        for (outline, expected) in moved.outlines().iter().zip(expected.outlines()) {
+            for (point, expected) in outline.iter().zip(expected) {
+                assert!((point.0 - expected.0).abs() < 1e-9 && (point.1 - expected.1).abs() < 1e-9);
+            }
+        }
+        // Turned back upright, it is in the box around it.
+        again.press(DragKind::Rotate, (22.0, 25.0));
+        let upright = again.drag_to((32.0, 15.0), false).unwrap();
+        assert!(upright.frame().is_none());
     }
 }

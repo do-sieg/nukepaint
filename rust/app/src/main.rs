@@ -1284,6 +1284,9 @@ impl eframe::App for App {
                 if let Some(tool) = output.tool_requested {
                     self.set_tool(tool);
                 }
+                if output.deselect_requested {
+                    self.edit(&ctx, EditCommand::Deselect);
+                }
             }
             None => {
                 self.pointer_pixel = None;
