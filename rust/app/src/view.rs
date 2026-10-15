@@ -134,6 +134,15 @@ impl View {
         self.set_zoom(fit.x.min(fit.y), self.viewport.center());
     }
 
+    /// Shows an area of the image, in pixels, as large as the view allows, in the
+    /// middle of the view as far as scrolling allows.
+    pub fn zoom_to_rect(&mut self, area: Rect) {
+        let fit = self.viewport.size() * self.pixels_per_point / area.size();
+        self.set_zoom(fit.x.min(fit.y), self.viewport.center());
+        let center = area.center();
+        self.pan(self.viewport.center() - self.to_screen(center.x, center.y));
+    }
+
     /// Moves to the next zoom level up or down. What is under `anchor`, a point of
     /// the screen, stays there.
     pub fn step_zoom(&mut self, direction: i32, anchor: Pos2) {
@@ -236,6 +245,17 @@ mod tests {
         view.step_zoom(1, anchor);
         assert_eq!(view.zoom, 2.0);
         assert_eq!(view.pixel_at(anchor), before);
+    }
+
+    #[test]
+    fn zoom_to_rect_fits_and_centers_the_area() {
+        let mut view = placed(Vec2::new(1000.0, 1000.0), Vec2::new(400.0, 200.0));
+        view.zoom_to_rect(Rect::from_min_size(Pos2::new(600.0, 300.0), Vec2::new(100.0, 25.0)));
+        assert_eq!(view.zoom, 4.0);
+        assert_eq!(view.pixel_at(Pos2::new(210.0, 120.0)), (650, 312));
+        // An area too thin to fit stops at the largest zoom.
+        view.zoom_to_rect(Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(0.0, 5.0)));
+        assert_eq!(view.zoom, 32.0);
     }
 
     #[test]

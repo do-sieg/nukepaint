@@ -1,6 +1,6 @@
 //! The tools that act on the image, and what they are set to.
 
-use eframe::egui::{Key, KeyboardShortcut, Modifiers};
+use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
 use power_paint_core::SelectionMode;
 
 use crate::{
@@ -11,6 +11,8 @@ use crate::{
 /// Goes from one selection tool to the next.
 pub const SELECT_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::S);
 pub const MOVE_SELECTION_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::M);
+pub const ZOOM_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Z);
+pub const PAN_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::H);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -18,10 +20,12 @@ pub enum Tool {
     RectangleSelect,
     EllipseSelect,
     MoveSelection,
+    Zoom,
+    Pan,
 }
 
 impl Tool {
-    pub const ALL: [Self; 3] = [Self::RectangleSelect, Self::EllipseSelect, Self::MoveSelection];
+    pub const ALL: [Self; 5] = [Self::RectangleSelect, Self::EllipseSelect, Self::MoveSelection, Self::Zoom, Self::Pan];
     const SELECT_TOOLS: [Self; 2] = [Self::RectangleSelect, Self::EllipseSelect];
 
     pub fn name(self) -> &'static str {
@@ -29,6 +33,8 @@ impl Tool {
             Self::RectangleSelect => "Rectangle Select",
             Self::EllipseSelect => "Ellipse Select",
             Self::MoveSelection => "Move Selection",
+            Self::Zoom => "Zoom",
+            Self::Pan => "Pan",
         }
     }
 
@@ -37,6 +43,8 @@ impl Tool {
             Self::RectangleSelect => icons::RECT_SELECT,
             Self::EllipseSelect => icons::ELLIPSE_SELECT,
             Self::MoveSelection => icons::MOVE_SELECTION,
+            Self::Zoom => icons::ZOOM,
+            Self::Pan => icons::PAN,
         }
     }
 
@@ -44,6 +52,8 @@ impl Tool {
         match self {
             Self::RectangleSelect | Self::EllipseSelect => SELECT_KEY,
             Self::MoveSelection => MOVE_SELECTION_KEY,
+            Self::Zoom => ZOOM_KEY,
+            Self::Pan => PAN_KEY,
         }
     }
 
@@ -62,6 +72,11 @@ impl Tool {
                 "Drag the selection's box to move, resize or rotate the selection, without its pixels. Shift keeps \
                  its proportions, or turns it in steps of 15°."
             }
+            Self::Zoom => "Click to zoom in, right click to zoom out, or drag to frame what to zoom in on.",
+            Self::Pan => {
+                "Drag to scroll the image. The middle button, or the left one while Space is held, does it with \
+                 any tool."
+            }
         }
     }
 
@@ -70,7 +85,7 @@ impl Tool {
         match self {
             Self::RectangleSelect => Some(Shape::Rectangle),
             Self::EllipseSelect => Some(Shape::Ellipse),
-            Self::MoveSelection => None,
+            Self::MoveSelection | Self::Zoom | Self::Pan => None,
         }
     }
 }
@@ -83,6 +98,17 @@ pub struct Tools {
     /// What selecting does to the selection there already is, unless Ctrl is held.
     pub selection_mode: SelectionMode,
     pub frame_select: FrameSelect,
+    pub zoom_drag: Option<ZoomDrag>,
+}
+
+/// A press of the Zoom tool, until it is let go.
+pub struct ZoomDrag {
+    pub button: PointerButton,
+    /// Where it was pressed and where it is now, on the image, in pixels.
+    pub from: (f64, f64),
+    pub to: (f64, f64),
+    /// Whether the left button has gone far enough to frame an area, rather than click.
+    pub framing: bool,
 }
 
 impl Tools {

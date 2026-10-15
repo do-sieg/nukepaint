@@ -1,10 +1,12 @@
 //! The current image, zoomed and scrolled, over a checkerboard. Ctrl and the wheel,
 //! or a pinch, zoom on the pointer, and the wheel alone scrolls. The middle button,
-//! or the left one while Space is held, drags the image around. The left button
-//! otherwise works the current tool: the selection tools select a rectangle or an
-//! ellipse, or move, resize and rotate the selected pixels from the selection's box,
-//! and Move Selection does the same to the selection alone. The selection shows as a
-//! tinted area in a dashed outline, with a button by it to go from one to the other.
+//! or the left one with the Pan tool or while Space is held, drags the image around.
+//! The left button otherwise works the current tool: the selection tools select a
+//! rectangle or an ellipse, or move, resize and rotate the selected pixels from the
+//! selection's box, and Move Selection does the same to the selection alone. The Zoom
+//! tool zooms in on a left click or on the area a left drag frames, and out on a right
+//! click. The selection shows as a tinted area in a dashed outline, with a button by it
+//! to go from one to the other.
 
 use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -16,7 +18,7 @@ use crate::{
     OpenImage,
     frame_select::Shape,
     icons::{self, Icons},
-    tools::{Tool, Tools},
+    tools::{Tool, Tools, ZoomDrag},
     transform::{BoxState, DragKind, Transform},
     view::View,
 };
@@ -29,6 +31,8 @@ const CHECKER_DARK: Color32 = Color32::from_gray(153);
 const POINTS_PER_ZOOM_STEP: f32 = 50.0;
 /// Length, in screen pixels, of the dashes of an outline and of the gaps between them.
 const OUTLINE_DASH: f32 = 4.0;
+/// How far, in points, the Zoom tool must be dragged to frame an area rather than click.
+const ZOOM_DRAG_THRESHOLD: f32 = 4.0;
 /// What the selection is tinted with, which its outline alone does not always tell
 /// from its holes. Move Selection tints it more, as a sign that only the outline moves.
 const SELECTION_TINT: Color32 = Color32::from_rgba_unmultiplied_const(51, 128, 255, 31);
@@ -104,21 +108,29 @@ pub fn show(
 
     let response = output.inner;
     let space = ui.input(|input| input.key_down(Key::Space));
-    let busy = tools.frame_select.is_dragging() || image.transform.as_ref().is_some_and(Transform::is_dragging);
+    let busy = tools.frame_select.is_dragging()
+        || tools.zoom_drag.is_some()
+        || image.transform.as_ref().is_some_and(Transform::is_dragging);
+    let hand = space || tools.tool == Tool::Pan;
     let panning = response.dragged_by(PointerButton::Middle)
-        || (space && response.dragged_by(PointerButton::Primary) && !busy);
+        || (hand && response.dragged_by(PointerButton::Primary) && !busy);
     if panning {
         image.view.pan(response.drag_delta());
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-    } else if space && response.hovered() && !busy {
+    } else if hand && response.hovered() && !busy {
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
-    } else {
+    } else if tools.tool == Tool::Zoom {
+        use_zoom(ui, &response, &mut image.view, tools, space);
+    } else if tools.tool != Tool::Pan {
         use_tool(ui, &response, image, tools, pointer, space);
     }
 
     let painter = ui.painter_at(viewport);
     let tint = if tools.tool == Tool::MoveSelection { MOVE_SELECTION_TINT } else { SELECTION_TINT };
     paint_selection(&painter, &image.view, &image.document.selection, tint);
+    if let Some(drag) = tools.zoom_drag.as_ref().filter(|drag| drag.framing) {
+        paint_zoom_frame(&painter, &image.view, drag);
+    }
     let mut tool_requested = None;
     if let Some(state) = box_state(image, tools) {
         paint_handles(&painter, &image.view, state);
@@ -134,7 +146,8 @@ pub fn show(
 /// alone, and the selection tools' moves the selected pixels, except while they draw
 /// a new selection.
 fn box_state(image: &OpenImage, tools: &Tools) -> Option<BoxState> {
-    let shown = tools.tool == Tool::MoveSelection || !tools.frame_select.is_dragging();
+    let shown = tools.tool == Tool::MoveSelection
+        || (tools.tool.select_shape().is_some() && !tools.frame_select.is_dragging());
     if !shown {
         return None;
     }
@@ -247,6 +260,66 @@ fn use_tool(
     } else if shape.is_some() && (response.hovered() || tools.frame_select.is_dragging()) {
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
     }
+}
+
+/// Works the Zoom tool: a click zooms a level in on the pointer, or out with the right
+/// button, and a drag with the left one frames the area to show. Escape cancels a drag.
+fn use_zoom(ui: &egui::Ui, response: &egui::Response, view: &mut View, tools: &mut Tools, space: bool) {
+    if ui.input(|input| input.key_pressed(Key::Escape)) {
+        tools.zoom_drag = None;
+    }
+    let started = [PointerButton::Primary, PointerButton::Secondary]
+        .into_iter()
+        .find(|&button| response.drag_started_by(button));
+    if let Some(button) = started
+        && !space
+        && let Some(press) = ui.input(|input| input.pointer.press_origin())
+    {
+        let from = view.point_at(press);
+        tools.zoom_drag = Some(ZoomDrag { button, from, to: from, framing: false });
+    }
+    if let Some(drag) = &mut tools.zoom_drag
+        && response.dragged()
+        && let Some(at) = response.interact_pointer_pos()
+    {
+        drag.to = view.point_at(at);
+        let press = ui.input(|input| input.pointer.press_origin()).unwrap_or(at);
+        drag.framing |= drag.button == PointerButton::Primary && press.distance(at) > ZOOM_DRAG_THRESHOLD;
+    }
+    if response.drag_stopped()
+        && let Some(drag) = tools.zoom_drag.take()
+    {
+        if drag.framing {
+            view.zoom_to_rect(frame_rect(&drag));
+        } else {
+            let at = view.to_screen(drag.from.0 as f32, drag.from.1 as f32);
+            view.step_zoom(if drag.button == PointerButton::Secondary { -1 } else { 1 }, at);
+        }
+    }
+    let zooming_out = tools.zoom_drag.as_ref().map_or_else(
+        || ui.input(|input| input.pointer.secondary_down()),
+        |drag| drag.button == PointerButton::Secondary,
+    );
+    if response.hovered() || tools.zoom_drag.is_some() {
+        ui.ctx().set_cursor_icon(if zooming_out { CursorIcon::ZoomOut } else { CursorIcon::ZoomIn });
+    }
+}
+
+/// The area a drag of the Zoom tool frames, on the image, in pixels.
+fn frame_rect(drag: &ZoomDrag) -> Rect {
+    let point = |(x, y): (f64, f64)| Pos2::new(x as f32, y as f32);
+    Rect::from_two_pos(point(drag.from), point(drag.to))
+}
+
+/// Draws the area the Zoom tool frames: a black line in a white one stays visible on any image.
+fn paint_zoom_frame(painter: &Painter, view: &View, drag: &ZoomDrag) {
+    let rect = frame_rect(drag);
+    let pixel = 1.0 / painter.pixels_per_point();
+    let min = view.to_screen(rect.min.x, rect.min.y).round_to_pixel_center(painter.pixels_per_point());
+    let max = view.to_screen(rect.max.x, rect.max.y).round_to_pixel_center(painter.pixels_per_point());
+    let frame = Rect::from_min_max(min, max);
+    painter.rect_stroke(frame.expand(pixel), 0.0, Stroke::new(pixel, Color32::WHITE), egui::StrokeKind::Middle);
+    painter.rect_stroke(frame, 0.0, Stroke::new(pixel, Color32::BLACK), egui::StrokeKind::Middle);
 }
 
 /// A selection tool starts drawing a new selection, which ends any transform. Holding

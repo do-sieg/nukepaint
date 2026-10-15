@@ -25,6 +25,8 @@ macro_rules! icon {
 pub const RECT_SELECT: Icon = icon!("rect_select");
 pub const ELLIPSE_SELECT: Icon = icon!("ellipse_select");
 pub const MOVE_SELECTION: Icon = icon!("move_selection");
+pub const ZOOM: Icon = icon!("zoom");
+pub const PAN: Icon = icon!("pan");
 pub const SELECT_ALL: Icon = icon!("select_all");
 pub const DESELECT: Icon = icon!("deselect");
 pub const INVERT_SELECTION: Icon = icon!("invert_selection");

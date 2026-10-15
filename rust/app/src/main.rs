@@ -829,7 +829,9 @@ impl App {
 
     /// Whether a tool is in the middle of a drag, which must not change tools or images under it.
     fn is_dragging(&self) -> bool {
-        self.tools.frame_select.is_dragging() || self.images.iter().any(OpenImage::is_dragging)
+        self.tools.frame_select.is_dragging()
+            || self.tools.zoom_drag.is_some()
+            || self.images.iter().any(OpenImage::is_dragging)
     }
 
     /// The image's size, the pixel under the pointer, and a picker for the zoom.
@@ -890,8 +892,10 @@ impl App {
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::SELECT_KEY)) {
             self.set_tool(self.tools.next_select_tool());
         }
-        if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::MOVE_SELECTION_KEY)) {
-            self.set_tool(Tool::MoveSelection);
+        for tool in [Tool::MoveSelection, Tool::Zoom, Tool::Pan] {
+            if !busy && ctx.input_mut(|input| input.consume_shortcut(&tool.key())) {
+                self.set_tool(tool);
+            }
         }
         let typing = ctx.memory(|memory| memory.focused().is_some());
         if !typing {
