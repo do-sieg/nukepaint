@@ -61,8 +61,9 @@ impl Document {
         Ok(())
     }
 
-    /// Whether the document changed since it was opened or last saved: undoing back to
-    /// then makes it as it was.
+    /// Whether the layers changed since the document was opened or last saved: undoing
+    /// back to then makes it as it was. Selecting, or choosing another active layer,
+    /// leaves the file as it is.
     pub fn is_unsaved(&self) -> bool {
         !self.history.is_saved()
     }
