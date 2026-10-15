@@ -19,7 +19,7 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
 use power_paint_core::{
-    BrushStroke, FloodFill, PixelRect, Rgba, RgbaImage, Selection, SelectionMode, Spray, hard_tip,
+    BrushStroke, FloodFill, PixelRect, Rgba, RgbaImage, Selection, SelectionMask, SelectionMode, Spray, hard_tip,
 };
 
 use crate::{
@@ -64,6 +64,7 @@ const DRAWING_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
 const SPRAY_HOTSPOT: Vec2 = Vec2::new(6.0, 6.0);
 const COLOR_PICKER_HOTSPOT: Vec2 = Vec2::new(5.0, 19.0);
 const PAINT_BUCKET_HOTSPOT: Vec2 = Vec2::new(20.0, 21.0);
+const MAGIC_WAND_HOTSPOT: Vec2 = Vec2::new(8.0, 8.0);
 /// Longest a frame counts for while spraying, in seconds, so that a stall does not
 /// leave a burst of dots.
 const MAX_SPRAY_FRAME: f64 = 0.1;
@@ -166,7 +167,7 @@ pub fn show(
     let busy = tools.frame_select.is_dragging() || tools.zoom_drag.is_some() || image.is_dragging();
     let hand = space || tools.tool == Tool::Pan;
     // Where the pointer is over the image while it works a drawing tool, or the Color Picker.
-    let (mut drawing_at, mut picking_at, mut filling_at) = (None, None, None);
+    let (mut drawing_at, mut picking_at, mut filling_at, mut wand_at) = (None, None, None, None);
     let panning = response.dragged_by(PointerButton::Middle)
         || (hand && response.dragged_by(PointerButton::Primary) && !busy);
     if panning {
@@ -182,6 +183,8 @@ pub fn show(
         picking_at = pointer.filter(|_| use_color_picker(&response, image, tools, space));
     } else if tools.tool == Tool::PaintBucket {
         filling_at = pointer.filter(|_| use_paint_bucket(ui, &response, image, tools, space));
+    } else if tools.tool == Tool::MagicWand {
+        wand_at = pointer.filter(|_| use_magic_wand(ui, &response, image, tools, space));
     } else if tools.tool != Tool::Pan {
         use_tool(ui, &response, image, tools, pointer, space);
     }
@@ -207,6 +210,9 @@ pub fn show(
     }
     if let Some(at) = filling_at {
         paint_cursor(ui, icons, icons::CURSOR_PAINT_BUCKET, PAINT_BUCKET_HOTSPOT, at);
+    }
+    if let Some(at) = wand_at {
+        paint_cursor(ui, icons, icons::CURSOR_MAGIC_WAND, MAGIC_WAND_HOTSPOT, at);
     }
     let box_shown = box_state(image, tools);
     if let Some(state) = box_shown {
@@ -487,14 +493,7 @@ fn use_paint_bucket(
     if !on_image || mask.as_ref().is_some_and(|mask| !mask.contains(x as u32, y as u32)) {
         return response.hovered();
     }
-    let sample = match tools.sample_source {
-        SampleSource::Layer => None,
-        SampleSource::Image => Some(image.document.flattened()),
-    };
-    let sample = sample.as_ref().unwrap_or(&image.document.active().pixels);
-    let contiguous = tools.contiguous != ui.input(|input| input.modifiers.shift);
-    let tolerance = tools.tolerance as f32 / 100.0;
-    let fill = FloodFill::new(sample, (x as u32, y as u32), tolerance, contiguous, mask.as_ref());
+    let fill = flood_at(ui, image, tools, (x as u32, y as u32), mask.as_ref());
     let color = if button == PointerButton::Primary { tools.colors.primary } else { tools.colors.secondary };
     // A transform would go on from the pixels as they were before.
     image.transform = None;
@@ -503,6 +502,62 @@ fn use_paint_bucket(
         image.refresh(ui.ctx());
     }
     response.hovered()
+}
+
+/// Works the Magic Wand: a click on the image selects the pixels whose colour is close
+/// to that of the one clicked, changing the selection as the selection mode says, or
+/// adding to it with Ctrl, which is a step if it changed anything. Returns whether
+/// the pointer is the tool's, over the image.
+fn use_magic_wand(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    image: &mut OpenImage,
+    tools: &Tools,
+    space: bool,
+) -> bool {
+    if space || !response.drag_started_by(PointerButton::Primary) {
+        return response.hovered();
+    }
+    let Some(press) = ui.input(|input| input.pointer.press_origin()) else {
+        return response.hovered();
+    };
+    let (x, y) = image.view.pixel_at(press);
+    let (width, height) = image.document.size();
+    if !(0..width as i64).contains(&x) || !(0..height as i64).contains(&y) {
+        return response.hovered();
+    }
+    let found = flood_at(ui, image, tools, (x as u32, y as u32), None).selection();
+    let mode = if ui.input(|input| input.modifiers.command) { SelectionMode::Add } else { tools.selection_mode };
+    // A transform would go on from the selection it began with.
+    image.transform = None;
+    let document = &mut image.document;
+    let selection = document.selection.combine(&found, mode);
+    if selection != document.selection {
+        document.selection = selection;
+        crate::commit_selection(document, Tool::MagicWand.name(), Tool::MagicWand.icon());
+    }
+    response.hovered()
+}
+
+/// The pixels the Magic Wand or the Paint Bucket takes in from a click on the pixel
+/// `seed`, among the selected ones of `mask`: those of a colour close to its own, in
+/// the layer or the whole image as they sample, around it as Contiguous says, or the
+/// other way while Shift is held.
+fn flood_at(
+    ui: &egui::Ui,
+    image: &OpenImage,
+    tools: &Tools,
+    seed: (u32, u32),
+    mask: Option<&SelectionMask>,
+) -> FloodFill {
+    let sample = match tools.sample_source {
+        SampleSource::Layer => None,
+        SampleSource::Image => Some(image.document.flattened()),
+    };
+    let sample = sample.as_ref().unwrap_or(&image.document.active().pixels);
+    let contiguous = tools.contiguous != ui.input(|input| input.modifiers.shift);
+    let tolerance = tools.tolerance as f32 / 100.0;
+    FloodFill::new(sample, seed, tolerance, contiguous, mask)
 }
 
 /// The colour of the active layer at a point of the screen, if it is over the image.
@@ -871,7 +926,7 @@ fn selection_button(
     let selecting = tools.tool == Tool::MoveSelection || tools.tool.select_shape().is_some();
     // It shows what the box moves now, and switches to moving the other.
     let (button, icon, tooltip) = if tools.tool == Tool::MoveSelection {
-        let target = tools.last_select_tool;
+        let target = tools.box_select_tool();
         let tooltip = format!(
             "Moving the selection alone.\nClick to move the selected pixels instead, with {} ({}).",
             target.name(),

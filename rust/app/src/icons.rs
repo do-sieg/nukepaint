@@ -24,6 +24,7 @@ macro_rules! icon {
 
 pub const RECT_SELECT: Icon = icon!("rect_select");
 pub const ELLIPSE_SELECT: Icon = icon!("ellipse_select");
+pub const MAGIC_WAND: Icon = icon!("magic_wand");
 pub const MOVE_SELECTION: Icon = icon!("move_selection");
 pub const ZOOM: Icon = icon!("zoom");
 pub const PAN: Icon = icon!("pan");
@@ -39,6 +40,7 @@ pub const CURSOR_ERASER: Icon = icon!("cursor_eraser");
 pub const CURSOR_SPRAY: Icon = icon!("cursor_spray");
 pub const CURSOR_COLOR_PICKER: Icon = icon!("cursor_color_picker");
 pub const CURSOR_PAINT_BUCKET: Icon = icon!("cursor_paint_bucket");
+pub const CURSOR_MAGIC_WAND: Icon = icon!("cursor_magic_wand");
 pub const CURSOR_ROTATE: Icon = icon!("cursor_rotate");
 pub const SELECT_ALL: Icon = icon!("select_all");
 pub const DESELECT: Icon = icon!("deselect");
@@ -68,9 +70,10 @@ pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
 /// Those the history can list steps with, which it keeps by name.
-const STEP_ICONS: [Icon; 25] = [
+const STEP_ICONS: [Icon; 26] = [
     RECT_SELECT,
     ELLIPSE_SELECT,
+    MAGIC_WAND,
     MOVE_SELECTION,
     SELECT_ALL,
     DESELECT,

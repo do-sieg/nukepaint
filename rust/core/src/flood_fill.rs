@@ -1,10 +1,10 @@
 //! The pixels of an image whose colour is close enough to that of one of them, the
-//! seed, as the Paint Bucket fills them: those that reach it through others like it,
-//! or all those in the image.
+//! seed, as the Magic Wand selects them and the Paint Bucket fills them: those that
+//! reach it through others like it, or all those in the image.
 
 use image::{Rgba, RgbaImage};
 
-use crate::{BlendMode, PixelRect, SelectionMask, blend::blend_pixel};
+use crate::{BlendMode, PixelRect, Selection, SelectionMask, blend::blend_pixel};
 
 /// Leeway for rounding, well under the difference between two bytes.
 const LEEWAY: f32 = 0.0005;
@@ -70,6 +70,11 @@ impl FloodFill {
             }
         }
         Self { width, height, found, fringe }
+    }
+
+    /// The pixels found, selected.
+    pub fn selection(&self) -> Selection {
+        Selection::of_pixels(&self.found, self.width)
     }
 
     /// Fills the pixels found of `layer`, as large as the image looked at, with `color`,
@@ -215,6 +220,15 @@ mod tests {
         let area = fill.paint(&mut layer, RED, true);
         assert_eq!(area, Some(PixelRect { left: 0, top: 1, right: 2, bottom: 3 }));
         assert_eq!(layer[(1, 0)], WHITE);
+    }
+
+    #[test]
+    fn selects_what_it_finds() {
+        let selection = FloodFill::new(&image(), (1, 1), 0.1, true, None).selection();
+        assert_eq!(selection, Selection::rect(PixelRect { left: 0, top: 0, right: 2, bottom: 3 }));
+        let both_sides = FloodFill::new(&image(), (4, 2), 0.0, false, None).selection();
+        assert!(both_sides.contains(1, 1) && both_sides.contains(4, 0) && !both_sides.contains(2, 1));
+        assert!(!both_sides.contains(0, 0), "not quite the same colour");
     }
 
     #[test]

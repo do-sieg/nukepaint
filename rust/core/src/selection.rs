@@ -154,6 +154,90 @@ impl Selection {
         Self::from_corners(straight)
     }
 
+    /// Selects the pixels flagged in `pixels`, row after row of an image `width` wide,
+    /// by outlines along their edges: around each group of them that touch side to
+    /// side, and around each hole in one. Pixels that only touch at a corner are in
+    /// outlines of their own, which meet there.
+    pub fn of_pixels(pixels: &[bool], width: u32) -> Self {
+        const RIGHT: u8 = 1;
+        const DOWN: u8 = 2;
+        const LEFT: u8 = 4;
+        const UP: u8 = 8;
+        let width = width as usize;
+        if width == 0 {
+            return Self::default();
+        }
+        let height = pixels.len() / width;
+        let flagged = |x: usize, y: usize| pixels[y * width + x];
+        // The edges between a pixel flagged and one that is not, or the image's edge,
+        // each going clockwise around the pixel flagged, kept as the ways out of each
+        // corner between pixels.
+        let stride = width + 1;
+        let mut ways_out = vec![0u8; stride * (height + 1)];
+        for y in 0..height {
+            for x in 0..width {
+                if !flagged(x, y) {
+                    continue;
+                }
+                if y == 0 || !flagged(x, y - 1) {
+                    ways_out[y * stride + x] |= RIGHT;
+                }
+                if x + 1 == width || !flagged(x + 1, y) {
+                    ways_out[y * stride + x + 1] |= DOWN;
+                }
+                if y + 1 == height || !flagged(x, y + 1) {
+                    ways_out[(y + 1) * stride + x + 1] |= LEFT;
+                }
+                if x == 0 || !flagged(x - 1, y) {
+                    ways_out[(y + 1) * stride + x] |= UP;
+                }
+            }
+        }
+        let step = |corner: usize, way: u8| match way {
+            RIGHT => corner + 1,
+            DOWN => corner + stride,
+            LEFT => corner - 1,
+            _ => corner - stride,
+        };
+        let point = |corner: usize| ((corner % stride) as f64, (corner / stride) as f64);
+        // Turning right first keeps pixels that only touch at a corner apart.
+        let turns = |way: u8| match way {
+            RIGHT => [DOWN, RIGHT, UP],
+            DOWN => [LEFT, DOWN, RIGHT],
+            LEFT => [UP, LEFT, DOWN],
+            _ => [RIGHT, UP, LEFT],
+        };
+        let mut outlines = Vec::new();
+        for start in 0..ways_out.len() {
+            while ways_out[start] != 0 {
+                // From the corner, edge after edge until back at it, keeping the corners
+                // where it turns.
+                let first_way = 1 << ways_out[start].trailing_zeros();
+                let (mut corner, mut way) = (start, first_way);
+                let mut outline = Vec::new();
+                loop {
+                    ways_out[corner] &= !way;
+                    corner = step(corner, way);
+                    if corner == start {
+                        break;
+                    }
+                    let Some(next) = turns(way).into_iter().find(|&next| ways_out[corner] & next != 0) else {
+                        break;
+                    };
+                    if next != way {
+                        outline.push(point(corner));
+                    }
+                    way = next;
+                }
+                if way != first_way {
+                    outline.insert(0, point(start));
+                }
+                outlines.push(outline);
+            }
+        }
+        Self { outlines, frame: None }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.outlines.is_empty()
     }
@@ -482,5 +566,50 @@ mod tests {
         assert!(selection.contains(3, 3));
         assert!(!selection.contains(4, 3));
         assert!(!selection.contains(1, 2));
+    }
+
+    /// Flags from rows of text, `#` for a pixel flagged.
+    fn flags(rows: &[&str]) -> (Vec<bool>, u32) {
+        (rows.iter().flat_map(|row| row.chars().map(|c| c == '#')).collect(), rows[0].len() as u32)
+    }
+
+    fn selects_exactly(rows: &[&str]) -> Selection {
+        let (pixels, width) = flags(rows);
+        let selection = Selection::of_pixels(&pixels, width);
+        for (index, &flagged) in pixels.iter().enumerate() {
+            let (x, y) = ((index as u32 % width) as i64, (index as u32 / width) as i64);
+            assert_eq!(selection.contains(x, y), flagged, "at {x}, {y}");
+        }
+        let flagged = pixels.iter().filter(|&&flagged| flagged).count() as i32;
+        assert_eq!(area(&selection), flagged);
+        selection
+    }
+
+    #[test]
+    fn pixels_are_selected_by_their_outlines() {
+        let square = selects_exactly(&["....", ".##.", ".##.", "...."]);
+        assert_eq!(square, rect(1, 1, 3, 3));
+        assert!(Selection::of_pixels(&[false; 6], 3).is_empty());
+        assert_eq!(selects_exactly(&["###", "###"]), rect(0, 0, 3, 2));
+    }
+
+    #[test]
+    fn holes_and_corners_have_outlines_of_their_own() {
+        let ring = selects_exactly(&["#####", "#...#", "#.#.#", "#...#", "#####"]);
+        // Around the ring, around its hole, and around the pixel in the hole.
+        assert_eq!(ring.outlines().len(), 3);
+        let diagonal = selects_exactly(&["#..", ".#.", "..#"]);
+        assert_eq!(diagonal.outlines().len(), 3);
+        assert!(diagonal.outlines().iter().all(|outline| outline.len() == 4));
+        // A hole that touches the outside at a corner.
+        selects_exactly(&["###.", "#.#.", "##.#", "...."]);
+        selects_exactly(&[".#.#.", "#.#.#", ".#.#.", "#.#.#"]);
+    }
+
+    #[test]
+    fn outlines_of_pixels_keep_only_their_turns() {
+        let shape = selects_exactly(&["##..", "####", "####"]);
+        assert_eq!(shape.outlines().len(), 1);
+        assert_eq!(shape.outlines()[0].len(), 6);
     }
 }

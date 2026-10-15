@@ -28,6 +28,7 @@ pub enum Tool {
     #[default]
     RectangleSelect,
     EllipseSelect,
+    MagicWand,
     MoveSelection,
     Zoom,
     Pan,
@@ -40,9 +41,10 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
+        Self::MagicWand,
         Self::MoveSelection,
         Self::Zoom,
         Self::Pan,
@@ -53,12 +55,13 @@ impl Tool {
         Self::Spray,
         Self::PaintBucket,
     ];
-    const SELECT_TOOLS: [Self; 2] = [Self::RectangleSelect, Self::EllipseSelect];
+    const SELECT_TOOLS: [Self; 3] = [Self::RectangleSelect, Self::EllipseSelect, Self::MagicWand];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::RectangleSelect => "Rectangle Select",
             Self::EllipseSelect => "Ellipse Select",
+            Self::MagicWand => "Magic Wand",
             Self::MoveSelection => "Move Selection",
             Self::Zoom => "Zoom",
             Self::Pan => "Pan",
@@ -75,6 +78,7 @@ impl Tool {
         match self {
             Self::RectangleSelect => icons::RECT_SELECT,
             Self::EllipseSelect => icons::ELLIPSE_SELECT,
+            Self::MagicWand => icons::MAGIC_WAND,
             Self::MoveSelection => icons::MOVE_SELECTION,
             Self::Zoom => icons::ZOOM,
             Self::Pan => icons::PAN,
@@ -89,7 +93,7 @@ impl Tool {
 
     pub fn key(self) -> KeyboardShortcut {
         match self {
-            Self::RectangleSelect | Self::EllipseSelect => SELECT_KEY,
+            Self::RectangleSelect | Self::EllipseSelect | Self::MagicWand => SELECT_KEY,
             Self::MoveSelection => MOVE_SELECTION_KEY,
             Self::Zoom => ZOOM_KEY,
             Self::Pan => PAN_KEY,
@@ -114,6 +118,10 @@ impl Tool {
                 "Drag to select, a circle with Shift. Then drag the selection's box to move, resize or rotate its \
                  pixels, its centre of rotation to turn it about another point, or the arrow keys to nudge it. \
                  Hold Ctrl to add to the selection, or on an edge or corner, to resize it about its middle."
+            }
+            Self::MagicWand => {
+                "Click to select the pixels of similar colour around the one clicked, or all those in the image \
+                 while Contiguous is off. Shift does the other. Hold Ctrl to add to the selection."
             }
             Self::MoveSelection => {
                 "Drag the selection's box to move, resize or rotate the selection, without its pixels, its centre \
@@ -167,7 +175,8 @@ impl Tool {
         match self {
             Self::RectangleSelect => Some(Shape::Rectangle),
             Self::EllipseSelect => Some(Shape::Ellipse),
-            Self::MoveSelection
+            Self::MagicWand
+            | Self::MoveSelection
             | Self::Zoom
             | Self::Pan
             | Self::Paintbrush
@@ -177,6 +186,16 @@ impl Tool {
             | Self::Spray
             | Self::PaintBucket => None,
         }
+    }
+
+    /// Whether the tool selects, which the selection mode says how.
+    pub fn selects(self) -> bool {
+        self.select_shape().is_some() || self == Self::MagicWand
+    }
+
+    /// Whether the tool picks pixels of a colour close to the one clicked.
+    pub fn floods(self) -> bool {
+        matches!(self, Self::MagicWand | Self::PaintBucket)
     }
 
     /// Whether the tool draws on the active layer.
@@ -195,7 +214,7 @@ impl Tool {
     }
 }
 
-/// Whose colours the Paint Bucket looks at.
+/// Whose colours the Magic Wand and the Paint Bucket look at.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SampleSource {
     /// The active layer's.
@@ -240,7 +259,7 @@ impl RightClick {
 
 pub struct Tools {
     pub tool: Tool,
-    /// The selection tool used last, which Move Selection goes back to.
+    /// The selection tool used last, which the selection key goes back to.
     pub last_select_tool: Tool,
     /// What selecting does to the selection there already is, unless Ctrl is held.
     pub selection_mode: SelectionMode,
@@ -262,11 +281,12 @@ pub struct Tools {
     /// Whether the drawing tools show the selection's box, to work it from its handles,
     /// and the button by the selection that deselects.
     pub selection_controls: bool,
-    /// Whether the Paint Bucket only fills the pixels like the one clicked that reach it
-    /// through others like it, rather than all those like it in the image.
+    /// Whether the Magic Wand and the Paint Bucket only take in the pixels like the one
+    /// clicked that reach it through others like it, rather than all those like it in
+    /// the image.
     pub contiguous: bool,
     /// How different a pixel's colour can be from the one clicked, as a percentage,
-    /// for the Paint Bucket to fill it.
+    /// for the Magic Wand and the Paint Bucket to take it in.
     pub tolerance: u32,
     pub sample_source: SampleSource,
     /// How the selection tools redraw the pixels they move, once they are not just
@@ -315,9 +335,15 @@ pub struct ZoomDrag {
 impl Tools {
     pub fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
-        if tool.select_shape().is_some() {
+        if tool.selects() {
             self.last_select_tool = tool;
         }
+    }
+
+    /// The selection tool that moves the selected pixels that Move Selection's button
+    /// switches to: the one used last, unless that was the Magic Wand, which has no box.
+    pub fn box_select_tool(&self) -> Tool {
+        if self.last_select_tool.select_shape().is_some() { self.last_select_tool } else { Tool::RectangleSelect }
     }
 
     /// How wide the tool draws, in pixels: the Pencil's width for the other tools.
@@ -358,7 +384,7 @@ impl Tools {
 
     /// The next selection tool, or the one used last from another tool.
     pub fn next_select_tool(&self) -> Tool {
-        if self.tool.select_shape().is_none() {
+        if !self.tool.selects() {
             return self.last_select_tool;
         }
         let index = Tool::SELECT_TOOLS.iter().position(|&tool| tool == self.tool).unwrap_or(0);
@@ -375,9 +401,15 @@ mod tests {
         let mut tools = Tools::default();
         assert_eq!(tools.next_select_tool(), Tool::EllipseSelect);
         tools.set_tool(Tool::EllipseSelect);
-        assert_eq!(tools.next_select_tool(), Tool::RectangleSelect);
+        assert_eq!(tools.next_select_tool(), Tool::MagicWand);
         tools.set_tool(Tool::MoveSelection);
         assert_eq!(tools.last_select_tool, Tool::EllipseSelect);
         assert_eq!(tools.next_select_tool(), Tool::EllipseSelect);
+        assert_eq!(tools.box_select_tool(), Tool::EllipseSelect);
+        tools.set_tool(Tool::MagicWand);
+        assert_eq!(tools.next_select_tool(), Tool::RectangleSelect);
+        tools.set_tool(Tool::MoveSelection);
+        assert_eq!(tools.next_select_tool(), Tool::MagicWand);
+        assert_eq!(tools.box_select_tool(), Tool::RectangleSelect, "the wand has no box to move pixels with");
     }
 }

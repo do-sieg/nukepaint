@@ -912,8 +912,12 @@ impl App {
         let Some(current) = self.current else {
             return;
         };
-        // Move Selection would move the outline of the pasted pixels, without them.
-        let tool = if self.tools.tool == Tool::MoveSelection { self.tools.last_select_tool } else { self.tools.tool };
+        // Move Selection would move the outline of the pasted pixels, without them, and
+        // the Magic Wand has no box to move them with.
+        let tool = match self.tools.tool {
+            Tool::MoveSelection | Tool::MagicWand => self.tools.box_select_tool(),
+            tool => tool,
+        };
         // Which ends any transform, putting down the pixels it held.
         self.set_tool(tool);
         let image = &mut self.images[current];
@@ -1151,13 +1155,12 @@ impl App {
             ui.label(egui::RichText::new(self.tools.tool.name()).strong());
             if self.tools.tool.draws() {
                 self.drawing_options(ui);
-            } else if self.tools.tool == Tool::PaintBucket {
-                self.fill_options(ui);
+            } else if self.tools.tool.floods() {
+                self.flood_options(ui);
             }
-            if self.tools.tool.select_shape().is_none() {
-                return;
+            if self.tools.tool.selects() {
+                self.selection_options(ui);
             }
-            self.selection_options(ui);
         });
     }
 
@@ -1184,6 +1187,10 @@ impl App {
             .on_hover_text(
                 "What selecting does to what is already selected.\nWhatever this says, holding Ctrl adds to it.",
             );
+        // The Magic Wand moves no pixels.
+        if self.tools.tool.select_shape().is_none() {
+            return;
+        }
         ui.separator();
         ui.label("Resampling:");
         let before = self.tools.resampling;
@@ -1251,20 +1258,22 @@ impl App {
         }
     }
 
-    /// The Paint Bucket's settings: which pixels it fills, and how.
-    fn fill_options(&mut self, ui: &mut egui::Ui) {
+    /// The Magic Wand's and the Paint Bucket's settings, which they share: which pixels
+    /// they take in, and how the Paint Bucket fills them.
+    fn flood_options(&mut self, ui: &mut egui::Ui) {
+        let (taken, take) = if self.tools.tool == Tool::MagicWand { ("selected", "selects") } else { ("filled", "fills") };
         ui.separator();
-        ui.checkbox(&mut self.tools.contiguous, "Contiguous").on_hover_text(
-            "On, only the pixels of similar colour that touch the one clicked through others like it are filled. \
+        ui.checkbox(&mut self.tools.contiguous, "Contiguous").on_hover_text(format!(
+            "On, only the pixels of similar colour that touch the one clicked through others like it are {taken}. \
              Off, all those in the image are. Holding Shift does the other.",
-        );
+        ));
         ui.separator();
         ui.label("Tolerance:");
         let tolerance = egui::DragValue::new(&mut self.tools.tolerance).range(0..=100).suffix(" %");
-        ui.add(tolerance).on_hover_text(
-            "How different a colour can be from the one clicked to be filled. 0% fills only the same colour, \
+        ui.add(tolerance).on_hover_text(format!(
+            "How different a colour can be from the one clicked to be {taken}. 0% {take} only the same colour, \
              100% any.",
-        );
+        ));
         ui.separator();
         ui.label("Sampling:");
         egui::ComboBox::from_id_salt("sample_source")
@@ -1278,7 +1287,9 @@ impl App {
             .on_hover_text(
                 "Whose colours are looked at: the active layer's, or those of all the visible layers blended together.",
             );
-        self.antialiasing_option(ui);
+        if self.tools.tool == Tool::PaintBucket {
+            self.antialiasing_option(ui);
+        }
     }
 
     fn antialiasing_option(&mut self, ui: &mut egui::Ui) {
@@ -1369,7 +1380,7 @@ impl App {
             self.set_tool(self.tools.next_select_tool());
         }
         // The selection tools share a key, which goes from one to the next.
-        for tool in Tool::ALL.into_iter().filter(|tool| tool.select_shape().is_none()) {
+        for tool in Tool::ALL.into_iter().filter(|tool| !tool.selects()) {
             if !busy && ctx.input_mut(|input| input.consume_shortcut(&tool.key())) {
                 self.set_tool(tool);
             }
