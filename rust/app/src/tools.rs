@@ -1,7 +1,8 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::{Ink, SelectionMode};
+use power_paint_core::{Ink, Rgba, SelectionMode};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     colors_panel::Colors,
@@ -18,6 +19,7 @@ pub const PAINTBRUSH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NO
 pub const PENCIL_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::P);
 pub const ERASER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::E);
 pub const SPRAY_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::A);
+pub const COLOR_PICKER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::K);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -30,11 +32,12 @@ pub enum Tool {
     Paintbrush,
     Pencil,
     Eraser,
+    ColorPicker,
     Spray,
 }
 
 impl Tool {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::MoveSelection,
@@ -43,6 +46,7 @@ impl Tool {
         Self::Paintbrush,
         Self::Pencil,
         Self::Eraser,
+        Self::ColorPicker,
         Self::Spray,
     ];
     const SELECT_TOOLS: [Self; 2] = [Self::RectangleSelect, Self::EllipseSelect];
@@ -57,6 +61,7 @@ impl Tool {
             Self::Paintbrush => "Paintbrush",
             Self::Pencil => "Pencil",
             Self::Eraser => "Eraser",
+            Self::ColorPicker => "Color Picker",
             Self::Spray => "Spray",
         }
     }
@@ -71,6 +76,7 @@ impl Tool {
             Self::Paintbrush => icons::PAINTBRUSH,
             Self::Pencil => icons::PENCIL,
             Self::Eraser => icons::ERASER,
+            Self::ColorPicker => icons::COLOR_PICKER,
             Self::Spray => icons::SPRAY,
         }
     }
@@ -84,6 +90,7 @@ impl Tool {
             Self::Paintbrush => PAINTBRUSH_KEY,
             Self::Pencil => PENCIL_KEY,
             Self::Eraser => ERASER_KEY,
+            Self::ColorPicker => COLOR_PICKER_KEY,
             Self::Spray => SPRAY_KEY,
         }
     }
@@ -110,12 +117,14 @@ impl Tool {
             }
             Self::Paintbrush => {
                 "Drag to paint lines in the primary colour, blended over the pixels under it, with smooth edges if \
-                 Antialiasing is on. With a selection, only the selected pixels change. Drag a handle of its box \
+                 Antialiasing is on. Right drag to paint in the secondary colour, or to pick the colour of the \
+                 active layer, as Right click says. With a selection, only the selected pixels change. Drag a handle of its box \
                  to resize it, the arrows by its corner to move it, or around it to rotate it."
             }
             Self::Pencil => {
-                "Drag to draw hard-edged lines in the primary colour, which replaces the pixels under it. With a \
-                 selection, only the selected pixels change. Drag a handle of its box to resize it, the \
+                "Drag to draw hard-edged lines in the primary colour, which replaces the pixels under it. Right \
+                 drag to draw in the secondary colour, or to pick the colour of the active layer, as Right click \
+                 says. With a selection, only the selected pixels change. Drag a handle of its box to resize it, the \
                  arrows by its corner to move it, or around it to rotate it."
             }
             Self::Eraser => {
@@ -123,9 +132,14 @@ impl Tool {
                  selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows by \
                  its corner to move it, or around it to rotate it."
             }
+            Self::ColorPicker => {
+                "Click or drag to pick the colour of the active layer as the colour the Colors section is \
+                 editing, or with the right button as the other one."
+            }
             Self::Spray => {
-                "Hold to scatter dots of the primary colour around the pointer, which build up the longer it stays. With \
-                 a selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows \
+                "Hold to scatter dots of the primary colour around the pointer, which build up the longer it stays. \
+                 Right drag to spray the secondary colour, or to pick the colour of the active layer, as Right \
+                 click says. With a selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows \
                  by its corner to move it, or around it to rotate it."
             }
         }
@@ -142,6 +156,7 @@ impl Tool {
             | Self::Paintbrush
             | Self::Pencil
             | Self::Eraser
+            | Self::ColorPicker
             | Self::Spray => None,
         }
     }
@@ -151,9 +166,36 @@ impl Tool {
         matches!(self, Self::Paintbrush | Self::Pencil | Self::Eraser | Self::Spray)
     }
 
+    /// Whether the tool draws in a colour, which the right button can change.
+    pub fn draws_in_color(self) -> bool {
+        matches!(self, Self::Paintbrush | Self::Pencil | Self::Spray)
+    }
+
     /// Whether the tool can draw with smooth edges.
     pub fn can_smooth(self) -> bool {
         matches!(self, Self::Paintbrush | Self::Eraser | Self::Spray)
+    }
+}
+
+/// What the right button does with the tools that draw in a colour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RightClick {
+    /// Draws in the secondary colour.
+    #[default]
+    SecondaryColor,
+    /// Picks the colour of the active layer as the colour the Colors section is editing,
+    /// as the Color Picker does.
+    PickColor,
+}
+
+impl RightClick {
+    pub const ALL: [Self; 2] = [Self::SecondaryColor, Self::PickColor];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SecondaryColor => "Secondary Color",
+            Self::PickColor => "Pick Color",
+        }
     }
 }
 
@@ -177,6 +219,7 @@ pub struct Tools {
     pub spray_speed: u32,
     /// Whether the tools that can draw with smooth edges do.
     pub antialiasing: bool,
+    pub right_click: RightClick,
 }
 
 impl Default for Tools {
@@ -194,6 +237,7 @@ impl Default for Tools {
             spray_size: 32,
             spray_speed: 25,
             antialiasing: true,
+            right_click: RightClick::default(),
         }
     }
 }
@@ -237,11 +281,11 @@ impl Tools {
         }
     }
 
-    /// What the tool leaves on the pixels it goes over, for the tools that draw lines.
-    pub fn ink(&self) -> Option<Ink> {
+    /// What the tool leaves on the pixels it goes over in `color`, for the tools that draw lines.
+    pub fn ink(&self, color: Rgba<u8>) -> Option<Ink> {
         match self.tool {
-            Tool::Paintbrush => Some(Ink::Paint(self.colors.primary)),
-            Tool::Pencil => Some(Ink::Replace(self.colors.primary)),
+            Tool::Paintbrush => Some(Ink::Paint(color)),
+            Tool::Pencil => Some(Ink::Replace(color)),
             Tool::Eraser => Some(Ink::Erase),
             _ => None,
         }

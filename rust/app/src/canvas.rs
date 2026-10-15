@@ -17,13 +17,13 @@ use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
-use power_paint_core::{BrushStroke, PixelRect, RgbaImage, Selection, SelectionMode, Spray, hard_tip};
+use power_paint_core::{BrushStroke, PixelRect, Rgba, RgbaImage, Selection, SelectionMode, Spray, hard_tip};
 
 use crate::{
     OpenImage,
     frame_select::Shape,
     icons::{self, Icon, Icons},
-    tools::{Tool, Tools, ZoomDrag},
+    tools::{RightClick, Tool, Tools, ZoomDrag},
     transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, Transform},
     view::View,
 };
@@ -60,6 +60,7 @@ const OUTLINED_TIP: f32 = 8.0;
 const CURSOR_SIZE: Vec2 = Vec2::splat(24.0);
 const DRAWING_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
 const SPRAY_HOTSPOT: Vec2 = Vec2::new(6.0, 6.0);
+const COLOR_PICKER_HOTSPOT: Vec2 = Vec2::new(5.0, 19.0);
 /// Longest a frame counts for while spraying, in seconds, so that a stall does not
 /// leave a burst of dots.
 const MAX_SPRAY_FRAME: f64 = 0.1;
@@ -157,8 +158,8 @@ pub fn show(
     let space = ui.input(|input| input.key_down(Key::Space));
     let busy = tools.frame_select.is_dragging() || tools.zoom_drag.is_some() || image.is_dragging();
     let hand = space || tools.tool == Tool::Pan;
-    // Where the pointer is over the image while it works a drawing tool.
-    let mut drawing_at = None;
+    // Where the pointer is over the image while it works a drawing tool, or the Color Picker.
+    let (mut drawing_at, mut picking_at) = (None, None);
     let panning = response.dragged_by(PointerButton::Middle)
         || (hand && response.dragged_by(PointerButton::Primary) && !busy);
     if panning {
@@ -170,6 +171,8 @@ pub fn show(
         use_zoom(ui, &response, &mut image.view, tools, space);
     } else if tools.tool.draws() {
         drawing_at = pointer.filter(|_| use_drawing_tool(ui, &response, image, tools, space));
+    } else if tools.tool == Tool::ColorPicker {
+        picking_at = pointer.filter(|_| use_color_picker(&response, image, tools, space));
     } else if tools.tool != Tool::Pan {
         use_tool(ui, &response, image, tools, pointer, space);
     }
@@ -189,6 +192,9 @@ pub fn show(
             _ => (icons::CURSOR_PENCIL, DRAWING_HOTSPOT),
         };
         paint_cursor(ui, icons, cursor, hotspot, at);
+    }
+    if let Some(at) = picking_at {
+        paint_cursor(ui, icons, icons::CURSOR_COLOR_PICKER, COLOR_PICKER_HOTSPOT, at);
     }
     let box_shown = box_state(image, tools);
     if let Some(state) = box_shown {
@@ -377,15 +383,49 @@ fn use_zoom(ui: &egui::Ui, response: &egui::Response, view: &mut View, tools: &m
     }
 }
 
+/// Works the Color Picker: the left button picks the colour of the active layer under
+/// the pointer as the colour the Colors section is editing, for as long as it is held,
+/// and the right one as the other colour. Returns whether the pointer is the tool's, over the image or picking.
+fn use_color_picker(response: &egui::Response, image: &OpenImage, tools: &mut Tools, space: bool) -> bool {
+    if !space
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(color) = color_at(image, at)
+    {
+        if response.dragged_by(PointerButton::Primary) {
+            tools.colors.pick(color, false);
+        } else if response.dragged_by(PointerButton::Secondary) {
+            tools.colors.pick(color, true);
+        }
+    }
+    response.hovered() || response.dragged()
+}
+
+/// The colour of the active layer at a point of the screen, if it is over the image.
+fn color_at(image: &OpenImage, point: Pos2) -> Option<Rgba<u8>> {
+    let (x, y) = image.view.pixel_at(point);
+    let pixels = &image.document.active().pixels;
+    let on_image = (0..pixels.width() as i64).contains(&x) && (0..pixels.height() as i64).contains(&y);
+    on_image.then(|| *pixels.get_pixel(x as u32, y as u32))
+}
+
 /// Works a drawing tool: a left drag draws a line on the active layer, or sprays dots
-/// for as long as it is held, which is a step once let go if it changed anything. A left drag from a handle of the selection's
+/// for as long as it is held, which is a step once let go if it changed anything. The
+/// tools that draw in a colour do it in the secondary one with a right drag, or pick
+/// the colour under the pointer as the one the Colors section is editing, as the right
+/// click option says. A left drag from a handle of the selection's
 /// box resizes the selection instead, and one from the handle out from its bottom
 /// right corner moves it, and one from around the box rotates it, without its pixels,
 /// as Move Selection does.
 /// Returns whether the pointer is the tool's, over the image or drawing.
-fn use_drawing_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, tools: &Tools, space: bool) -> bool {
+fn use_drawing_tool(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    image: &mut OpenImage,
+    tools: &mut Tools,
+    space: bool,
+) -> bool {
     let reach = image.view.pixels_per_screen_point();
-    let handle_at = |image: &OpenImage, point: Pos2| {
+    let handle_at = |image: &OpenImage, tools: &Tools, point: Pos2| {
         box_state(image, tools)?.handle_at(image.view.point_at(point), reach)
     };
     if ui.input(|input| input.key_pressed(Key::Escape))
@@ -393,31 +433,39 @@ fn use_drawing_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenIm
     {
         image.document.selection = transform.cancel();
     }
-    if response.drag_started_by(PointerButton::Primary)
+    let picking = tools.tool.draws_in_color() && tools.right_click == RightClick::PickColor;
+    let started = [PointerButton::Primary, PointerButton::Secondary]
+        .into_iter()
+        .find(|&button| response.drag_started_by(button));
+    if let Some(button) = started
         && !space
         && let Some(press) = ui.input(|input| input.pointer.press_origin())
     {
-        if let Some(kind) = handle_at(image, press) {
+        let primary = button == PointerButton::Primary;
+        // The right button does not draw with the Eraser, nor while it picks colours.
+        let draws = primary || (tools.tool.draws_in_color() && !picking);
+        if let Some(kind) = handle_at(image, tools, press).filter(|_| primary) {
             if image.transform.is_none() {
                 image.transform = Transform::begin(ui.ctx(), &image.document, false);
             }
             if let Some(transform) = &mut image.transform {
                 transform.press(kind, image.view.point_at(press));
             }
-        } else {
+        } else if draws {
             // A transform would go on from the selection as it was before.
             image.transform = None;
             let mask = image.document.selection_mask();
             let at = image.view.point_at(press);
             let layer = &mut image.document.active_mut().pixels;
-            let (drawing, area) = match tools.ink() {
+            let color = if primary { tools.colors.primary } else { tools.colors.secondary };
+            let (drawing, area) = match tools.ink(color) {
                 Some(ink) => {
                     let (stroke, area) = BrushStroke::begin(layer, at, ink, tools.tip_size(), tools.smooth(), mask);
                     (Drawing::Line(stroke), area)
                 }
                 None => {
                     let (size, speed, smooth) = (tools.spray_size, tools.spray_speed, tools.smooth());
-                    let (spray, area) = Spray::begin(layer, at, tools.colors.primary, size, speed, smooth, mask, seed());
+                    let (spray, area) = Spray::begin(layer, at, color, size, speed, smooth, mask, seed());
                     (Drawing::Spray(spray), area)
                 }
             };
@@ -428,7 +476,15 @@ fn use_drawing_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenIm
             image.stroke = Some(drawing);
         }
     }
-    let held = response.dragged_by(PointerButton::Primary) && !response.drag_started();
+    if picking
+        && !space
+        && response.dragged_by(PointerButton::Secondary)
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(color) = color_at(image, at)
+    {
+        tools.colors.pick(color, false);
+    }
+    let held = response.dragged() && !response.drag_started();
     let moved = held && response.drag_delta() != Vec2::ZERO;
     // The Spray leaves dots as time goes by, whether the pointer moves or not.
     let spraying = held && matches!(image.stroke, Some(Drawing::Spray(_)));
@@ -466,7 +522,7 @@ fn use_drawing_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenIm
     // A handle shows what dragging it would do, in place of the tool.
     let angle = box_state(image, tools).map_or(0.0, |state| state.angle);
     let resizing = image.transform.as_ref().and_then(Transform::drag_kind);
-    let on_handle = || ui.ctx().pointer_hover_pos().and_then(|at| handle_at(image, at));
+    let on_handle = || ui.ctx().pointer_hover_pos().and_then(|at| handle_at(image, tools, at));
     if let Some(kind) = resizing.or_else(|| if image.stroke.is_none() { on_handle() } else { None }) {
         ui.ctx().set_cursor_icon(kind.cursor(angle));
         return false;

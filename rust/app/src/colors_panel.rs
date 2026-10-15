@@ -146,6 +146,16 @@ impl Colors {
         self.secondary = WHITE;
     }
 
+    /// Sets a colour picked from the image: the one the section is editing, or the
+    /// other one with `other`.
+    pub fn pick(&mut self, color: Rgba<u8>, other: bool) {
+        if self.editing_secondary != other {
+            self.secondary = color;
+        } else {
+            self.primary = color;
+        }
+    }
+
     fn edited(&self) -> Rgba<u8> {
         if self.editing_secondary { self.secondary } else { self.primary }
     }

@@ -29,7 +29,7 @@ use layer_commands::LayerCommand;
 use layer_properties::Properties;
 use settings::Settings;
 use tiled_texture::TiledTexture;
-use tools::{Tool, Tools};
+use tools::{RightClick, Tool, Tools};
 use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
 
@@ -242,6 +242,8 @@ impl App {
     fn new(ctx: &egui::Context) -> Self {
         // Ctrl with plus, minus and 0 zoom the image, not the whole interface.
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
+        let settings = Settings::load();
+        let tools = Tools { right_click: settings.right_click(), ..Tools::default() };
         Self {
             images: Vec::new(),
             current: None,
@@ -253,11 +255,11 @@ impl App {
             flatten_prompt: None,
             may_quit: false,
             title: APP_NAME.to_owned(),
-            settings: Settings::load(),
+            settings,
             checker: canvas::checker_texture(ctx),
             pointer_pixel: None,
             icons: Icons::default(),
-            tools: Tools::default(),
+            tools,
             clipboard: None,
             layer_dialog: None,
             size_dialog: None,
@@ -900,6 +902,27 @@ impl App {
                 "On, the Paintbrush and the Eraser fade the edges of what they draw out over a pixel, and the \
                  Spray's dots can land between pixels. Off, their edges are hard, as the Pencil's always are.",
             );
+        }
+        if tool.draws_in_color() {
+            ui.separator();
+            ui.label("Right click:");
+            let mut right_click = self.tools.right_click;
+            egui::ComboBox::from_id_salt("right_click")
+                .selected_text(right_click.name())
+                .show_ui(ui, |ui| {
+                    for option in RightClick::ALL {
+                        ui.selectable_value(&mut right_click, option, option.name());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "What a right drag does with the Paintbrush, the Pencil and the Spray: draw in the secondary \
+                     color, or pick the color of the active layer as the one the Colors section is editing.",
+                );
+            if right_click != self.tools.right_click {
+                self.tools.right_click = right_click;
+                self.settings.set_right_click(right_click);
+            }
         }
     }
 

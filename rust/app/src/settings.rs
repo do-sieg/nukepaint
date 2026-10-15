@@ -4,7 +4,7 @@ use std::{fs, path::{Path, PathBuf}};
 
 use serde::{Deserialize, Serialize};
 
-use crate::dock::DockSide;
+use crate::{dock::DockSide, tools::RightClick};
 
 const MAX_RECENT_FILES: usize = 10;
 
@@ -16,6 +16,8 @@ pub struct Settings {
     /// Files last opened, most recent first.
     recent_files: Vec<PathBuf>,
     dock_side: DockSide,
+    /// What the right button does with the tools that draw in a colour.
+    right_click: RightClick,
 }
 
 impl Settings {
@@ -81,6 +83,15 @@ impl Settings {
 
     pub fn set_dock_side(&mut self, side: DockSide) {
         self.dock_side = side;
+        self.save();
+    }
+
+    pub fn right_click(&self) -> RightClick {
+        self.right_click
+    }
+
+    pub fn set_right_click(&mut self, right_click: RightClick) {
+        self.right_click = right_click;
         self.save();
     }
 }
