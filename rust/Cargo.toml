@@ -8,3 +8,7 @@ edition = "2024"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Pixel operations are far too slow unoptimized.
+[profile.dev.package.power-paint-core]
+opt-level = 2

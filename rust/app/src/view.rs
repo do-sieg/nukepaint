@@ -1,6 +1,7 @@
 //! How an image is shown: how far it is zoomed in and where it is scrolled to.
 
 use eframe::egui::{Pos2, Rect, Vec2};
+use power_paint_core::PixelRect;
 
 /// The steps Zoom In and Zoom Out go through.
 pub const ZOOM_LEVELS: [f32; 26] = [
@@ -68,6 +69,30 @@ impl View {
     pub fn pixel_at(&self, point: Pos2) -> (i64, i64) {
         let pixel = (point - self.image_rect().min) * self.pixels_per_point / self.zoom;
         (pixel.x.floor() as i64, pixel.y.floor() as i64)
+    }
+
+    /// Where a point of the screen is on the image, in pixels, to a fraction of one.
+    pub fn point_at(&self, point: Pos2) -> (f64, f64) {
+        let point = (point - self.image_rect().min) * self.pixels_per_point / self.zoom;
+        (point.x as f64, point.y as f64)
+    }
+
+    /// The pixels of the image that are in view, whole or in part.
+    pub fn visible_pixels(&self) -> PixelRect {
+        let (left, top) = self.point_at(self.viewport.min);
+        let (right, bottom) = self.point_at(self.viewport.max);
+        let (width, height) = (self.image_size.x as f64, self.image_size.y as f64);
+        PixelRect {
+            left: left.floor().clamp(0.0, width) as i32,
+            top: top.floor().clamp(0.0, height) as i32,
+            right: right.ceil().clamp(0.0, width) as i32,
+            bottom: bottom.ceil().clamp(0.0, height) as i32,
+        }
+    }
+
+    /// How many pixels of the image a point of the screen takes.
+    pub fn pixels_per_screen_point(&self) -> f64 {
+        (self.pixels_per_point / self.zoom) as f64
     }
 
     /// The corner between pixels nearest to a point of the screen, within the image.

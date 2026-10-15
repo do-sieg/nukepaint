@@ -1,8 +1,10 @@
-//! The part of an image the tools act on: the area inside outlines that run along the
-//! edges of pixels, so that each pixel is either in it or out of it.
+//! The part of an image the tools act on: the pixels whose middle is inside outlines
+//! drawn over the image.
 
-use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule, single::SingleIntOverlay};
-use i_overlay::i_float::int::point::IntPoint;
+use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
+use i_overlay::float::single::SingleFloatOverlay;
+
+use crate::Affine;
 
 /// What a selection tool does to the selection there already is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -53,12 +55,36 @@ impl PixelRect {
     }
 }
 
+/// A rectangle anywhere on the image's plane, from its top left to its bottom right.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bounds {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+impl Bounds {
+    pub fn width(&self) -> f64 {
+        self.right - self.left
+    }
+
+    pub fn height(&self) -> f64 {
+        self.bottom - self.top
+    }
+
+    pub fn center(&self) -> (f64, f64) {
+        ((self.left + self.right) / 2.0, (self.top + self.bottom) / 2.0)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Selection {
-    /// Closed outlines through corners between pixels. They do not cross each other:
-    /// a pixel is selected if it is inside an odd number of them, so an outline
-    /// inside another is a hole in it.
-    outlines: Vec<Vec<(i32, i32)>>,
+    /// Closed outlines, in pixels of the image, which do not cross each other. They
+    /// start on corners between pixels, and can be moved, stretched and turned from
+    /// there. A pixel is selected if its middle is inside an odd number of them, so an
+    /// outline inside another is a hole in it.
+    outlines: Vec<Vec<(f64, f64)>>,
 }
 
 impl Selection {
@@ -68,7 +94,11 @@ impl Selection {
             return Self::default();
         }
         let PixelRect { left, top, right, bottom } = rect;
-        Self { outlines: vec![vec![(left, top), (right, top), (right, bottom), (left, bottom)]] }
+        Self::from_corners(vec![(left, top), (right, top), (right, bottom), (left, bottom)])
+    }
+
+    fn from_corners(corners: Vec<(i32, i32)>) -> Self {
+        Self { outlines: vec![corners.into_iter().map(|(x, y)| (x as f64, y as f64)).collect()] }
     }
 
     /// Selects the pixels whose middle is in the ellipse that fits in a rectangle, or
@@ -108,15 +138,34 @@ impl Selection {
                 straight.push(point);
             }
         }
-        Self { outlines: vec![straight] }
+        Self::from_corners(straight)
     }
 
     pub fn is_empty(&self) -> bool {
         self.outlines.is_empty()
     }
 
-    pub fn outlines(&self) -> &[Vec<(i32, i32)>] {
+    pub fn outlines(&self) -> &[Vec<(f64, f64)>] {
         &self.outlines
+    }
+
+    /// The smallest rectangle around the outlines, if there are any.
+    pub fn bounds(&self) -> Option<Bounds> {
+        let mut points = self.outlines.iter().flatten();
+        let &(x, y) = points.next()?;
+        let start = Bounds { left: x, top: y, right: x, bottom: y };
+        Some(points.fold(start, |bounds, &(x, y)| Bounds {
+            left: bounds.left.min(x),
+            top: bounds.top.min(y),
+            right: bounds.right.max(x),
+            bottom: bounds.bottom.max(y),
+        }))
+    }
+
+    /// The selection carried somewhere else by `map`.
+    pub fn transformed(&self, map: &Affine) -> Selection {
+        let outlines = self.outlines.iter();
+        Self { outlines: outlines.map(|outline| outline.iter().map(|&point| map.apply(point)).collect()).collect() }
     }
 
     /// What a selection tool leaves selected after drawing `drawn` over this one.
@@ -138,15 +187,15 @@ impl Selection {
     }
 
     fn overlay(&self, other: &Selection, rule: OverlayRule) -> Selection {
-        let shapes = self.int_outlines().overlay(&other.int_outlines(), rule, FillRule::EvenOdd);
+        let shapes = self.points().overlay(&other.points(), rule, FillRule::EvenOdd);
         // A shape is an outline and the outlines of its holes, which even-odd filling tells apart.
         let outlines = shapes.into_iter().flatten();
-        Self { outlines: outlines.map(|outline| outline.into_iter().map(|p| (p.x, p.y)).collect()).collect() }
+        Self { outlines: outlines.map(|outline| outline.into_iter().map(|[x, y]| (x, y)).collect()).collect() }
     }
 
-    fn int_outlines(&self) -> Vec<Vec<IntPoint>> {
+    fn points(&self) -> Vec<Vec<[f64; 2]>> {
         let outlines = self.outlines.iter();
-        outlines.map(|outline| outline.iter().map(|&(x, y)| IntPoint::new(x, y)).collect()).collect()
+        outlines.map(|outline| outline.iter().map(|&(x, y)| [x, y]).collect()).collect()
     }
 
     /// Whether the pixel at `x`, `y` is selected.
@@ -154,8 +203,7 @@ impl Selection {
         // Whether a line from the pixel's middle going right crosses an odd number of edges.
         let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
         let mut inside = false;
-        for (a, b) in self.edges() {
-            let (ax, ay, bx, by) = (a.0 as f64, a.1 as f64, b.0 as f64, b.1 as f64);
+        for ((ax, ay), (bx, by)) in self.edges() {
             if (ay > py) != (by > py) && px < ax + (py - ay) / (by - ay) * (bx - ax) {
                 inside = !inside;
             }
@@ -163,36 +211,60 @@ impl Selection {
         inside
     }
 
-    /// Rectangles that together cover the selection without overlapping, in bands from
-    /// top to bottom. Exact for outlines of horizontal and vertical edges, which is all
-    /// the selection tools draw for now.
-    pub fn spans(&self) -> Vec<PixelRect> {
-        let mut rows: Vec<i32> = self.outlines.iter().flatten().map(|&(_, y)| y).collect();
-        rows.sort_unstable();
-        rows.dedup();
+    /// The selected pixels within `within`, as rectangles that do not overlap, in bands
+    /// from top to bottom: rows that select the same pixels are one band.
+    pub fn spans(&self, within: PixelRect) -> Vec<PixelRect> {
         let mut spans = Vec::new();
-        let mut crossings = Vec::new();
-        for band in rows.windows(2) {
-            let (top, bottom) = (band[0], band[1]);
-            let middle = (top as f64 + bottom as f64) / 2.0;
-            crossings.clear();
-            for (a, b) in self.edges() {
-                if (a.1 as f64 > middle) != (b.1 as f64 > middle) {
-                    let along = (middle - a.1 as f64) / (b.1 - a.1) as f64;
-                    crossings.push((a.0 as f64 + along * (b.0 - a.0) as f64).round() as i32);
+        let Some(bounds) = self.bounds() else {
+            return spans;
+        };
+        // The rows whose middle can be inside.
+        let first = ((bounds.top - 0.5).ceil() as i64).max(within.top as i64);
+        let end = ((bounds.bottom - 0.5).ceil() as i64).min(within.bottom as i64);
+        if first >= end {
+            return spans;
+        }
+        // Where each row's middle crosses the edges, gone through edge by edge so that
+        // each only looks at the rows it reaches.
+        let mut crossings = vec![Vec::new(); (end - first) as usize];
+        for ((ax, ay), (bx, by)) in self.edges() {
+            if ay == by {
+                continue;
+            }
+            let rows = ((ay.min(by) - 0.5).ceil() as i64).max(first)..((ay.max(by) - 0.5).ceil() as i64).min(end);
+            for y in rows {
+                let py = y as f64 + 0.5;
+                crossings[(y - first) as usize].push(ax + (py - ay) / (by - ay) * (bx - ax));
+            }
+        }
+        let mut previous: Vec<(i32, i32)> = Vec::new();
+        let mut band_start = 0;
+        let mut row = Vec::new();
+        for (y, xs) in (first..end).zip(&mut crossings) {
+            xs.sort_unstable_by(f64::total_cmp);
+            row.clear();
+            for &[from, to] in xs.as_chunks::<2>().0 {
+                // The pixels whose middle is from `from` up to `to`.
+                let left = ((from - 0.5).ceil() as i64).max(within.left as i64) as i32;
+                let right = ((to - 0.5).ceil() as i64).min(within.right as i64) as i32;
+                if left < right {
+                    row.push((left, right));
                 }
             }
-            crossings.sort_unstable();
-            for &[left, right] in crossings.as_chunks::<2>().0 {
-                if left < right {
-                    spans.push(PixelRect { left, top, right, bottom });
-                }
+            let y = y as i32;
+            let goes_on = row == previous && spans.last().is_some_and(|span: &PixelRect| span.bottom == y);
+            if goes_on {
+                spans[band_start..].iter_mut().for_each(|span: &mut PixelRect| span.bottom += 1);
+            } else {
+                band_start = spans.len();
+                spans.extend(row.iter().map(|&(left, right)| PixelRect { left, top: y, right, bottom: y + 1 }));
+                std::mem::swap(&mut previous, &mut row);
             }
         }
         spans
     }
 
-    fn edges(&self) -> impl Iterator<Item = ((i32, i32), (i32, i32))> + '_ {
+    fn edges(&self) -> impl Iterator<Item = ((f64, f64), (f64, f64))> + '_ {
         self.outlines.iter().flat_map(|outline| {
             let next = outline.iter().cycle().skip(1);
             outline.iter().copied().zip(next.copied())
@@ -208,8 +280,10 @@ mod tests {
         Selection::rect(PixelRect { left, top, right, bottom })
     }
 
+    const EVERYWHERE: PixelRect = PixelRect { left: -1000, top: -1000, right: 1000, bottom: 1000 };
+
     fn area(selection: &Selection) -> i32 {
-        selection.spans().iter().map(|span| span.width() * span.height()).sum()
+        selection.spans(EVERYWHERE).iter().map(|span| span.width() * span.height()).sum()
     }
 
     #[test]
@@ -320,6 +394,52 @@ mod tests {
         }
         for (mode, selects) in [(Replace, true), (Add, true), (Subtract, false), (Intersect, false), (Invert, true)] {
             assert_eq!(none.combine(&some, mode).is_empty(), !selects, "{mode:?} with nothing selected");
+        }
+    }
+
+    #[test]
+    fn spans_are_bands_of_the_same_rows() {
+        let spans = rect(0, 0, 10, 10).combine(&rect(5, 5, 15, 15), SelectionMode::Add).spans(EVERYWHERE);
+        assert_eq!(
+            spans,
+            [
+                PixelRect { left: 0, top: 0, right: 10, bottom: 5 },
+                PixelRect { left: 0, top: 5, right: 15, bottom: 10 },
+                PixelRect { left: 5, top: 10, right: 15, bottom: 15 },
+            ]
+        );
+    }
+
+    #[test]
+    fn spans_stay_within() {
+        let spans = rect(-5, -5, 5, 5).spans(PixelRect { left: 0, top: 0, right: 3, bottom: 100 });
+        assert_eq!(spans, [PixelRect { left: 0, top: 0, right: 3, bottom: 5 }]);
+    }
+
+    #[test]
+    fn transformed_moves_the_outlines() {
+        let moved = rect(0, 0, 4, 2).transformed(&Affine::translation(3.0, 1.0));
+        assert_eq!(moved, rect(3, 1, 7, 3));
+        assert_eq!(moved.bounds(), Some(Bounds { left: 3.0, top: 1.0, right: 7.0, bottom: 3.0 }));
+    }
+
+    #[test]
+    fn turned_selection_holds_the_pixels_whose_middle_is_inside() {
+        let turn = Affine::translation(-10.0, -10.0)
+            .then(Affine::rotation(0.5))
+            .then(Affine::translation(10.0, 10.0));
+        let turned = rect(4, 6, 16, 14).transformed(&turn);
+        let inside = (0..20).flat_map(|y| (0..20).map(move |x| (x, y)));
+        let count = inside.filter(|&(x, y)| turned.contains(x, y)).count() as i32;
+        assert_eq!(area(&turned), count);
+        // About as many as the rectangle had.
+        assert!((count - 96).abs() <= 6, "{count}");
+        for span in turned.spans(EVERYWHERE) {
+            for y in span.top..span.bottom {
+                for x in span.left..span.right {
+                    assert!(turned.contains(x as i64, y as i64));
+                }
+            }
         }
     }
 

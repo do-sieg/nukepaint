@@ -3,7 +3,7 @@
 //! copies, each half the size of the one before, show the image zoomed out, as
 //! the textures are not mipmapped.
 
-use eframe::egui::{self, Color32, ColorImage, Painter, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
+use eframe::egui::{self, Color32, ColorImage, Mesh, Painter, Pos2, Rect, Shape, TextureHandle, TextureOptions, Vec2};
 use power_paint_core::{RgbaImage, halve};
 
 /// Widest and tallest a tile is. Every GPU takes textures this large.
@@ -48,8 +48,36 @@ impl TiledTexture {
     /// without being smaller.
     pub fn paint(&self, painter: &Painter, rect: Rect) {
         let screen_scale = rect.width() * painter.pixels_per_point() / self.size.x;
+        self.level(screen_scale).paint(painter, rect);
+    }
+
+    /// Draws the whole, each point of it, in pixels, carried to the screen by `map`,
+    /// which may turn and stretch it. `screen_scale` is about how many screen pixels
+    /// one of its pixels takes, to draw from the copy that suits.
+    pub fn paint_mapped(&self, painter: &Painter, map: impl Fn(Pos2) -> Pos2, screen_scale: f32) {
+        let level = self.level(screen_scale);
+        let to_full = self.size / level.size;
+        for (tile, texture) in &level.tiles {
+            let mut mesh = Mesh::with_texture(texture.id());
+            let corners = [tile.left_top(), tile.right_top(), tile.right_bottom(), tile.left_bottom()];
+            let uvs = [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0), Pos2::new(1.0, 1.0), Pos2::new(0.0, 1.0)];
+            for (corner, uv) in corners.into_iter().zip(uvs) {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: map((corner.to_vec2() * to_full).to_pos2()),
+                    uv,
+                    color: Color32::WHITE,
+                });
+            }
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            painter.add(Shape::mesh(mesh));
+        }
+    }
+
+    /// The copy closest to `screen_scale` times the full size without being smaller.
+    fn level(&self, screen_scale: f32) -> &Level {
         let level = if screen_scale >= 1.0 { 0 } else { (1.0 / screen_scale).log2().floor() as usize };
-        self.levels[level.min(self.levels.len() - 1)].paint(painter, rect);
+        &self.levels[level.min(self.levels.len() - 1)]
     }
 }
 

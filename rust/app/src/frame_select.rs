@@ -8,47 +8,12 @@
 
 use power_paint_core::{PixelRect, Selection, SelectionMode};
 
-use crate::icons::{self, Icon};
-
 /// What a drag selects in the rectangle it frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Shape {
     #[default]
     Rectangle,
     Ellipse,
-}
-
-impl Shape {
-    pub const ALL: [Self; 2] = [Self::Rectangle, Self::Ellipse];
-
-    /// The name of the tool that selects this shape.
-    pub fn tool_name(self) -> &'static str {
-        match self {
-            Self::Rectangle => "Rectangle Select",
-            Self::Ellipse => "Ellipse Select",
-        }
-    }
-
-    pub fn icon(self) -> Icon {
-        match self {
-            Self::Rectangle => icons::RECT_SELECT,
-            Self::Ellipse => icons::ELLIPSE_SELECT,
-        }
-    }
-
-    /// How to use the tool.
-    pub fn help(self) -> &'static str {
-        match self {
-            Self::Rectangle => "Drag to select, a square with Shift. Hold Ctrl to add to the selection.",
-            Self::Ellipse => "Drag to select, a circle with Shift. Hold Ctrl to add to the selection.",
-        }
-    }
-
-    /// The next tool along, back to the first after the last.
-    pub fn next(self) -> Self {
-        let index = Self::ALL.iter().position(|&shape| shape == self).unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
-    }
 }
 
 #[derive(Default)]
@@ -178,12 +143,6 @@ mod tests {
         tool.drag_to(&mut selection, (0, 4), true);
         assert_eq!(selection, Selection::ellipse(PixelRect { left: 4, top: 4, right: 10, bottom: 10 }));
         tool.release(&mut selection);
-    }
-
-    #[test]
-    fn next_tool_goes_round() {
-        assert_eq!(Shape::Rectangle.next(), Shape::Ellipse);
-        assert_eq!(Shape::Ellipse.next(), Shape::Rectangle);
     }
 
     #[test]

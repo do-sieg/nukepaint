@@ -4,16 +4,19 @@ mod frame_select;
 mod icons;
 mod settings;
 mod tiled_texture;
+mod tools;
+mod transform;
 mod view;
 
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{Document, OPEN_EXTENSIONS, SelectionMode, thumbnail};
-use frame_select::{FrameSelect, Shape};
 use icons::{ICON_SIZE, Icons};
 use settings::Settings;
 use tiled_texture::TiledTexture;
+use tools::{Tool, Tools};
+use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -25,8 +28,6 @@ const ZOOM_IN_EQUALS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAN
 const ZOOM_OUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
 const ZOOM_TO_WINDOW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 const ACTUAL_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0);
-/// Goes from one selection tool to the next.
-const SELECT_TOOL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::S);
 
 /// Widest the list of recent files gets, in points.
 const WELCOME_WIDTH: f32 = 600.0;
@@ -49,6 +50,22 @@ pub struct OpenImage {
     /// The image shrunk for the image strip, as textures are not mipmapped.
     pub thumbnail: TextureHandle,
     pub view: View,
+    /// The selection being moved, resized or rotated, and its pixels with the selection tools.
+    pub transform: Option<Transform>,
+}
+
+impl OpenImage {
+    /// Shows the layers again after their pixels changed.
+    pub fn refresh(&mut self, ctx: &egui::Context) {
+        let flat = self.document.flattened();
+        let name = self.document.name();
+        self.texture = TiledTexture::new(ctx, &name, &flat);
+        self.thumbnail = make_thumbnail(ctx, &name, &flat);
+    }
+
+    fn is_dragging(&self) -> bool {
+        self.transform.as_ref().is_some_and(Transform::is_dragging)
+    }
 }
 
 /// What the View menu and its shortcuts do.
@@ -74,11 +91,7 @@ struct App {
     /// The pixel under the pointer, while it is over the image's view.
     pointer_pixel: Option<(i64, i64)>,
     icons: Icons,
-    frame_select: FrameSelect,
-    /// What the selection tool selects: which tool it is.
-    select_shape: Shape,
-    /// What selecting does to the selection there already is, unless Ctrl is held.
-    selection_mode: SelectionMode,
+    tools: Tools,
 }
 
 impl App {
@@ -95,9 +108,7 @@ impl App {
             checker: canvas::checker_texture(ctx),
             pointer_pixel: None,
             icons: Icons::default(),
-            frame_select: FrameSelect::default(),
-            select_shape: Shape::default(),
-            selection_mode: SelectionMode::default(),
+            tools: Tools::default(),
         }
     }
 
@@ -137,7 +148,7 @@ impl App {
                 self.settings.set_last_dir(dir);
             }
             self.settings.add_recent_file(&path);
-            self.images.push(OpenImage { document, texture, thumbnail, view });
+            self.images.push(OpenImage { document, texture, thumbnail, view, transform: None });
             self.select(self.images.len() - 1);
         }
     }
@@ -249,17 +260,20 @@ impl App {
     /// The settings of the tool, under the menu bar.
     fn tool_options(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let key = ui.ctx().format_shortcut(&SELECT_TOOL);
-            for shape in Shape::ALL {
-                let texture = self.icons.get(ui.ctx(), shape.icon());
+            for tool in Tool::ALL {
+                let texture = self.icons.get(ui.ctx(), tool.icon());
                 // The icons are light gray lines, made the colour of the text to suit either theme.
                 let tint = ui.visuals().strong_text_color();
                 let icon = egui::Image::new(texture).fit_to_exact_size(ICON_SIZE).tint(tint);
-                let button = egui::Button::selectable(self.select_shape == shape, icon);
-                let tooltip = format!("{} ({key})\n{}", shape.tool_name(), shape.help());
+                let button = egui::Button::selectable(self.tools.tool == tool, icon);
+                let key = ui.ctx().format_shortcut(&tool.key());
+                let tooltip = format!("{} ({key})\n{}", tool.name(), tool.help());
                 if ui.add(button).on_hover_text(tooltip).clicked() {
-                    self.select_shape = shape;
+                    self.set_tool(tool);
                 }
+            }
+            if self.tools.tool.select_shape().is_none() {
+                return;
             }
             ui.separator();
             ui.label("Mode:");
@@ -271,10 +285,10 @@ impl App {
                 SelectionMode::Invert => "Invert",
             };
             egui::ComboBox::from_id_salt("selection_mode")
-                .selected_text(name(self.selection_mode))
+                .selected_text(name(self.tools.selection_mode))
                 .show_ui(ui, |ui| {
                     for mode in SelectionMode::ALL {
-                        ui.selectable_value(&mut self.selection_mode, mode, name(mode));
+                        ui.selectable_value(&mut self.tools.selection_mode, mode, name(mode));
                     }
                 })
                 .response
@@ -282,6 +296,23 @@ impl App {
                     "What selecting does to what is already selected.\nWhatever this says, holding Ctrl adds to it.",
                 );
         });
+    }
+
+    /// Changes the tool, which ends any transform: the next one starts from the
+    /// selection as it then is.
+    fn set_tool(&mut self, tool: Tool) {
+        if self.is_dragging() {
+            return;
+        }
+        self.tools.set_tool(tool);
+        for image in &mut self.images {
+            image.transform = None;
+        }
+    }
+
+    /// Whether a tool is in the middle of a drag, which must not change tools or images under it.
+    fn is_dragging(&self) -> bool {
+        self.tools.frame_select.is_dragging() || self.images.iter().any(OpenImage::is_dragging)
     }
 
     /// The image's size, the pixel under the pointer, and a picker for the zoom.
@@ -333,10 +364,13 @@ impl App {
                 self.run(command);
             }
         }
-        // Not while a drag would carry on with another tool than it began with.
-        let busy = ctx.memory(|memory| memory.focused().is_some()) || self.frame_select.is_dragging();
-        if !busy && ctx.input_mut(|input| input.consume_shortcut(&SELECT_TOOL)) {
-            self.select_shape = self.select_shape.next();
+        // Not while typing, nor while a drag would carry on with another tool than it began with.
+        let busy = ctx.memory(|memory| memory.focused().is_some()) || self.is_dragging();
+        if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::SELECT_KEY)) {
+            self.set_tool(self.tools.next_select_tool());
+        }
+        if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::MOVE_SELECTION_KEY)) {
+            self.set_tool(Tool::MoveSelection);
         }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN)) {
             self.show_open_dialog(ctx);
@@ -445,8 +479,11 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(frame).show(ui, |ui| match self.current {
             Some(current) => {
                 let image = &mut self.images[current];
-                let (tool, shape, mode) = (&mut self.frame_select, self.select_shape, self.selection_mode);
-                self.pointer_pixel = canvas::show(ui, image, tool, shape, mode, &self.checker);
+                let output = canvas::show(ui, image, &mut self.tools, &mut self.icons, &self.checker);
+                self.pointer_pixel = output.pointer_pixel;
+                if let Some(tool) = output.tool_requested {
+                    self.set_tool(tool);
+                }
             }
             None => {
                 self.pointer_pixel = None;
