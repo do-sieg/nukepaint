@@ -10,6 +10,7 @@ mod grid_settings;
 mod history_panel;
 mod icons;
 mod image_size;
+mod lasso;
 mod layer_commands;
 mod layer_properties;
 mod layers_panel;
@@ -30,10 +31,11 @@ use checkerboard::Checkerboard;
 use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
-    Affine, Document, FloatingPixels, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, RgbaImage,
-    SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
+    Affine, Document, FloatingPixels, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
+    RgbaImage, SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
+use lasso::{Lasso, LassoKind, PolygonEdit};
 use layer_commands::LayerCommand;
 use layer_properties::Properties;
 use settings::Settings;
@@ -109,13 +111,26 @@ pub struct OpenImage {
     pub transform: Option<Transform>,
     /// What is being drawn on the active layer, until the button is let go.
     pub stroke: Option<Drawing>,
+    /// The outline a lasso is drawing, until it is closed.
+    pub lasso: Option<Lasso>,
+    /// Polygon Select's corners, to go on changing.
+    pub polygon: Option<PolygonEdit>,
 }
 
 impl OpenImage {
     fn new(ctx: &egui::Context, gpu: &Gpu, document: Document) -> Self {
         let texture = Composite::new(gpu, &document.layers);
         let view = View::new(texture.size());
-        let mut image = Self { document, texture, layer_thumbnails: Vec::new(), view, transform: None, stroke: None };
+        let mut image = Self {
+            document,
+            texture,
+            layer_thumbnails: Vec::new(),
+            view,
+            transform: None,
+            stroke: None,
+            lasso: None,
+            polygon: None,
+        };
         image.refresh_layer_thumbnails(ctx);
         image
     }
@@ -157,7 +172,19 @@ impl OpenImage {
     }
 
     fn is_dragging(&self) -> bool {
-        self.transform.as_ref().is_some_and(Transform::is_dragging) || self.stroke.is_some()
+        self.transform.as_ref().is_some_and(Transform::is_dragging)
+            || self.stroke.is_some()
+            || self.lasso.as_ref().is_some_and(|lasso| lasso.kind == LassoKind::Freehand)
+            || self.polygon.as_ref().is_some_and(PolygonEdit::is_dragging)
+    }
+
+    /// Gives up the outline a lasso is drawing, putting the selection back as it was.
+    pub fn cancel_lasso(&mut self) {
+        if let Some(lasso) = self.lasso.take()
+            && lasso.is_current(&self.document)
+        {
+            lasso.cancel(&mut self.document);
+        }
     }
 }
 
@@ -485,6 +512,9 @@ impl App {
     }
 
     fn select(&mut self, index: usize) {
+        for image in &mut self.images {
+            image.cancel_lasso();
+        }
         self.current = Some(index);
         self.scroll_to_current = true;
     }
@@ -1187,8 +1217,25 @@ impl App {
             .on_hover_text(
                 "What selecting does to what is already selected.\nWhatever this says, holding Ctrl adds to it.",
             );
+        if self.tools.tool.lasso().is_some() {
+            ui.separator();
+            ui.label("Overlaps:");
+            egui::ComboBox::from_id_salt("overlaps")
+                .selected_text(self.tools.overlaps.name())
+                .show_ui(ui, |ui| {
+                    for overlaps in Overlaps::ALL {
+                        ui.selectable_value(&mut self.tools.overlaps, overlaps, overlaps.name());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "What is selected where the outline crosses itself and goes around an area more than once. \
+                     Add takes in all it goes around. Subtract leaves out what it goes around an even number of \
+                     times.",
+                );
+        }
         // The Magic Wand moves no pixels.
-        if self.tools.tool.select_shape().is_none() {
+        if !self.tools.tool.has_box() {
             return;
         }
         ui.separator();
@@ -1310,6 +1357,7 @@ impl App {
         self.tools.set_tool(tool);
         for image in &mut self.images {
             image.transform = None;
+            image.cancel_lasso();
         }
     }
 

@@ -1,7 +1,7 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::{Ink, Interpolation, Rgba, SelectionMode};
+use power_paint_core::{Ink, Interpolation, Overlaps, Rgba, SelectionMode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -9,6 +9,7 @@ use crate::{
     frame_select::{FrameSelect, Shape},
     grid::Cells,
     icons::{self, Icon},
+    lasso::LassoKind,
 };
 
 /// Goes from one selection tool to the next.
@@ -28,6 +29,8 @@ pub enum Tool {
     #[default]
     RectangleSelect,
     EllipseSelect,
+    LassoSelect,
+    PolygonSelect,
     MagicWand,
     MoveSelection,
     Zoom,
@@ -41,9 +44,11 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
+        Self::LassoSelect,
+        Self::PolygonSelect,
         Self::MagicWand,
         Self::MoveSelection,
         Self::Zoom,
@@ -55,12 +60,15 @@ impl Tool {
         Self::Spray,
         Self::PaintBucket,
     ];
-    const SELECT_TOOLS: [Self; 3] = [Self::RectangleSelect, Self::EllipseSelect, Self::MagicWand];
+    const SELECT_TOOLS: [Self; 5] =
+        [Self::RectangleSelect, Self::EllipseSelect, Self::LassoSelect, Self::PolygonSelect, Self::MagicWand];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::RectangleSelect => "Rectangle Select",
+            Self::LassoSelect => "Lasso Select",
             Self::EllipseSelect => "Ellipse Select",
+            Self::PolygonSelect => "Polygon Select",
             Self::MagicWand => "Magic Wand",
             Self::MoveSelection => "Move Selection",
             Self::Zoom => "Zoom",
@@ -77,7 +85,9 @@ impl Tool {
     pub fn icon(self) -> Icon {
         match self {
             Self::RectangleSelect => icons::RECT_SELECT,
+            Self::LassoSelect => icons::LASSO_SELECT,
             Self::EllipseSelect => icons::ELLIPSE_SELECT,
+            Self::PolygonSelect => icons::POLYGON_SELECT,
             Self::MagicWand => icons::MAGIC_WAND,
             Self::MoveSelection => icons::MOVE_SELECTION,
             Self::Zoom => icons::ZOOM,
@@ -93,7 +103,9 @@ impl Tool {
 
     pub fn key(self) -> KeyboardShortcut {
         match self {
-            Self::RectangleSelect | Self::EllipseSelect | Self::MagicWand => SELECT_KEY,
+            Self::RectangleSelect | Self::LassoSelect | Self::EllipseSelect | Self::PolygonSelect | Self::MagicWand => {
+                SELECT_KEY
+            }
             Self::MoveSelection => MOVE_SELECTION_KEY,
             Self::Zoom => ZOOM_KEY,
             Self::Pan => PAN_KEY,
@@ -118,6 +130,18 @@ impl Tool {
                 "Drag to select, a circle with Shift. Then drag the selection's box to move, resize or rotate its \
                  pixels, its centre of rotation to turn it about another point, or the arrow keys to nudge it. \
                  Hold Ctrl to add to the selection, or on an edge or corner, to resize it about its middle."
+            }
+            Self::LassoSelect => {
+                "Drag around what to select. Then drag the selection's box to move, resize or rotate its pixels, \
+                 its centre of rotation to turn it about another point, or the arrow keys to nudge it. Hold Ctrl \
+                 to add to the selection, or on an edge or corner, to resize it about its middle."
+            }
+            Self::PolygonSelect => {
+                "Click to put down corners. Double-click, click the first corner or press Enter to select what \
+                 they go around; Backspace takes back the last corner, and Escape gives up. Then drag a corner to \
+                 move it, click an edge to add one there, or right click a corner to remove it. Drag the \
+                 selection's box to move, resize or rotate its pixels, or the arrow keys to nudge it. Hold Ctrl \
+                 to add to the selection."
             }
             Self::MagicWand => {
                 "Click to select the pixels of similar colour around the one clicked, or all those in the image \
@@ -175,7 +199,9 @@ impl Tool {
         match self {
             Self::RectangleSelect => Some(Shape::Rectangle),
             Self::EllipseSelect => Some(Shape::Ellipse),
-            Self::MagicWand
+            Self::LassoSelect
+            | Self::PolygonSelect
+            | Self::MagicWand
             | Self::MoveSelection
             | Self::Zoom
             | Self::Pan
@@ -188,9 +214,23 @@ impl Tool {
         }
     }
 
+    /// What outline the tool draws, for the lassos.
+    pub fn lasso(self) -> Option<LassoKind> {
+        match self {
+            Self::LassoSelect => Some(LassoKind::Freehand),
+            Self::PolygonSelect => Some(LassoKind::Polygon),
+            _ => None,
+        }
+    }
+
+    /// Whether the tool selects with the selection's box, which moves the selected pixels.
+    pub fn has_box(self) -> bool {
+        self.select_shape().is_some() || self.lasso().is_some()
+    }
+
     /// Whether the tool selects, which the selection mode says how.
     pub fn selects(self) -> bool {
-        self.select_shape().is_some() || self == Self::MagicWand
+        self.has_box() || self == Self::MagicWand
     }
 
     /// Whether the tool picks pixels of a colour close to the one clicked.
@@ -289,6 +329,8 @@ pub struct Tools {
     /// for the Magic Wand and the Paint Bucket to take it in.
     pub tolerance: u32,
     pub sample_source: SampleSource,
+    /// What the lassos' outlines shut in where they cross themselves.
+    pub overlaps: Overlaps,
     /// How the selection tools redraw the pixels they move, once they are not just
     /// moved by whole pixels.
     pub resampling: Interpolation,
@@ -316,6 +358,7 @@ impl Default for Tools {
             contiguous: true,
             tolerance: 50,
             sample_source: SampleSource::default(),
+            overlaps: Overlaps::default(),
             resampling: Interpolation::Bilinear,
             snap: None,
         }
@@ -343,7 +386,7 @@ impl Tools {
     /// The selection tool that moves the selected pixels that Move Selection's button
     /// switches to: the one used last, unless that was the Magic Wand, which has no box.
     pub fn box_select_tool(&self) -> Tool {
-        if self.last_select_tool.select_shape().is_some() { self.last_select_tool } else { Tool::RectangleSelect }
+        if self.last_select_tool.has_box() { self.last_select_tool } else { Tool::RectangleSelect }
     }
 
     /// How wide the tool draws, in pixels: the Pencil's width for the other tools.
@@ -401,7 +444,12 @@ mod tests {
         let mut tools = Tools::default();
         assert_eq!(tools.next_select_tool(), Tool::EllipseSelect);
         tools.set_tool(Tool::EllipseSelect);
+        assert_eq!(tools.next_select_tool(), Tool::LassoSelect);
+        tools.set_tool(Tool::LassoSelect);
+        assert_eq!(tools.next_select_tool(), Tool::PolygonSelect);
+        tools.set_tool(Tool::PolygonSelect);
         assert_eq!(tools.next_select_tool(), Tool::MagicWand);
+        tools.set_tool(Tool::EllipseSelect);
         tools.set_tool(Tool::MoveSelection);
         assert_eq!(tools.last_select_tool, Tool::EllipseSelect);
         assert_eq!(tools.next_select_tool(), Tool::EllipseSelect);

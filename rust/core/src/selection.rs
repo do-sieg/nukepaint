@@ -2,7 +2,7 @@
 //! drawn over the image.
 
 use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
-use i_overlay::float::single::SingleFloatOverlay;
+use i_overlay::float::{simplify::SimplifyShape, single::SingleFloatOverlay};
 
 use crate::Affine;
 
@@ -24,6 +24,28 @@ pub enum SelectionMode {
 
 impl SelectionMode {
     pub const ALL: [Self; 5] = [Self::Replace, Self::Add, Self::Subtract, Self::Intersect, Self::Invert];
+}
+
+/// What an outline drawn by a lasso shuts in where it crosses itself and goes around
+/// an area more than once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overlaps {
+    /// All it goes around.
+    #[default]
+    Add,
+    /// Only what it goes around an odd number of times.
+    Subtract,
+}
+
+impl Overlaps {
+    pub const ALL: [Self; 2] = [Self::Add, Self::Subtract];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Add => "Add",
+            Self::Subtract => "Subtract",
+        }
+    }
 }
 
 /// A rectangle of whole pixels, from the corner at its top left to the one at its
@@ -236,6 +258,37 @@ impl Selection {
             }
         }
         Self { outlines, frame: None }
+    }
+
+    /// Selects the pixels whose middle is inside an outline through corners between
+    /// pixels, which can cross itself, as `overlaps` says. Nothing if it goes around
+    /// no pixel's middle.
+    pub fn polygon(corners: &[(i32, i32)], overlaps: Overlaps) -> Self {
+        if corners.len() < 3 {
+            return Self::default();
+        }
+        let outline: Vec<[f64; 2]> = corners.iter().map(|&(x, y)| [x as f64, y as f64]).collect();
+        let fill = match overlaps {
+            Overlaps::Add => FillRule::NonZero,
+            Overlaps::Subtract => FillRule::EvenOdd,
+        };
+        // A shape is an outline and the outlines of its holes: all it goes around takes
+        // in the holes as well.
+        let shapes = vec![outline].simplify_shape(fill);
+        let keep = if overlaps == Overlaps::Add { 1 } else { usize::MAX };
+        let outlines = shapes.into_iter().flat_map(|shape| shape.into_iter().take(keep));
+        let outlines = outlines.map(|outline| outline.into_iter().map(|[x, y]| (x, y)).collect()).collect();
+        let selection = Self { outlines, frame: None };
+        let Some(bounds) = selection.bounds() else {
+            return selection;
+        };
+        let around = PixelRect {
+            left: bounds.left.floor() as i32,
+            top: bounds.top.floor() as i32,
+            right: bounds.right.ceil() as i32,
+            bottom: bounds.bottom.ceil() as i32,
+        };
+        if selection.spans(around).is_empty() { Self::default() } else { selection }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -611,5 +664,33 @@ mod tests {
         let shape = selects_exactly(&["##..", "####", "####"]);
         assert_eq!(shape.outlines().len(), 1);
         assert_eq!(shape.outlines()[0].len(), 6);
+    }
+
+    #[test]
+    fn a_polygon_selects_the_pixels_whose_middle_is_inside() {
+        let triangle = Selection::polygon(&[(0, 0), (4, 0), (0, 4)], Overlaps::Add);
+        assert!(triangle.contains(0, 0) && triangle.contains(1, 1) && triangle.contains(0, 2));
+        assert!(!triangle.contains(3, 1) && !triangle.contains(2, 2));
+        let square = Selection::polygon(&[(0, 0), (4, 0), (4, 4), (0, 4)], Overlaps::Add);
+        assert_eq!(square.spans(EVERYWHERE), rect(0, 0, 4, 4).spans(EVERYWHERE));
+        // Going around no pixel's middle.
+        assert!(Selection::polygon(&[(0, 0), (2, 0), (4, 0)], Overlaps::Add).is_empty());
+        assert!(Selection::polygon(&[(0, 0), (8, 1), (0, 1)], Overlaps::Add).spans(EVERYWHERE).len() == 1);
+        assert!(Selection::polygon(&[(0, 0), (4, 0)], Overlaps::Add).is_empty());
+    }
+
+    #[test]
+    fn overlaps_say_what_a_crossing_outline_shuts_in() {
+        // Around a square twice over: the second time round only its right half.
+        let twice = [(0, 0), (4, 0), (4, 4), (0, 4), (0, 0), (2, 0), (4, 0), (4, 4), (2, 4), (2, 0)];
+        let all = Selection::polygon(&twice, Overlaps::Add);
+        assert_eq!(area(&all), 16);
+        let odd = Selection::polygon(&twice, Overlaps::Subtract);
+        assert_eq!(area(&odd), 8);
+        assert!(odd.contains(0, 0) && !odd.contains(3, 0));
+        // A ring drawn as one outline, out and back along a cut: Add fills its middle.
+        let ring = [(0, 0), (6, 0), (6, 6), (0, 6), (0, 3), (2, 3), (2, 4), (4, 4), (4, 2), (2, 2), (2, 3), (0, 3)];
+        assert!(Selection::polygon(&ring, Overlaps::Add).contains(3, 3));
+        assert!(!Selection::polygon(&ring, Overlaps::Subtract).contains(3, 3));
     }
 }

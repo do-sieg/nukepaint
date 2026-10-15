@@ -24,9 +24,9 @@ use power_paint_core::{
 
 use crate::{
     OpenImage,
-    frame_select::Shape,
     grid::{self, Cells, Grid},
     icons::{self, Icon, Icons},
+    lasso::{Lasso, LassoKind},
     tools::{RightClick, SampleSource, Tool, Tools, ZoomDrag},
     transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, PIVOT_RADIUS, Transform},
     view::View,
@@ -48,6 +48,12 @@ const MOVE_SELECTION_TINT: Color32 = Color32::from_rgba_unmultiplied_const(51, 1
 /// one that moves it.
 const HANDLE_SIZE: f32 = 8.0;
 const MOVE_HANDLE_ARROWS: f32 = 10.0;
+/// Radius of the handles on Polygon Select's corners, in points, and how close to one,
+/// or to an edge between two, a press must be to grab it. A click that close to the
+/// first corner closes the outline.
+const CORNER_RADIUS: f32 = 4.0;
+const CORNER_REACH: f32 = 6.0;
+const EDGE_REACH: f32 = 4.0;
 /// Room between the selection and the button by it, in points.
 const BUTTON_GAP: f32 = 4.0;
 /// Size of the icon on the button by the selection, and the room around it, in points:
@@ -192,6 +198,7 @@ pub fn show(
     let painter = ui.painter_at(viewport);
     let tint = if tools.tool == Tool::MoveSelection { MOVE_SELECTION_TINT } else { SELECTION_TINT };
     paint_selection(&painter, &image.view, &image.document.selection, tint);
+    paint_lasso(&painter, image, tools);
     if let Some(drag) = tools.zoom_drag.as_ref().filter(|drag| drag.framing) {
         paint_zoom_frame(&painter, &image.view, drag);
     }
@@ -244,7 +251,7 @@ pub fn show(
 fn box_state(image: &OpenImage, tools: &Tools) -> Option<BoxState> {
     let shown = tools.tool == Tool::MoveSelection
         || (tools.tool.draws() && tools.selection_controls)
-        || (tools.tool.select_shape().is_some() && !tools.frame_select.is_dragging());
+        || (tools.tool.has_box() && !tools.frame_select.is_dragging() && image.lasso.is_none());
     if !shown {
         return None;
     }
@@ -255,6 +262,9 @@ fn box_state(image: &OpenImage, tools: &Tools) -> Option<BoxState> {
 }
 
 /// Works the tool with the left button, and with the right one, which rotates the box.
+/// Polygon Select puts down a corner at each click instead, and once its outline is
+/// closed, a press on a corner moves it, one on an edge adds a corner there, and a
+/// right click on a corner removes it, before the box has the press.
 fn use_tool(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -264,6 +274,10 @@ fn use_tool(
     space: bool,
 ) {
     let (command, shift) = ui.input(|input| (input.modifiers.command, input.modifiers.shift));
+    // An outline being drawn is given up once anything else changes the selection.
+    if image.lasso.as_ref().is_some_and(|lasso| !lasso.is_current(&image.document)) {
+        image.lasso = None;
+    }
     if ui.input(|input| input.key_pressed(Key::Escape)) {
         if tools.frame_select.is_dragging() {
             tools.frame_select.cancel(&mut image.document.selection);
@@ -271,17 +285,43 @@ fn use_tool(
         if let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging()) {
             image.document.selection = transform.cancel();
         }
+        if let Some(polygon) = &mut image.polygon {
+            polygon.cancel(&mut image.document);
+        }
+        image.cancel_lasso();
     }
+    let drawing_polygon = image.lasso.as_ref().is_some_and(|lasso| lasso.kind == LassoKind::Polygon);
+    if drawing_polygon {
+        if ui.input(|input| input.key_pressed(Key::Enter)) {
+            close_lasso(image, tools);
+        } else if ui.input(|input| input.key_pressed(Key::Backspace)) {
+            let lasso = image.lasso.as_mut().expect("drawing");
+            if lasso.corners().len() == 1 {
+                image.cancel_lasso();
+            } else {
+                lasso.remove_last(&mut image.document);
+            }
+        }
+    }
+    if let Some(lasso) = image.lasso.as_mut().filter(|lasso| lasso.kind == LassoKind::Polygon) {
+        lasso.reach(&mut image.document, pointer.map(|at| corner_at(&image.view, at, tools.snap)));
+    }
+    let drawing_polygon = image.lasso.as_ref().is_some_and(|lasso| lasso.kind == LassoKind::Polygon);
     let reach = image.view.pixels_per_screen_point();
-    let shape = tools.tool.select_shape();
+    let has_box = tools.tool.has_box();
     // The selection tools draw a new selection with Ctrl, or in a mode other than Replace,
     // wherever they are pressed.
-    let draws_anyway = shape.is_some() && (command || tools.selection_mode != SelectionMode::Replace);
+    let draws_anyway = has_box && (command || tools.selection_mode != SelectionMode::Replace);
     let box_drag_at = |image: &OpenImage, tools: &Tools, point: Pos2| {
         box_state(image, tools)?.drag_at(image.view.point_at(point), reach)
     };
     // Ctrl on an edge or corner resizes the box about its middle, rather than drawing.
     let takes_box = |kind: &DragKind| !draws_anyway || (command && matches!(kind, DragKind::Resize(_)));
+    // Polygon Select's corners and edges, unless Ctrl draws a new outline.
+    let polygon_hit = |image: &OpenImage, tools: &Tools, at: Pos2| {
+        let corners = polygon_corners(image, tools).filter(|_| !command)?;
+        polygon_hit_at(&image.view, corners, at)
+    };
 
     let started = [PointerButton::Primary, PointerButton::Secondary]
         .into_iter()
@@ -290,26 +330,49 @@ fn use_tool(
         && !space
         && let Some(press) = ui.input(|input| input.pointer.press_origin())
     {
-        let on_box = box_drag_at(image, tools, press);
+        let on_box = box_drag_at(image, tools, press).filter(takes_box);
+        let on_handle = on_box.is_some_and(|kind| kind != DragKind::Move);
+        let hit = polygon_hit(image, tools, press);
+        let corner = corner_at(&image.view, press, tools.snap);
         let kind = match button {
-            PointerButton::Primary => on_box.filter(takes_box),
+            PointerButton::Primary => on_box,
             // The right button rotates the box: anywhere with Move Selection, which has nothing else to do.
             PointerButton::Secondary if on_box.is_some() || tools.tool == Tool::MoveSelection => {
                 box_state(image, tools).map(|_| DragKind::Rotate)
             }
             _ => None,
         };
-        if let Some(kind) = kind {
-            if image.transform.is_none() {
-                image.transform = Transform::begin(ui.ctx(), &image.document, shape.is_some());
+        match (button, hit) {
+            (PointerButton::Primary, _) if drawing_polygon => put_corner(image, tools, press),
+            (PointerButton::Primary, Some(PolygonHit::Corner(index))) => {
+                image.transform = None;
+                image.polygon.as_mut().expect("hit").press_corner(&image.document, index);
             }
-            if let Some(transform) = &mut image.transform {
-                transform.press(kind, image.view.point_at(press), reach);
+            (PointerButton::Primary, Some(PolygonHit::Edge(index))) if !on_handle => {
+                image.transform = None;
+                image.polygon.as_mut().expect("hit").press_edge(&mut image.document, index, corner);
             }
-        } else if button == PointerButton::Primary
-            && let Some(shape) = shape
-        {
-            start_selecting(image, tools, shape, press, command);
+            (PointerButton::Secondary, Some(PolygonHit::Corner(index))) => {
+                image.transform = None;
+                let polygon = image.polygon.as_mut().expect("hit");
+                if let Some(corners) = polygon.remove(&mut image.document, index) {
+                    crate::commit_selection(&mut image.document, tools.tool.name(), tools.tool.icon());
+                    polygon.record(&image.document, corners);
+                }
+            }
+            _ if drawing_polygon => {}
+            _ => {
+                if let Some(kind) = kind {
+                    if image.transform.is_none() {
+                        image.transform = Transform::begin(ui.ctx(), &image.document, has_box);
+                    }
+                    if let Some(transform) = &mut image.transform {
+                        transform.press(kind, image.view.point_at(press), reach);
+                    }
+                } else if button == PointerButton::Primary && has_box {
+                    start_selecting(image, tools, press, command);
+                }
+            }
         }
     }
 
@@ -318,6 +381,12 @@ fn use_tool(
         if tools.frame_select.is_dragging() {
             let corner = corner_at(&image.view, at, tools.snap);
             tools.frame_select.drag_to(&mut image.document.selection, corner, shift);
+        }
+        if let Some(lasso) = image.lasso.as_mut().filter(|lasso| lasso.kind == LassoKind::Freehand) {
+            lasso.add(&mut image.document, image.view.corner_at(at));
+        }
+        if let Some(polygon) = image.polygon.as_mut().filter(|polygon| polygon.is_dragging()) {
+            polygon.drag_to(&mut image.document, corner_at(&image.view, at, tools.snap));
         }
         if let Some(transform) = image.transform.as_mut()
             && let Some(selection) = transform.drag_to(image.view.point_at(at), shift, command, tools.snap)
@@ -328,6 +397,16 @@ fn use_tool(
 
     if response.drag_stopped() {
         release_selecting(image, tools);
+        if let Some(polygon) = &mut image.polygon
+            && let Some((_, corners)) = polygon.release()
+        {
+            crate::commit_selection(&mut image.document, tools.tool.name(), tools.tool.icon());
+            polygon.record(&image.document, corners);
+        }
+        // A double click closes Polygon Select's outline.
+        if drawing_polygon && ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary)) {
+            close_lasso(image, tools);
+        }
         if let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging()) {
             // Not of the centre of rotation, which is left where it is let go.
             let clicked = transform.drag_kind().is_some_and(|kind| kind != DragKind::Pivot)
@@ -339,25 +418,108 @@ fn use_tool(
             // A click on the box of a selection tool does what a click with the tool does.
             if !moved
                 && clicked
-                && let Some(shape) = shape
+                && has_box
                 && let Some(press) = ui.input(|input| input.pointer.press_origin())
             {
-                start_selecting(image, tools, shape, press, command);
+                start_selecting(image, tools, press, command);
                 release_selecting(image, tools);
             }
         }
     }
 
-    // The pointer shows what a press would do.
+    // The pointer shows what a press would do, in the order a press goes by.
     let dragging_box = image.transform.as_ref().and_then(Transform::drag_kind);
     let angle = box_state(image, tools).map_or(0.0, |state| state.angle);
-    let hovered_box = pointer.filter(|_| !tools.frame_select.is_dragging());
-    let hovered_kind = || hovered_box.and_then(|at| box_drag_at(image, tools, at)).filter(takes_box);
-    if let Some(kind) = dragging_box.or_else(hovered_kind) {
-        ui.ctx().set_cursor_icon(kind.cursor(angle));
-    } else if shape.is_some() && (response.hovered() || tools.frame_select.is_dragging()) {
-        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+    let hovered = pointer.filter(|_| !tools.frame_select.is_dragging() && !image.is_dragging());
+    let hovered_kind = hovered.and_then(|at| box_drag_at(image, tools, at)).filter(takes_box);
+    let hovered_hit = hovered.and_then(|at| polygon_hit(image, tools, at));
+    let cursor = if let Some(kind) = dragging_box {
+        Some(kind.cursor(angle))
+    } else if image.polygon.as_ref().is_some_and(|polygon| polygon.is_dragging()) {
+        Some(CursorIcon::Grabbing)
+    } else if let Some(PolygonHit::Corner(_)) = hovered_hit {
+        Some(CursorIcon::Grab)
+    } else if let Some(kind) = hovered_kind.filter(|&kind| kind != DragKind::Move) {
+        Some(kind.cursor(angle))
+    } else if let Some(PolygonHit::Edge(_)) = hovered_hit {
+        Some(CursorIcon::Copy)
+    } else if let Some(kind) = hovered_kind {
+        Some(kind.cursor(angle))
+    } else {
+        let selecting = tools.frame_select.is_dragging() || image.lasso.is_some();
+        (has_box && (response.hovered() || selecting)).then_some(CursorIcon::Crosshair)
+    };
+    if let Some(cursor) = cursor {
+        ui.ctx().set_cursor_icon(cursor);
     }
+}
+
+/// What of Polygon Select's corners and edges a press is on.
+#[derive(Clone, Copy)]
+enum PolygonHit {
+    Corner(usize),
+    /// The edge from the corner at that index to the next one.
+    Edge(usize),
+}
+
+/// Polygon Select's corners, if they can be changed: with the tool, while no outline is
+/// being drawn, and the selection is as they left it.
+fn polygon_corners<'a>(image: &'a OpenImage, tools: &Tools) -> Option<&'a [(i32, i32)]> {
+    if tools.tool != Tool::PolygonSelect || image.lasso.is_some() {
+        return None;
+    }
+    image.polygon.as_ref()?.corners(&image.document)
+}
+
+/// The corner nearest to a point of the screen, or else the edge, if any is close enough.
+fn polygon_hit_at(view: &View, corners: &[(i32, i32)], at: Pos2) -> Option<PolygonHit> {
+    let screen: Vec<Pos2> = corners.iter().map(|&(x, y)| view.to_screen(x as f32, y as f32)).collect();
+    let nearest = |distances: &mut dyn Iterator<Item = (usize, f32)>, reach: f32| {
+        distances.filter(|&(_, distance)| distance <= reach).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(index, _)| index)
+    };
+    let mut to_corners = screen.iter().map(|corner| corner.distance(at)).enumerate();
+    if let Some(index) = nearest(&mut to_corners, CORNER_REACH) {
+        return Some(PolygonHit::Corner(index));
+    }
+    let mut to_edges = (0..screen.len()).map(|index| {
+        let (a, b) = (screen[index], screen[(index + 1) % screen.len()]);
+        let along = (at - a).dot(b - a) / (b - a).length_sq().max(f32::EPSILON);
+        (index, (a + (b - a) * along.clamp(0.0, 1.0)).distance(at))
+    });
+    nearest(&mut to_edges, EDGE_REACH).map(PolygonHit::Edge)
+}
+
+/// Polygon Select puts down a corner where it is pressed, or closes its outline on its
+/// first corner once it has three.
+fn put_corner(image: &mut OpenImage, tools: &Tools, press: Pos2) {
+    let corner = corner_at(&image.view, press, tools.snap);
+    let Some(lasso) = &mut image.lasso else {
+        return;
+    };
+    let &first = lasso.corners().first().expect("an outline has a corner");
+    let first_on_screen = image.view.to_screen(first.0 as f32, first.1 as f32);
+    let on_first = corner == first || first_on_screen.distance(press) <= CORNER_REACH;
+    if lasso.corners().len() >= 3 && on_first {
+        close_lasso(image, tools);
+    } else {
+        lasso.add(&mut image.document, corner);
+    }
+}
+
+/// Closes the outline a lasso has drawn, which is a step if it changed the selection.
+/// Polygon Select's corners can then be changed.
+fn close_lasso(image: &mut OpenImage, tools: &Tools) {
+    let Some(lasso) = image.lasso.take() else {
+        return;
+    };
+    let closed = lasso.close(&mut image.document);
+    if closed.before.is_some() {
+        crate::commit_selection(&mut image.document, tools.tool.name(), tools.tool.icon());
+    }
+    image.polygon = closed.polygon.map(|mut polygon| {
+        polygon.record(&image.document, closed.corners);
+        polygon
+    });
 }
 
 /// The selection's box moved, as a step: with `placed`, the active layer with the
@@ -385,7 +547,7 @@ pub fn nudge(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools, offset: 
         return;
     }
     if image.transform.is_none() {
-        image.transform = Transform::begin(ctx, &image.document, tools.tool.select_shape().is_some());
+        image.transform = Transform::begin(ctx, &image.document, tools.tool.has_box());
     }
     let Some(transform) = &mut image.transform else {
         return;
@@ -804,13 +966,20 @@ fn paint_zoom_frame(painter: &Painter, view: &View, drag: &ZoomDrag) {
 
 /// A selection tool starts drawing a new selection, which ends any transform. Holding
 /// Ctrl when it is pressed adds to the selection, whatever the mode. Alt is left
-/// alone, as window managers on Linux move the window with Alt and a drag.
-fn start_selecting(image: &mut OpenImage, tools: &mut Tools, shape: Shape, press: Pos2, command: bool) {
+/// alone, as window managers on Linux move the window with Alt and a drag. Lasso
+/// Select's outline keeps to the pointer, not to the grid.
+fn start_selecting(image: &mut OpenImage, tools: &mut Tools, press: Pos2, command: bool) {
     image.transform = None;
     let mode = if command { SelectionMode::Add } else { tools.selection_mode };
     let view = &image.view;
     let corner = corner_at(view, press, tools.snap);
-    tools.frame_select.press(&mut image.document.selection, shape, corner, view.pixel_at(press), mode);
+    let pressed = view.pixel_at(press);
+    if let Some(kind) = tools.tool.lasso() {
+        let corner = if kind == LassoKind::Freehand { view.corner_at(press) } else { corner };
+        image.lasso = Some(Lasso::begin(&mut image.document, kind, corner, pressed, mode, tools.overlaps));
+    } else if let Some(shape) = tools.tool.select_shape() {
+        tools.frame_select.press(&mut image.document.selection, shape, corner, pressed, mode);
+    }
 }
 
 /// The corner between pixels where the selection tools put a corner of the selection,
@@ -823,12 +992,16 @@ fn corner_at(view: &View, at: Pos2, snap: Option<Cells>) -> (i32, i32) {
 }
 
 /// A selection tool ends drawing the selection, which is a step if it changed anything.
+/// Polygon Select's outline goes on until it is closed.
 fn release_selecting(image: &mut OpenImage, tools: &mut Tools) {
     let document = &mut image.document;
     if let Some(before) = tools.frame_select.release(&mut document.selection)
         && document.selection != before
     {
         crate::commit_selection(document, tools.tool.name(), tools.tool.icon());
+    }
+    if image.lasso.as_ref().is_some_and(|lasso| lasso.kind == LassoKind::Freehand) {
+        close_lasso(image, tools);
     }
 }
 
@@ -846,6 +1019,32 @@ fn paint_selection(painter: &Painter, view: &View, selection: &Selection, tint: 
             .map(|point| Pos2::new(painter.round_to_pixel_center(point.x), painter.round_to_pixel_center(point.y)))
             .collect();
         paint_outline(painter, &points);
+    }
+}
+
+/// The outline a lasso is drawing, closed as it would be if it ended now, with a handle
+/// on Polygon Select's first corner, the one a click on which closes it. Or Polygon
+/// Select's corners, which can then be moved, each with a handle.
+fn paint_lasso(painter: &Painter, image: &OpenImage, tools: &Tools) {
+    let view = &image.view;
+    let on_screen = |&(x, y): &(i32, i32)| {
+        let point = view.to_screen(x as f32, y as f32);
+        Pos2::new(painter.round_to_pixel_center(point.x), painter.round_to_pixel_center(point.y))
+    };
+    let handles: Vec<Pos2> = if let Some(lasso) = &image.lasso {
+        let outline = lasso.outline();
+        paint_outline(painter, &outline.iter().map(on_screen).collect::<Vec<_>>());
+        match lasso.kind {
+            LassoKind::Polygon => lasso.corners().first().map(on_screen).into_iter().collect(),
+            LassoKind::Freehand => Vec::new(),
+        }
+    } else {
+        polygon_corners(image, tools).unwrap_or_default().iter().map(on_screen).collect()
+    };
+    let pixel = 1.0 / painter.pixels_per_point();
+    for center in handles {
+        painter.circle_filled(center, CORNER_RADIUS, Color32::WHITE);
+        painter.circle_stroke(center, CORNER_RADIUS, Stroke::new(pixel, Color32::BLACK));
     }
 }
 
@@ -923,7 +1122,7 @@ fn selection_button(
     let right = screen.iter().map(|point| point.x).fold(corner.x, f32::max);
 
     let shortcut = |key| ui.ctx().format_shortcut(&key);
-    let selecting = tools.tool == Tool::MoveSelection || tools.tool.select_shape().is_some();
+    let selecting = tools.tool == Tool::MoveSelection || tools.tool.has_box();
     // It shows what the box moves now, and switches to moving the other.
     let (button, icon, tooltip) = if tools.tool == Tool::MoveSelection {
         let target = tools.box_select_tool();
