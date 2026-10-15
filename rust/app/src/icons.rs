@@ -50,6 +50,7 @@ pub const LAYERS: Icon = icon!("layers");
 pub const MOVE_PIXELS: Icon = icon!("move_pixels");
 pub const MOVE: Icon = icon!("move");
 pub const OPEN: Icon = icon!("open");
+pub const CROP: Icon = icon!("crop");
 pub const CUT: Icon = icon!("cut");
 pub const PASTE: Icon = icon!("paste");
 pub const ERASE: Icon = icon!("erase");
@@ -57,7 +58,7 @@ pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
 /// Those the history can list steps with, which it keeps by name.
-const STEP_ICONS: [Icon; 23] = [
+const STEP_ICONS: [Icon; 24] = [
     RECT_SELECT,
     ELLIPSE_SELECT,
     MOVE_SELECTION,
@@ -74,6 +75,7 @@ const STEP_ICONS: [Icon; 23] = [
     LAYERS,
     MOVE_PIXELS,
     OPEN,
+    CROP,
     CUT,
     PASTE,
     ERASE,

@@ -49,6 +49,13 @@ impl View {
         }
     }
 
+    /// Takes in another size of the image, keeping the zoom, and scrolled no further
+    /// than the image now goes.
+    pub fn set_image_size(&mut self, image_size: Vec2) {
+        self.image_size = image_size;
+        self.pan(Vec2::ZERO);
+    }
+
     /// Size of the image on screen, in points.
     pub fn image_size_on_screen(&self) -> Vec2 {
         self.image_size * self.zoom / self.pixels_per_point

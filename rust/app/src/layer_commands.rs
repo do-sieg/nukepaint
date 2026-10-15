@@ -1,5 +1,5 @@
 //! What the Layers menu, the Image menu, their shortcuts, the buttons under the layers
-//! list and the menu of a layer in it do. The Image menu only holds Flatten for now.
+//! list and the menu of a layer in it do.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
 use power_paint_core::Document;
@@ -12,6 +12,9 @@ pub enum LayerCommand {
     Delete,
     Duplicate,
     MergeDown,
+    CropToSelection,
+    Resize,
+    CanvasSize,
     Flatten,
     FlipHorizontal,
     FlipVertical,
@@ -39,7 +42,7 @@ impl LayerCommand {
         &[Properties],
     ];
     /// The Image menu.
-    pub const IMAGE_MENU: [&[Self]; 1] = [&[Flatten]];
+    pub const IMAGE_MENU: [&[Self]; 2] = [&[CropToSelection, Resize, CanvasSize], &[Flatten]];
     /// The menu of a layer in the layers list, which acts on it: the Layers menu without
     /// the commands that go to another layer, and Flatten.
     pub const CONTEXT_MENU: [&[Self]; 4] = [
@@ -48,7 +51,7 @@ impl LayerCommand {
         &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
         &[Properties],
     ];
-    /// The buttons under the layers list: the commands with an icon.
+    /// The buttons under the layers list, which show their icon.
     pub const BUTTONS: [Self; 7] = [Add, Delete, Duplicate, MergeDown, MoveUp, MoveDown, Properties];
 
     pub fn label(self) -> &'static str {
@@ -57,6 +60,9 @@ impl LayerCommand {
             Delete => "Delete Layer",
             Duplicate => "Duplicate Layer",
             MergeDown => "Merge Layer Down",
+            CropToSelection => "Crop to Selection",
+            Resize => "Resize…",
+            CanvasSize => "Canvas Size…",
             Flatten => "Flatten",
             FlipHorizontal => "Flip Horizontal",
             FlipVertical => "Flip Vertical",
@@ -81,6 +87,10 @@ impl LayerCommand {
             Delete => (ctrl_shift, Key::Delete),
             Duplicate => (ctrl_shift, Key::D),
             MergeDown => (Modifiers::COMMAND, Key::M),
+            // Which comes as a Cut event rather than as keys: this is for the menu.
+            CropToSelection => (ctrl_shift, Key::X),
+            Resize => (Modifiers::COMMAND, Key::R),
+            CanvasSize => (ctrl_shift, Key::R),
             Flatten => (ctrl_shift, Key::F),
             GoToTop => (ctrl_alt, Key::PageUp),
             GoToAbove => (Modifiers::ALT, Key::PageUp),
@@ -98,6 +108,7 @@ impl LayerCommand {
             Delete => icons::LAYER_DELETE,
             Duplicate => icons::LAYER_DUPLICATE,
             MergeDown => icons::LAYER_MERGE_DOWN,
+            CropToSelection => icons::CROP,
             MoveUp => icons::LAYER_UP,
             MoveDown => icons::LAYER_DOWN,
             Properties => icons::LAYER_PROPERTIES,
@@ -111,15 +122,17 @@ impl LayerCommand {
         let has_below = document.active_layer > 0;
         match self {
             Delete => document.layers.len() > 1,
+            CropToSelection => !document.selection.is_empty(),
             Flatten => !document.is_flat(),
             GoToTop | GoToAbove | MoveToTop | MoveUp => has_above,
             MergeDown | GoToBottom | GoToBelow | MoveToBottom | MoveDown => has_below,
-            Add | Duplicate | FlipHorizontal | FlipVertical | Rotate180 | Properties => true,
+            Add | Duplicate | Resize | CanvasSize | FlipHorizontal | FlipVertical | Rotate180 | Properties => true,
         }
     }
 
-    /// Runs the command on the document, but for Properties, which asks the user first.
-    /// Returns whether the layers changed, rather than only which one is active.
+    /// Runs the command on the document, but for those that ask the user first:
+    /// Resize, Canvas Size and Properties. Returns whether the layers changed, rather
+    /// than only which one is active.
     pub fn run(self, document: &mut Document) -> bool {
         let active = document.active_layer;
         let top = document.layers.len() - 1;
@@ -128,6 +141,7 @@ impl LayerCommand {
             Delete => return document.delete_layer(),
             Duplicate => document.duplicate_layer(),
             MergeDown => return document.merge_layer_down(),
+            CropToSelection => return document.crop_to_selection(),
             Flatten => document.flatten(),
             FlipHorizontal => document.flip_layer(true, false),
             FlipVertical => document.flip_layer(false, true),
@@ -146,7 +160,7 @@ impl LayerCommand {
             MoveUp => return document.move_layer(active, active + 1),
             MoveDown => return document.move_layer(active, active.saturating_sub(1)),
             MoveToBottom => return document.move_layer(active, 0),
-            Properties => return false,
+            Resize | CanvasSize | Properties => return false,
         }
         true
     }

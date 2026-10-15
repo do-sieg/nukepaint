@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use image::{RgbaImage, imageops};
 
 use crate::{
-    BlendMode, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask, SelectionMode, Step, blend_layer,
-    composite, composite_area, copy_selected, erase_selected, history::History, load_image, save_image,
+    Affine, BlendMode, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
+    SelectionMode, Step, blend_layer, composite, composite_area, copy_selected, erase_selected, history::History,
+    load_image, resize, save_image,
 };
 
 /// An image being edited: its layers, bottom first, the file it came from, and the
@@ -294,6 +295,59 @@ impl Document {
         }
     }
 
+    /// Cuts the image down to the rectangle around the selection, as far as it is on
+    /// the image. What is in that rectangle but not selected is left transparent. The
+    /// selection stays on the same pixels. Returns whether any of it was on the image.
+    pub fn crop_to_selection(&mut self) -> bool {
+        let cropped: Option<Vec<_>> = self.layers.iter().map(|layer| copy_selected(&layer.pixels, &self.selection)).collect();
+        let Some(cropped) = cropped else {
+            return false;
+        };
+        // The same for every layer, as they are all as large as the image.
+        let area = cropped[0].0;
+        for (layer, (_, pixels)) in self.layers.iter_mut().zip(cropped) {
+            layer.pixels = pixels;
+        }
+        self.selection = self.selection.transformed(&Affine::translation(-area.left as f64, -area.top as f64));
+        true
+    }
+
+    /// Stretches the image to another size, which must not be empty, and the
+    /// selection with it. Returns whether the size changed.
+    pub fn resize(&mut self, width: u32, height: u32, interpolation: Interpolation) -> bool {
+        let (old_width, old_height) = self.size();
+        if (width, height) == (old_width, old_height) {
+            return false;
+        }
+        for layer in &mut self.layers {
+            layer.pixels = resize(&layer.pixels, width, height, interpolation);
+        }
+        let scale = Affine::scale(width as f64 / old_width as f64, height as f64 / old_height as f64);
+        self.selection = self.selection.transformed(&scale);
+        true
+    }
+
+    /// Gives the image another size, which must not be empty, without stretching it:
+    /// it is cut where the canvas gets smaller and left transparent where it gets
+    /// larger. `anchor` is where the image stays: 0, 1 or 2 along each axis, for against
+    /// the left or top edge, in the middle, or against the right or bottom edge. The
+    /// selection stays on the same pixels. Returns whether the size changed.
+    pub fn resize_canvas(&mut self, width: u32, height: u32, anchor: (u8, u8)) -> bool {
+        let (old_width, old_height) = self.size();
+        if (width, height) == (old_width, old_height) {
+            return false;
+        }
+        let x = (width as i64 - old_width as i64) * anchor.0 as i64 / 2;
+        let y = (height as i64 - old_height as i64) * anchor.1 as i64 / 2;
+        for layer in &mut self.layers {
+            let mut placed = RgbaImage::new(width, height);
+            imageops::replace(&mut placed, &layer.pixels, x, y);
+            layer.pixels = placed;
+        }
+        self.selection = self.selection.transformed(&Affine::translation(x as f64, y as f64));
+        true
+    }
+
     /// "Layer" and the number of layers there would then be, or the next number no
     /// other layer is named with.
     fn new_layer_name(&self) -> String {
@@ -371,6 +425,55 @@ mod tests {
         assert!(document.is_flat());
         assert_eq!((document.active().name.as_str(), document.active_layer), ("Background", 0));
         assert_eq!(document.active().pixels, flat);
+    }
+
+    #[test]
+    fn cropping_keeps_the_selected_pixels() {
+        let mut document = Document::new(RgbaImage::from_fn(4, 4, |x, y| Rgba([x as u8, y as u8, 0, 255])));
+        document.add_layer();
+        let square = Selection::rect(PixelRect { left: 1, top: 1, right: 5, bottom: 3 });
+        let hole = Selection::rect(PixelRect { left: 2, top: 1, right: 3, bottom: 2 });
+        document.selection = square.combine(&hole, SelectionMode::Subtract);
+        assert!(document.crop_to_selection());
+        // Up to the edge of the image, not the selection's.
+        assert_eq!(document.size(), (3, 2));
+        assert_eq!(document.layers[0].pixels[(0, 0)], Rgba([1, 1, 0, 255]));
+        assert_eq!(document.layers[0].pixels[(1, 0)], Rgba([0, 0, 0, 0]), "in the hole");
+        assert_eq!(document.layers[0].pixels[(2, 1)], Rgba([3, 2, 0, 255]));
+        assert_eq!(document.layers[1].pixels.dimensions(), (3, 2));
+        assert!(document.selection.contains(0, 0) && !document.selection.contains(1, 0));
+        document.selection = Selection::rect(PixelRect { left: 9, top: 9, right: 12, bottom: 12 });
+        assert!(!document.crop_to_selection());
+        assert_eq!(document.size(), (3, 2));
+    }
+
+    #[test]
+    fn resizing_stretches_the_selection_too() {
+        let mut document = document();
+        document.selection = Selection::rect(PixelRect { left: 1, top: 0, right: 2, bottom: 1 });
+        assert!(!document.resize(2, 2, Interpolation::Bicubic));
+        assert!(document.resize(4, 6, Interpolation::Nearest));
+        assert_eq!(document.size(), (4, 6));
+        assert_eq!(document.active().pixels[(3, 5)], Rgba([255, 0, 0, 255]));
+        let bounds = document.selection.bounds().unwrap();
+        assert_eq!((bounds.left, bounds.top, bounds.right, bounds.bottom), (2.0, 0.0, 4.0, 3.0));
+    }
+
+    #[test]
+    fn canvas_size_places_the_image_at_its_anchor() {
+        let red = Rgba([255, 0, 0, 255]);
+        let clear = Rgba([0, 0, 0, 0]);
+        let mut document = document();
+        assert!(!document.resize_canvas(2, 2, (1, 1)));
+        assert!(document.resize_canvas(4, 5, (2, 1)));
+        assert_eq!(document.size(), (4, 5));
+        let pixels = &document.active().pixels;
+        assert_eq!((pixels[(1, 1)], pixels[(2, 1)], pixels[(3, 2)], pixels[(3, 3)]), (clear, red, red, clear));
+        // Smaller, from the middle.
+        document.selection = Selection::rect(PixelRect { left: 2, top: 1, right: 3, bottom: 2 });
+        assert!(document.resize_canvas(2, 1, (1, 1)));
+        assert_eq!(document.active().pixels.as_raw(), &[0, 0, 0, 0, 255, 0, 0, 255]);
+        assert!(document.selection.contains(1, -1));
     }
 
     #[test]

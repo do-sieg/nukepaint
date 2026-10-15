@@ -23,7 +23,7 @@ pub use history::Step;
 pub use image::{Rgba, RgbaImage};
 pub use layer::{BlendMode, Layer, MAX_OPACITY};
 pub use mask::SelectionMask;
-pub use scale::{halve, thumbnail};
+pub use scale::{Interpolation, halve, resize, thumbnail};
 pub use selected_pixels::{copy_selected, erase_selected};
 pub use selection::{Bounds, Frame, PixelRect, Selection, SelectionMode};
 pub use spray::{MAX_SPRAY_SIZE, Spray};

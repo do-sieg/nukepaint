@@ -4,6 +4,7 @@ mod image_strip;
 mod frame_select;
 mod history_panel;
 mod icons;
+mod image_size;
 mod layer_commands;
 mod layer_properties;
 mod layers_panel;
@@ -126,6 +127,8 @@ impl OpenImage {
         let flat = self.document.flattened();
         let name = self.document.name();
         self.texture = TiledTexture::new(ctx, &name, &flat);
+        // Cropping, resizing, and undoing either, change the size.
+        self.view.set_image_size(self.texture.size());
         self.thumbnail = make_thumbnail(ctx, &name, &flat, image_strip::THUMBNAIL_SIZE);
     }
 
@@ -230,6 +233,8 @@ struct App {
     clipboard: Option<RgbaImage>,
     /// Set while the properties of a layer are being edited.
     layer_dialog: Option<layer_properties::Dialog>,
+    /// Set while asking for a new size of an image or its canvas.
+    size_dialog: Option<image_size::Dialog>,
 }
 
 impl App {
@@ -254,6 +259,7 @@ impl App {
             tools: Tools::default(),
             clipboard: None,
             layer_dialog: None,
+            size_dialog: None,
         }
     }
 
@@ -639,7 +645,7 @@ impl App {
 
     /// Whether the current image can be put back as it was after another of its steps.
     fn can_go_to_step(&self) -> bool {
-        self.current.is_some() && !self.is_dragging() && self.layer_dialog.is_none()
+        self.current.is_some() && !self.is_dragging() && !self.has_dialog()
     }
 
     /// Puts the current image back as it was after one of its steps, undoing or redoing
@@ -682,7 +688,7 @@ impl App {
             return false;
         };
         // A drag would carry on with a layer that is no longer the active one.
-        !self.is_dragging() && self.layer_dialog.is_none() && command.can_run(&self.images[current].document)
+        !self.is_dragging() && !self.has_dialog() && command.can_run(&self.images[current].document)
     }
 
     fn run_layer(&mut self, ctx: &egui::Context, command: LayerCommand) {
@@ -690,8 +696,18 @@ impl App {
             return;
         }
         let current = self.current.unwrap();
-        if command == LayerCommand::Properties {
-            self.edit_layer_properties(current, self.images[current].document.active_layer);
+        let kind = match command {
+            LayerCommand::Properties => {
+                self.edit_layer_properties(current, self.images[current].document.active_layer);
+                return;
+            }
+            LayerCommand::Resize => Some(image_size::Kind::Resize),
+            LayerCommand::CanvasSize => Some(image_size::Kind::CanvasSize),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let size = self.images[current].document.size();
+            self.size_dialog = Some(image_size::Dialog::new(current, kind, size));
             return;
         }
         let image = &mut self.images[current];
@@ -705,7 +721,7 @@ impl App {
 
     /// Does what was done in the layers list.
     fn layers_panel_action(&mut self, ctx: &egui::Context, action: layers_panel::Action) {
-        let Some(current) = self.current.filter(|_| !self.is_dragging() && self.layer_dialog.is_none()) else {
+        let Some(current) = self.current.filter(|_| !self.is_dragging() && !self.has_dialog()) else {
             return;
         };
         let image = &mut self.images[current];
@@ -773,6 +789,39 @@ impl App {
             }
         }
         image.refresh_image(ctx);
+    }
+
+    /// Shows the dialog asking for a new size while it is open, and resizes the image
+    /// once the user agrees.
+    fn size_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.size_dialog else {
+            return;
+        };
+        let Some(outcome) = dialog.show(ctx) else {
+            return;
+        };
+        let dialog = self.size_dialog.take().unwrap();
+        if let image_size::Outcome::Canceled = outcome {
+            return;
+        }
+        let image = &mut self.images[dialog.image];
+        let [width, height] = dialog.size;
+        let document = &mut image.document;
+        let resized = match dialog.kind {
+            image_size::Kind::Resize => document.resize(width, height, dialog.interpolation),
+            image_size::Kind::CanvasSize => document.resize_canvas(width, height, dialog.anchor),
+        };
+        if resized {
+            document.commit(dialog.kind.title(), None);
+            // A transform would go on with pixels that are no longer there.
+            image.transform = None;
+            image.refresh_layers(ctx);
+        }
+    }
+
+    /// Whether a dialog is open, which nothing else may change the images under.
+    fn has_dialog(&self) -> bool {
+        self.layer_dialog.is_some() || self.size_dialog.is_some()
     }
 
     /// Puts the layer back as it was and closes the layer properties dialog, if it is open.
@@ -919,7 +968,7 @@ impl App {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // Nothing else happens while the user is asked about unsaved changes, flattening or a layer's properties.
-        if self.closing.is_some() || self.flatten_prompt.is_some() || self.layer_dialog.is_some() {
+        if self.closing.is_some() || self.flatten_prompt.is_some() || self.has_dialog() {
             return;
         }
         let view_shortcuts = [
@@ -954,11 +1003,15 @@ impl App {
             if ctx.input_mut(|input| input.consume_shortcut(&UNDO)) {
                 self.edit(ctx, EditCommand::Undo);
             }
-            let (cut, copy, shift) = ctx.input(|input| {
+            let (cut, copy, shift, command) = ctx.input(|input| {
                 let has = |wanted: &Event| input.events.iter().any(|event| event == wanted);
-                (has(&Event::Cut), has(&Event::Copy), input.modifiers.shift)
+                (has(&Event::Cut), has(&Event::Copy), input.modifiers.shift, input.modifiers.command)
             });
-            if cut {
+            // Ctrl+Shift+X comes as a Cut event as well, rather than as keys, as does
+            // Shift+Delete on Windows.
+            if cut && shift && command {
+                self.run_layer(ctx, LayerCommand::CropToSelection);
+            } else if cut {
                 self.edit(ctx, EditCommand::Cut);
             }
             if copy {
@@ -1268,7 +1321,7 @@ impl eframe::App for App {
         // The history and the layers are all the dock holds for now, which there are none of without an image.
         if let Some(current) = self.current {
             let (mut history_action, mut layers_action) = (None, None);
-            let busy = self.is_dragging() || self.layer_dialog.is_some();
+            let busy = self.is_dragging() || self.has_dialog();
             let image = &self.images[current];
             let (checker, icons) = (&self.checker, &mut self.icons);
             let tooltip = |label: &str, shortcut| format!("{label} ({})", ctx.format_shortcut(&shortcut));
@@ -1317,11 +1370,13 @@ impl eframe::App for App {
             }
         });
 
-        // Closing an image or the app first gives up on the layer's properties being edited.
+        // Closing an image or the app first gives up on the layer's properties or the size being edited.
         if self.closing.is_some() {
             self.cancel_layer_dialog(&ctx);
+            self.size_dialog = None;
         }
         self.layer_dialog(&ctx);
+        self.size_dialog(&ctx);
         self.unsaved_prompt(&ctx);
         self.flatten_prompt(&ctx);
         show_errors(&ctx, "open_errors", "Could not open", &mut self.open_errors);
