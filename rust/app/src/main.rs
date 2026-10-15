@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use dock::DockSide;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{
-    Affine, Document, FloatingPixels, OPEN_EXTENSIONS, RgbaImage, SAVE_EXTENSIONS, SelectionMode, is_savable,
-    thumbnail,
+    Affine, Document, FloatingPixels, MAX_PENCIL_SIZE, OPEN_EXTENSIONS, PencilStroke, PixelRect, Rgba, RgbaImage,
+    SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
 use layer_commands::LayerCommand;
@@ -84,6 +84,8 @@ pub struct OpenImage {
     pub view: View,
     /// The selection being moved, resized or rotated, and its pixels with the selection tools.
     pub transform: Option<Transform>,
+    /// The line being drawn on the active layer, until the button is let go.
+    pub stroke: Option<PencilStroke>,
 }
 
 impl OpenImage {
@@ -92,7 +94,7 @@ impl OpenImage {
         let texture = TiledTexture::new(ctx, &document.name(), &flat);
         let view = View::new(texture.size());
         let thumbnail = make_thumbnail(ctx, &document.name(), &flat, image_strip::THUMBNAIL_SIZE);
-        let mut image = Self { document, texture, thumbnail, layer_thumbnails: Vec::new(), view, transform: None };
+        let mut image = Self { document, texture, thumbnail, layer_thumbnails: Vec::new(), view, transform: None, stroke: None };
         image.refresh_layer_thumbnails(ctx);
         image
     }
@@ -102,6 +104,13 @@ impl OpenImage {
         self.refresh_image(ctx);
         let active = self.document.active_layer;
         self.layer_thumbnails[active] = self.make_layer_thumbnail(ctx, active);
+    }
+
+    /// Shows an area of the image again after the pixels of the active layer changed
+    /// there, while it is being drawn on. The thumbnails wait for [`OpenImage::refresh`].
+    pub fn refresh_area(&mut self, area: PixelRect) {
+        let pixels = self.document.flattened_area(area);
+        self.texture.update(&pixels, area.left as u32, area.top as u32);
     }
 
     /// Shows the image and its layers again after layers were added, removed, moved or
@@ -129,7 +138,7 @@ impl OpenImage {
     }
 
     fn is_dragging(&self) -> bool {
-        self.transform.as_ref().is_some_and(Transform::is_dragging)
+        self.transform.as_ref().is_some_and(Transform::is_dragging) || self.stroke.is_some()
     }
 }
 
@@ -789,6 +798,9 @@ impl App {
                     self.set_tool(tool);
                 }
             }
+            if self.tools.tool == Tool::Pencil {
+                self.pencil_options(ui);
+            }
             if self.tools.tool.select_shape().is_none() {
                 return;
             }
@@ -813,6 +825,19 @@ impl App {
                     "What selecting does to what is already selected.\nWhatever this says, holding Ctrl adds to it.",
                 );
         });
+    }
+
+    /// The Pencil's width, and the colour it draws with.
+    fn pencil_options(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label("Size:");
+        let size = egui::DragValue::new(&mut self.tools.pencil_size).range(1..=MAX_PENCIL_SIZE).suffix(" px");
+        ui.add(size).on_hover_text("How wide the Pencil draws.");
+        ui.separator();
+        ui.label("Color:");
+        let mut color = self.tools.color.0;
+        ui.color_edit_button_srgba_unmultiplied(&mut color).on_hover_text("What the Pencil draws with.");
+        self.tools.color = Rgba(color);
     }
 
     /// Changes the tool, which ends any transform: the next one starts from the
@@ -892,7 +917,7 @@ impl App {
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::SELECT_KEY)) {
             self.set_tool(self.tools.next_select_tool());
         }
-        for tool in [Tool::MoveSelection, Tool::Zoom, Tool::Pan] {
+        for tool in [Tool::MoveSelection, Tool::Zoom, Tool::Pan, Tool::Pencil] {
             if !busy && ctx.input_mut(|input| input.consume_shortcut(&tool.key())) {
                 self.set_tool(tool);
             }

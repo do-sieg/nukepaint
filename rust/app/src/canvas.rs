@@ -5,14 +5,15 @@
 //! rectangle or an ellipse, or move, resize and rotate the selected pixels from the
 //! selection's box, and Move Selection does the same to the selection alone. The Zoom
 //! tool zooms in on a left click or on the area a left drag frames, and out on a right
-//! click. The selection shows as a tinted area in a dashed outline, with a button by it
-//! to go from one to the other.
+//! click. The Pencil draws a line along a left drag, on the selected pixels alone if
+//! any are. The selection shows as a tinted area in a dashed outline, with a button by
+//! it to go from one to the other.
 
 use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
-use power_paint_core::{Selection, SelectionMode};
+use power_paint_core::{PencilStroke, Selection, SelectionMode, pencil_tip};
 
 use crate::{
     OpenImage,
@@ -45,6 +46,13 @@ const BUTTON_GAP: f32 = 4.0;
 /// larger than the toolbar's, to be easy to find over any image.
 const BUTTON_ICON_SIZE: Vec2 = Vec2::splat(24.0);
 const BUTTON_PADDING: Vec2 = Vec2::splat(6.0);
+/// Smallest a tip is on screen, in screen pixels, to be outlined along its edge rather
+/// than ringed from outside.
+const OUTLINED_TIP: f32 = 8.0;
+/// Size of the cursors of the drawing tools, in points, as their files are drawn for,
+/// and the point of the Pencil's that draws, from its top left.
+const CURSOR_SIZE: Vec2 = Vec2::splat(24.0);
+const PENCIL_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
 
 /// A 2 × 2 checkerboard that repeats, to stretch over transparent areas.
 pub fn checker_texture(ctx: &egui::Context) -> TextureHandle {
@@ -108,10 +116,10 @@ pub fn show(
 
     let response = output.inner;
     let space = ui.input(|input| input.key_down(Key::Space));
-    let busy = tools.frame_select.is_dragging()
-        || tools.zoom_drag.is_some()
-        || image.transform.as_ref().is_some_and(Transform::is_dragging);
+    let busy = tools.frame_select.is_dragging() || tools.zoom_drag.is_some() || image.is_dragging();
     let hand = space || tools.tool == Tool::Pan;
+    // Where the pointer is over the image while it works a drawing tool.
+    let mut drawing_at = None;
     let panning = response.dragged_by(PointerButton::Middle)
         || (hand && response.dragged_by(PointerButton::Primary) && !busy);
     if panning {
@@ -121,6 +129,8 @@ pub fn show(
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
     } else if tools.tool == Tool::Zoom {
         use_zoom(ui, &response, &mut image.view, tools, space);
+    } else if tools.tool == Tool::Pencil {
+        drawing_at = pointer.filter(|_| use_pencil(ui, &response, image, tools, space));
     } else if tools.tool != Tool::Pan {
         use_tool(ui, &response, image, tools, pointer, space);
     }
@@ -130,6 +140,10 @@ pub fn show(
     paint_selection(&painter, &image.view, &image.document.selection, tint);
     if let Some(drag) = tools.zoom_drag.as_ref().filter(|drag| drag.framing) {
         paint_zoom_frame(&painter, &image.view, drag);
+    }
+    if let Some(at) = drawing_at {
+        paint_tip(&painter, &image.view, image.view.pixel_at(at), tools);
+        paint_cursor(ui, icons, at);
     }
     let mut tool_requested = None;
     if let Some(state) = box_state(image, tools) {
@@ -303,6 +317,114 @@ fn use_zoom(ui: &egui::Ui, response: &egui::Response, view: &mut View, tools: &m
     if response.hovered() || tools.zoom_drag.is_some() {
         ui.ctx().set_cursor_icon(if zooming_out { CursorIcon::ZoomOut } else { CursorIcon::ZoomIn });
     }
+}
+
+/// Works the Pencil: a left drag draws a line on the active layer, which is a step
+/// once let go if it changed anything.
+/// Returns whether the pointer is the Pencil's, over the image or drawing.
+fn use_pencil(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, tools: &Tools, space: bool) -> bool {
+    if response.drag_started_by(PointerButton::Primary)
+        && !space
+        && let Some(press) = ui.input(|input| input.pointer.press_origin())
+    {
+        // A transform would go on from the pixels as they were before.
+        image.transform = None;
+        let mask = image.document.selection_mask();
+        let at = image.view.pixel_at(press);
+        let layer = &mut image.document.active_mut().pixels;
+        let (stroke, area) = PencilStroke::begin(layer, at, tools.color, tools.pencil_size, mask);
+        // Nothing to show again while all it went over was left as it was.
+        if let Some(area) = area.filter(|_| stroke.changed()) {
+            image.refresh_area(area);
+        }
+        image.stroke = Some(stroke);
+    }
+    if let Some(stroke) = &mut image.stroke
+        && response.dragged_by(PointerButton::Primary)
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(area) = stroke.draw_to(&mut image.document.active_mut().pixels, image.view.pixel_at(at))
+        && stroke.changed()
+    {
+        image.refresh_area(area);
+    }
+    if response.drag_stopped()
+        && let Some(stroke) = image.stroke.take()
+        && stroke.changed()
+    {
+        image.document.commit(Tool::Pencil.name(), Some(Tool::Pencil.icon().name()));
+        image.refresh(ui.ctx());
+    }
+    response.hovered() || image.stroke.is_some()
+}
+
+/// Shows the pixels the Pencil would change on the pixel at `at`, in the colour it
+/// would leave. A tip large enough on screen is outlined along its edge. That would
+/// hide a smaller one, down to a single pixel, which is ringed from outside instead.
+fn paint_tip(painter: &Painter, view: &View, at: (i64, i64), tools: &Tools) {
+    let [red, green, blue, alpha] = tools.color.0;
+    let fill = Color32::from_rgba_unmultiplied(red, green, blue, alpha);
+    let rows: Vec<(i64, i64, i64)> = pencil_tip(at, tools.pencil_size).collect();
+    let screen = |x: i64, y: i64| view.to_screen(x as f32, y as f32);
+    for &(y, from, to) in &rows {
+        painter.rect_filled(Rect::from_min_max(screen(from, y), screen(to, y + 1)), 0.0, fill);
+    }
+    let pixel = 1.0 / painter.pixels_per_point();
+    let tip_side = tools.pencil_size as f32 * view.zoom;
+    if tip_side >= OUTLINED_TIP {
+        // The two ends of each row, and the parts of its top and bottom that the rows
+        // above and below do not cover.
+        let mut edges = Vec::new();
+        for (i, &(y, from, to)) in rows.iter().enumerate() {
+            edges.push((screen(from, y), screen(from, y + 1)));
+            edges.push((screen(to, y), screen(to, y + 1)));
+            for (neighbour, edge_y) in [(i.checked_sub(1), y), (Some(i + 1), y + 1)] {
+                let (covered_from, covered_to) = match neighbour.and_then(|n| rows.get(n)) {
+                    Some(&(_, other_from, other_to)) => (other_from, other_to),
+                    None => (from, from),
+                };
+                if covered_from > from {
+                    edges.push((screen(from, edge_y), screen(covered_from.min(to), edge_y)));
+                }
+                if covered_to < to {
+                    edges.push((screen(covered_to.max(from), edge_y), screen(to, edge_y)));
+                }
+            }
+        }
+        for stroke in [Stroke::new(3.0 * pixel, Color32::WHITE), Stroke::new(pixel, Color32::BLACK)] {
+            for &(from, to) in &edges {
+                painter.line_segment([from, to], stroke);
+            }
+        }
+        return;
+    }
+    let (top, left) = (rows[0].0, rows.iter().map(|row| row.1).min().unwrap_or(at.0));
+    let corner = screen(left, top).round_to_pixels(painter.pixels_per_point());
+    let tip = Rect::from_min_size(corner, Vec2::splat(tip_side.ceil() * pixel));
+    for (grow, color) in [(2.0, Color32::WHITE), (1.0, Color32::BLACK)] {
+        // Four bars one pixel thick, which land on whole pixels where an outlined
+        // rectangle does not.
+        let outer = tip.expand(grow * pixel);
+        let bars = [
+            Rect::from_min_max(outer.min, Pos2::new(outer.max.x, outer.min.y + pixel)),
+            Rect::from_min_max(Pos2::new(outer.min.x, outer.max.y - pixel), outer.max),
+            Rect::from_min_max(outer.min, Pos2::new(outer.min.x + pixel, outer.max.y)),
+            Rect::from_min_max(Pos2::new(outer.max.x - pixel, outer.min.y), outer.max),
+        ];
+        for bar in bars {
+            painter.rect_filled(bar, 0.0, color);
+        }
+    }
+}
+
+/// Shows the Pencil in place of the pointer, its point on it, over all else.
+fn paint_cursor(ui: &egui::Ui, icons: &mut Icons, at: Pos2) {
+    ui.ctx().set_cursor_icon(CursorIcon::None);
+    // At the size its file is drawn for, as the icons are at theirs.
+    let texture = icons.get(ui.ctx(), icons::CURSOR_PENCIL);
+    let layer = egui::LayerId::new(egui::Order::Tooltip, ui.id().with("tool_cursor"));
+    let corner = (at - PENCIL_HOTSPOT).round_to_pixels(ui.ctx().pixels_per_point());
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    ui.ctx().layer_painter(layer).image(texture.id(), Rect::from_min_size(corner, CURSOR_SIZE), uv, Color32::WHITE);
 }
 
 /// The area a drag of the Zoom tool frames, on the image, in pixels.

@@ -1,7 +1,7 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::SelectionMode;
+use power_paint_core::{Rgba, SelectionMode};
 
 use crate::{
     frame_select::{FrameSelect, Shape},
@@ -13,6 +13,7 @@ pub const SELECT_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, 
 pub const MOVE_SELECTION_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::M);
 pub const ZOOM_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Z);
 pub const PAN_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::H);
+pub const PENCIL_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::P);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -22,10 +23,12 @@ pub enum Tool {
     MoveSelection,
     Zoom,
     Pan,
+    Pencil,
 }
 
 impl Tool {
-    pub const ALL: [Self; 5] = [Self::RectangleSelect, Self::EllipseSelect, Self::MoveSelection, Self::Zoom, Self::Pan];
+    pub const ALL: [Self; 6] =
+        [Self::RectangleSelect, Self::EllipseSelect, Self::MoveSelection, Self::Zoom, Self::Pan, Self::Pencil];
     const SELECT_TOOLS: [Self; 2] = [Self::RectangleSelect, Self::EllipseSelect];
 
     pub fn name(self) -> &'static str {
@@ -35,6 +38,7 @@ impl Tool {
             Self::MoveSelection => "Move Selection",
             Self::Zoom => "Zoom",
             Self::Pan => "Pan",
+            Self::Pencil => "Pencil",
         }
     }
 
@@ -45,6 +49,7 @@ impl Tool {
             Self::MoveSelection => icons::MOVE_SELECTION,
             Self::Zoom => icons::ZOOM,
             Self::Pan => icons::PAN,
+            Self::Pencil => icons::PENCIL,
         }
     }
 
@@ -54,6 +59,7 @@ impl Tool {
             Self::MoveSelection => MOVE_SELECTION_KEY,
             Self::Zoom => ZOOM_KEY,
             Self::Pan => PAN_KEY,
+            Self::Pencil => PENCIL_KEY,
         }
     }
 
@@ -77,6 +83,10 @@ impl Tool {
                 "Drag to scroll the image. The middle button, or the left one while Space is held, does it with \
                  any tool."
             }
+            Self::Pencil => {
+                "Drag to draw hard-edged lines in the colour, which replaces the pixels under it. With a \
+                 selection, only the selected pixels change."
+            }
         }
     }
 
@@ -85,12 +95,11 @@ impl Tool {
         match self {
             Self::RectangleSelect => Some(Shape::Rectangle),
             Self::EllipseSelect => Some(Shape::Ellipse),
-            Self::MoveSelection | Self::Zoom | Self::Pan => None,
+            Self::MoveSelection | Self::Zoom | Self::Pan | Self::Pencil => None,
         }
     }
 }
 
-#[derive(Default)]
 pub struct Tools {
     pub tool: Tool,
     /// The selection tool used last, which Move Selection goes back to.
@@ -99,6 +108,24 @@ pub struct Tools {
     pub selection_mode: SelectionMode,
     pub frame_select: FrameSelect,
     pub zoom_drag: Option<ZoomDrag>,
+    /// What the drawing tools draw with, in straight RGBA.
+    pub color: Rgba<u8>,
+    /// How wide the Pencil draws, in pixels.
+    pub pencil_size: u32,
+}
+
+impl Default for Tools {
+    fn default() -> Self {
+        Self {
+            tool: Tool::default(),
+            last_select_tool: Tool::default(),
+            selection_mode: SelectionMode::default(),
+            frame_select: FrameSelect::default(),
+            zoom_drag: None,
+            color: Rgba([0, 0, 0, 255]),
+            pencil_size: 1,
+        }
+    }
 }
 
 /// A press of the Zoom tool, until it is let go.

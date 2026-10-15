@@ -10,11 +10,21 @@ use power_paint_core::{RgbaImage, halve};
 const TILE_SIZE: u32 = 2048;
 /// No shrunk copy is made once the image is this small, in pixels.
 const SMALLEST_LEVEL: u32 = 64;
+/// Enlarged pixels stay sharp; a reduced image is smoothed.
+const TEXTURE_OPTIONS: TextureOptions = TextureOptions {
+    magnification: egui::TextureFilter::Nearest,
+    minification: egui::TextureFilter::Linear,
+    wrap_mode: egui::TextureWrapMode::ClampToEdge,
+    mipmap_mode: None,
+};
 
 pub struct TiledTexture {
     size: Vec2,
     /// The image at its full size, then at half each time.
     levels: Vec<Level>,
+    /// Set once the full size changed and the shrunk copies did not follow, which are
+    /// then left unused.
+    shrunk_outdated: bool,
 }
 
 struct Level {
@@ -36,7 +46,30 @@ impl TiledTexture {
             levels.push(Level::new(ctx, &format!("{name} {}", levels.len()), &half));
             shrunk = Some(half);
         }
-        Self { size: levels[0].size, levels }
+        Self { size: levels[0].size, levels, shrunk_outdated: false }
+    }
+
+    /// Puts new pixels over part of the image at its full size, their top left corner
+    /// at `left`, `top`. The shrunk copies are not made again, which is slow: the full
+    /// size shows at every zoom until the texture is made anew.
+    pub fn update(&mut self, pixels: &RgbaImage, left: u32, top: u32) {
+        let area = Rect::from_min_size(
+            Pos2::new(left as f32, top as f32),
+            Vec2::new(pixels.width() as f32, pixels.height() as f32),
+        );
+        for (tile, texture) in &mut self.levels[0].tiles {
+            let overlap = tile.intersect(area);
+            if !overlap.is_positive() {
+                continue;
+            }
+            let (x, y) = (overlap.min.x as u32, overlap.min.y as u32);
+            let (width, height) = (overlap.width() as u32, overlap.height() as u32);
+            let part = rows(pixels, x - left, y - top, width, height);
+            let image = ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &part);
+            let at = [(x - tile.min.x as u32) as usize, (y - tile.min.y as u32) as usize];
+            texture.set_partial(at, image, TEXTURE_OPTIONS);
+        }
+        self.shrunk_outdated = true;
     }
 
     /// Size in pixels.
@@ -77,35 +110,28 @@ impl TiledTexture {
 
     /// The copy closest to `screen_scale` times the full size without being smaller.
     fn level(&self, screen_scale: f32) -> &Level {
-        let level = if screen_scale >= 1.0 { 0 } else { (1.0 / screen_scale).log2().floor() as usize };
+        if screen_scale >= 1.0 || self.shrunk_outdated {
+            return &self.levels[0];
+        }
+        let level = (1.0 / screen_scale).log2().floor() as usize;
         &self.levels[level.min(self.levels.len() - 1)]
     }
 }
 
 impl Level {
     fn new(ctx: &egui::Context, name: &str, image: &RgbaImage) -> Self {
-        // Enlarged pixels stay sharp; a reduced image is smoothed.
-        let options = TextureOptions {
-            magnification: egui::TextureFilter::Nearest,
-            minification: egui::TextureFilter::Linear,
-            ..Default::default()
-        };
         let (width, height) = image.dimensions();
         let mut tiles = Vec::new();
         for y in (0..height).step_by(TILE_SIZE as usize) {
             for x in (0..width).step_by(TILE_SIZE as usize) {
                 let (tile_width, tile_height) = (TILE_SIZE.min(width - x), TILE_SIZE.min(height - y));
-                let mut pixels = Vec::with_capacity((tile_width * tile_height * 4) as usize);
-                for row in y..y + tile_height {
-                    let start = ((row * width + x) * 4) as usize;
-                    pixels.extend_from_slice(&image.as_raw()[start..start + (tile_width * 4) as usize]);
-                }
+                let pixels = rows(image, x, y, tile_width, tile_height);
                 let tile = ColorImage::from_rgba_unmultiplied([tile_width as usize, tile_height as usize], &pixels);
                 let rect = Rect::from_min_size(
                     Pos2::new(x as f32, y as f32),
                     Vec2::new(tile_width as f32, tile_height as f32),
                 );
-                tiles.push((rect, ctx.load_texture(format!("{name} {x},{y}"), tile, options)));
+                tiles.push((rect, ctx.load_texture(format!("{name} {x},{y}"), tile, TEXTURE_OPTIONS)));
             }
         }
         Self { size: Vec2::new(width as f32, height as f32), tiles }
@@ -119,4 +145,14 @@ impl Level {
             painter.image(texture.id(), tile_rect, uv, tint);
         }
     }
+}
+
+/// The bytes of a rectangle of the image, row after row.
+fn rows(image: &RgbaImage, x: u32, y: u32, width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for row in y..y + height {
+        let start = ((row * image.width() + x) * 4) as usize;
+        pixels.extend_from_slice(&image.as_raw()[start..start + (width * 4) as usize]);
+    }
+    pixels
 }

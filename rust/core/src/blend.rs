@@ -4,9 +4,9 @@
 
 use std::{num::NonZero, thread};
 
-use image::RgbaImage;
+use image::{RgbaImage, imageops};
 
-use crate::{BlendMode, Layer, MAX_OPACITY};
+use crate::{BlendMode, Layer, MAX_OPACITY, PixelRect};
 
 /// Fewest pixels worth sharing between threads.
 const PARALLEL_PIXELS: usize = 1 << 16;
@@ -31,6 +31,24 @@ pub fn composite(layers: &[Layer]) -> RgbaImage {
         blend_layer(&mut image, layer);
     }
     image
+}
+
+/// The layers that show blended together over one area of the image only, which
+/// must be on it.
+pub fn composite_area(layers: &[Layer], area: PixelRect) -> RgbaImage {
+    let (left, top, width, height) = (area.left as u32, area.top as u32, area.width() as u32, area.height() as u32);
+    let shown = layers.iter().filter(|layer| layer.shows());
+    let cropped: Vec<Layer> = shown
+        .map(|layer| Layer {
+            name: String::new(),
+            pixels: imageops::crop_imm(&layer.pixels, left, top, width, height).to_image(),
+            ..*layer
+        })
+        .collect();
+    if cropped.is_empty() {
+        return RgbaImage::new(width, height);
+    }
+    composite(&cropped)
 }
 
 /// Blends the layer over the pixels under it, as opaque as it is set to and in its
@@ -140,6 +158,17 @@ mod tests {
         assert_eq!(top_left(&[bottom.clone(), top]), [0, 0, 255, 255]);
         bottom.visible = false;
         assert_eq!(top_left(&[bottom]), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn an_area_blends_as_the_whole_does() {
+        let bottom = Layer::new("", RgbaImage::from_fn(5, 4, |x, y| Rgba([x as u8 * 50, y as u8 * 60, 0, 255])));
+        let mut top = Layer::new("", RgbaImage::from_fn(5, 4, |x, y| Rgba([0, 0, 255, (x + y) as u8 * 30])));
+        top.blend_mode = BlendMode::Multiply;
+        let layers = [bottom, top];
+        let area = PixelRect { left: 1, top: 2, right: 4, bottom: 4 };
+        let whole = composite(&layers);
+        assert_eq!(composite_area(&layers, area), imageops::crop_imm(&whole, 1, 2, 3, 2).to_image());
     }
 
     #[test]

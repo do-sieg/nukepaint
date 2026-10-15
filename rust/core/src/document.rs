@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use image::{RgbaImage, imageops};
 
 use crate::{
-    BlendMode, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMode, Step, blend_layer, composite,
-    copy_selected, erase_selected, history::History, load_image, save_image,
+    BlendMode, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask, SelectionMode, Step, blend_layer,
+    composite, composite_area, copy_selected, erase_selected, history::History, load_image, save_image,
 };
 
 /// An image being edited: its layers, bottom first, the file it came from, and the
@@ -174,6 +174,18 @@ impl Document {
     /// The layers blended into one image.
     pub fn flattened(&self) -> RgbaImage {
         composite(&self.layers)
+    }
+
+    /// The layers blended together over one area of the image, which must be on it.
+    pub fn flattened_area(&self, area: PixelRect) -> RgbaImage {
+        composite_area(&self.layers, area)
+    }
+
+    /// The pixels drawing, filling and adjusting may change: the selected ones, or all
+    /// of them, as nothing says, while nothing is selected.
+    pub fn selection_mask(&self) -> Option<SelectionMask> {
+        let (width, height) = self.size();
+        SelectionMask::of(&self.selection, width, height)
     }
 
     /// Blends all the layers into a single one, named after the bottom one.
