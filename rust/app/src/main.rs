@@ -12,6 +12,7 @@ mod layers_panel;
 mod settings;
 mod tiled_texture;
 mod tools;
+mod tools_panel;
 mod transform;
 mod view;
 
@@ -836,7 +837,7 @@ impl App {
         }
     }
 
-    /// The row under the menu bar: Undo and Redo, the tools, and the settings of the tool.
+    /// The row under the menu bar: Undo and Redo, and the settings of the tool.
     fn tool_options(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let ctx = ui.ctx().clone();
@@ -849,19 +850,6 @@ impl App {
                 let tooltip = format!("{label} ({})", ctx.format_shortcut(&shortcut));
                 if ui.add_enabled(self.can_edit(command), egui::Button::image(icon)).on_hover_text(tooltip).clicked() {
                     self.edit(&ctx, command);
-                }
-            }
-            ui.separator();
-            for tool in Tool::ALL {
-                let texture = self.icons.get(ui.ctx(), tool.icon());
-                // The icons are light gray lines, made the colour of the text to suit either theme.
-                let tint = ui.visuals().strong_text_color();
-                let icon = egui::Image::new(texture).fit_to_exact_size(ICON_SIZE).tint(tint);
-                let button = egui::Button::selectable(self.tools.tool == tool, icon);
-                let key = ui.ctx().format_shortcut(&tool.key());
-                let tooltip = format!("{} ({key})\n{}", tool.name(), tool.help());
-                if ui.add(button).on_hover_text(tooltip).clicked() {
-                    self.set_tool(tool);
                 }
             }
             if self.tools.tool.draws() {
@@ -1368,15 +1356,17 @@ impl eframe::App for App {
         }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
 
-        // The history and the layers are all the dock holds for now, which there are none of without an image.
+        // There is nothing for the dock to work on without an image.
         if let Some(current) = self.current {
-            let (mut history_action, mut layers_action) = (None, None);
+            let (mut tool_clicked, mut history_action, mut layers_action) = (None, None, None);
+            let tool = self.tools.tool;
             let busy = self.is_dragging() || self.has_dialog();
             let image = &self.images[current];
             let (checker, icons) = (&self.checker, &mut self.icons);
             let (colors, right_click) = (&mut self.tools.colors, &mut self.tools.right_click);
             let right_click_before = *right_click;
             let moved = dock::show(ui, self.settings.dock_side(), |ui| {
+                dock::section(ui, "Tools", |ui| tool_clicked = tools_panel::show(ui, icons, tool));
                 dock::section(ui, "Colors", |ui| colors.show(ui, right_click));
                 dock::section(ui, "History", |ui| {
                     let document = &image.document;
@@ -1392,6 +1382,9 @@ impl eframe::App for App {
             }
             if let Some(side) = moved {
                 self.settings.set_dock_side(side);
+            }
+            if let Some(tool) = tool_clicked {
+                self.set_tool(tool);
             }
             if let Some(index) = history_action {
                 self.go_to_step(&ctx, index);
