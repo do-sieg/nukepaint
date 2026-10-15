@@ -12,6 +12,7 @@ mod image_size;
 mod layer_commands;
 mod layer_properties;
 mod layers_panel;
+mod resample_preview;
 mod settings;
 mod tiled_texture;
 mod tools;
@@ -27,7 +28,7 @@ use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, Te
 use checkerboard::Checkerboard;
 use grid::{Cells, Grid};
 use power_paint_core::{
-    Affine, Document, FloatingPixels, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, RgbaImage,
+    Affine, Document, FloatingPixels, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, RgbaImage,
     SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
@@ -58,6 +59,8 @@ const PASTE_INTO_NEW_IMAGE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::
 const ERASE_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Delete);
 const SELECT_ALL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::A);
 const DESELECT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
+/// How many pixels the arrow keys nudge the selection's box by with Shift held.
+const NUDGE_SHIFT_STEP: i32 = 10;
 const INVERT_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
 const ZOOM_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
 /// Plus is a shifted key on most keyboards, so the key it shares counts as well.
@@ -87,6 +90,7 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             if let Some(render_state) = &cc.wgpu_render_state {
                 grid::init(render_state);
+                resample_preview::init(render_state);
             }
             Ok(Box::new(App::new(&cc.egui_ctx)))
         }),
@@ -407,7 +411,11 @@ impl App {
         // Ctrl with plus, minus and 0 zoom the image, not the whole interface.
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         let settings = Settings::load();
-        let tools = Tools { right_click: settings.right_click(), ..Tools::default() };
+        let tools = Tools {
+            right_click: settings.right_click(),
+            selection_controls: settings.selection_controls(),
+            ..Tools::default()
+        };
         Self {
             images: Vec::new(),
             current: None,
@@ -922,7 +930,7 @@ impl App {
         let at = bounds.map_or((0, 0), |bounds| (bounds.left.floor() as i32, bounds.top.floor() as i32));
         let layer = &mut document.active_mut().pixels;
         let floating = FloatingPixels::pasted(layer, self.clipboard.clone().unwrap(), at);
-        *layer = floating.place(&Affine::IDENTITY);
+        *layer = floating.place(&Affine::IDENTITY, Interpolation::Nearest);
         let transform = Transform::begin_pasted(ctx, floating, document);
         document.selection = transform.selection();
         let name = if new_layer { "Paste in to New Layer" } else { "Paste" };
@@ -1154,27 +1162,68 @@ impl App {
             if self.tools.tool.select_shape().is_none() {
                 return;
             }
-            ui.separator();
-            ui.label("Mode:");
-            let name = |mode| match mode {
-                SelectionMode::Replace => "Replace",
-                SelectionMode::Add => "Add",
-                SelectionMode::Subtract => "Subtract",
-                SelectionMode::Intersect => "Intersect",
-                SelectionMode::Invert => "Invert",
-            };
-            egui::ComboBox::from_id_salt("selection_mode")
-                .selected_text(name(self.tools.selection_mode))
-                .show_ui(ui, |ui| {
-                    for mode in SelectionMode::ALL {
-                        ui.selectable_value(&mut self.tools.selection_mode, mode, name(mode));
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "What selecting does to what is already selected.\nWhatever this says, holding Ctrl adds to it.",
-                );
+            self.selection_options(ui);
         });
+    }
+
+    /// The selection tools' settings: what selecting does, and how the pixels they move
+    /// are redrawn.
+    fn selection_options(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label("Mode:");
+        let name = |mode| match mode {
+            SelectionMode::Replace => "Replace",
+            SelectionMode::Add => "Add",
+            SelectionMode::Subtract => "Subtract",
+            SelectionMode::Intersect => "Intersect",
+            SelectionMode::Invert => "Invert",
+        };
+        egui::ComboBox::from_id_salt("selection_mode")
+            .selected_text(name(self.tools.selection_mode))
+            .show_ui(ui, |ui| {
+                for mode in SelectionMode::ALL {
+                    ui.selectable_value(&mut self.tools.selection_mode, mode, name(mode));
+                }
+            })
+            .response
+            .on_hover_text(
+                "What selecting does to what is already selected.\nWhatever this says, holding Ctrl adds to it.",
+            );
+        ui.separator();
+        ui.label("Resampling:");
+        let before = self.tools.resampling;
+        egui::ComboBox::from_id_salt("resampling")
+            .selected_text(self.tools.resampling.name())
+            .show_ui(ui, |ui| {
+                for interpolation in Interpolation::ALL {
+                    ui.selectable_value(&mut self.tools.resampling, interpolation, interpolation.name());
+                }
+            })
+            .response
+            .on_hover_text(
+                "How the selected pixels are redrawn once they are resized, rotated or moved by part of a pixel. \
+                 Nearest Neighbor keeps their edges hard; Bicubic and Lanczos keep them sharper than Bilinear. \
+                 Moving them by whole pixels always copies them as they are.",
+            );
+        if self.tools.resampling != before {
+            self.resample_transforms(ui.ctx());
+        }
+    }
+
+    /// Draws the pixels each transform last put down again, with the resampling now
+    /// chosen, in place of the step that put them down.
+    fn resample_transforms(&mut self, ctx: &egui::Context) {
+        for image in &mut self.images {
+            let document = &mut image.document;
+            let Some(transform) = &image.transform else {
+                continue;
+            };
+            if let Some(pixels) = transform.placed_again(self.tools.resampling, document.current_step()) {
+                document.active_mut().pixels = pixels;
+                document.amend();
+                image.refresh(ctx);
+            }
+        }
     }
 
     /// The drawing tool's width and whether it smooths its edges, as far as it has them.
@@ -1195,6 +1244,15 @@ impl App {
         }
         if tool.can_smooth() {
             self.antialiasing_option(ui);
+        }
+        ui.separator();
+        let controls = ui.checkbox(&mut self.tools.selection_controls, "Selection controls").on_hover_text(
+            "On, the selection's box shows while drawing, to resize, move and rotate the selection from its \
+             handles, with a button by it to deselect. Off, only its outline shows, and drawing by its edges \
+             never grabs a handle.",
+        );
+        if controls.changed() {
+            self.settings.set_selection_controls(self.tools.selection_controls);
         }
     }
 
@@ -1319,6 +1377,23 @@ impl App {
         for tool in Tool::ALL.into_iter().filter(|tool| tool.select_shape().is_none()) {
             if !busy && ctx.input_mut(|input| input.consume_shortcut(&tool.key())) {
                 self.set_tool(tool);
+            }
+        }
+        // The arrow keys nudge the selection's box, by ten pixels with Shift.
+        if !busy && let Some(current) = self.current {
+            let shift = ctx.input(|input| input.modifiers.shift);
+            let step = if shift { NUDGE_SHIFT_STEP } else { 1 };
+            let arrows = [
+                (Key::ArrowLeft, (-1, 0)),
+                (Key::ArrowRight, (1, 0)),
+                (Key::ArrowUp, (0, -1)),
+                (Key::ArrowDown, (0, 1)),
+            ];
+            for (key, (x, y)) in arrows {
+                let presses = ctx.input_mut(|input| input.count_and_consume_key(Modifiers::NONE, key));
+                for _ in 0..presses {
+                    canvas::nudge(ctx, &mut self.images[current], &self.tools, (x * step, y * step));
+                }
             }
         }
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&colors_panel::SWAP_KEY)) {

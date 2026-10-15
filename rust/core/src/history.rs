@@ -76,6 +76,20 @@ impl History {
         Self { states: vec![first], current: 0, saved: saved.then_some(0) }
     }
 
+    /// Puts the document as it now is in place of the current step, which keeps its name:
+    /// for a change that carries on the one it records.
+    pub(crate) fn amend(&mut self, layers: &[Layer], active_layer: usize, selection: &Selection) {
+        let before = self.current.checked_sub(1).map_or(&[][..], |previous| &self.states[previous].layers[..]);
+        let layers = layers.iter().enumerate().map(|(index, layer)| LayerState::of(layer, index, before)).collect();
+        let state = &mut self.states[self.current];
+        state.layers = layers;
+        state.active_layer = active_layer;
+        state.selection = selection.clone();
+        if self.saved == Some(self.current) {
+            self.saved = None;
+        }
+    }
+
     /// Adds the document as it now is as the step after the current one, in place of
     /// any that were undone.
     pub(crate) fn record(&mut self, step: Step, layers: &[Layer], active_layer: usize, selection: &Selection) {
@@ -151,5 +165,22 @@ mod tests {
         let (restored, ..) = history.go_to(1).unwrap();
         assert_eq!(restored[0].pixels, RgbaImage::from_pixel(4, 4, Rgba([0, 0, 255, 255])));
         assert!(history.go_to(1).is_none());
+    }
+
+    #[test]
+    fn amending_replaces_the_current_step() {
+        let mut layers = vec![Layer::new("Background", RgbaImage::new(4, 4))];
+        let selection = Selection::default();
+        let mut history = History::new(step("Open"), &layers, 0, &selection, true);
+        layers[0].pixels.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        history.record(step("Move"), &layers, 0, &selection);
+        history.mark_saved();
+        layers[0].pixels.put_pixel(0, 0, Rgba([0, 255, 0, 255]));
+        history.amend(&layers, 0, &selection);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.states[1].step, step("Move"));
+        assert_eq!(*history.states[1].layers[0].pixels.get_pixel(0, 0), Rgba([0, 255, 0, 255]));
+        // What was saved is no longer what the step holds.
+        assert!(!history.is_saved());
     }
 }

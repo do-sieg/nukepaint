@@ -1,7 +1,7 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::{Ink, Rgba, SelectionMode};
+use power_paint_core::{Ink, Interpolation, Rgba, SelectionMode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -107,15 +107,19 @@ impl Tool {
         match self {
             Self::RectangleSelect => {
                 "Drag to select, a square with Shift. Then drag the selection's box to move, resize or rotate its \
-                 pixels, or hold Ctrl to add to the selection."
+                 pixels, its centre of rotation to turn it about another point, or the arrow keys to nudge it. \
+                 Hold Ctrl to add to the selection, or on an edge or corner, to resize it about its middle."
             }
             Self::EllipseSelect => {
                 "Drag to select, a circle with Shift. Then drag the selection's box to move, resize or rotate its \
-                 pixels, or hold Ctrl to add to the selection."
+                 pixels, its centre of rotation to turn it about another point, or the arrow keys to nudge it. \
+                 Hold Ctrl to add to the selection, or on an edge or corner, to resize it about its middle."
             }
             Self::MoveSelection => {
-                "Drag the selection's box to move, resize or rotate the selection, without its pixels. Shift keeps \
-                 its proportions, or turns it in steps of 15°."
+                "Drag the selection's box to move, resize or rotate the selection, without its pixels, its centre \
+                 of rotation to turn it about another point, or the arrow keys to nudge it, by ten pixels with \
+                 Shift. Shift keeps its proportions, or turns it in steps of 15°, and Ctrl resizes it about its \
+                 middle."
             }
             Self::Zoom => "Click to zoom in, right click to zoom out, or drag to frame what to zoom in on.",
             Self::Pan => {
@@ -125,18 +129,18 @@ impl Tool {
             Self::Paintbrush => {
                 "Drag to paint lines in the primary colour, blended over the pixels under it, with smooth edges if \
                  Antialiasing is on. Right drag to paint in the secondary colour, or to pick the colour of the \
-                 active layer, as Right click says. With a selection, only the selected pixels change. Drag a handle of its box \
+                 active layer, as Right click says. With a selection, only the selected pixels change. With Selection controls on, drag a handle of its box \
                  to resize it, the arrows by its corner to move it, or around it to rotate it."
             }
             Self::Pencil => {
                 "Drag to draw hard-edged lines in the primary colour, which replaces the pixels under it. Right \
                  drag to draw in the secondary colour, or to pick the colour of the active layer, as Right click \
-                 says. With a selection, only the selected pixels change. Drag a handle of its box to resize it, the \
+                 says. With a selection, only the selected pixels change. With Selection controls on, drag a handle of its box to resize it, the \
                  arrows by its corner to move it, or around it to rotate it."
             }
             Self::Eraser => {
                 "Drag to rub out the pixels of the active layer, with smooth edges if Antialiasing is on. With a \
-                 selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows by \
+                 selection, only the selected pixels change. With Selection controls on, drag a handle of its box to resize it, the arrows by \
                  its corner to move it, or around it to rotate it."
             }
             Self::ColorPicker => {
@@ -146,7 +150,7 @@ impl Tool {
             Self::Spray => {
                 "Hold to scatter dots of the primary colour around the pointer, which build up the longer it stays. \
                  Right drag to spray the secondary colour, or to pick the colour of the active layer, as Right \
-                 click says. With a selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows \
+                 click says. With a selection, only the selected pixels change. With Selection controls on, drag a handle of its box to resize it, the arrows \
                  by its corner to move it, or around it to rotate it."
             }
             Self::PaintBucket => {
@@ -255,6 +259,9 @@ pub struct Tools {
     /// Whether the tools that can draw with smooth edges do.
     pub antialiasing: bool,
     pub right_click: RightClick,
+    /// Whether the drawing tools show the selection's box, to work it from its handles,
+    /// and the button by the selection that deselects.
+    pub selection_controls: bool,
     /// Whether the Paint Bucket only fills the pixels like the one clicked that reach it
     /// through others like it, rather than all those like it in the image.
     pub contiguous: bool,
@@ -262,6 +269,9 @@ pub struct Tools {
     /// for the Paint Bucket to fill it.
     pub tolerance: u32,
     pub sample_source: SampleSource,
+    /// How the selection tools redraw the pixels they move, once they are not just
+    /// moved by whole pixels.
+    pub resampling: Interpolation,
     /// The grid's cells, while the selection tools and the selection's box snap to them.
     pub snap: Option<Cells>,
 }
@@ -282,9 +292,11 @@ impl Default for Tools {
             spray_speed: 25,
             antialiasing: true,
             right_click: RightClick::default(),
+            selection_controls: true,
             contiguous: true,
             tolerance: 50,
             sample_source: SampleSource::default(),
+            resampling: Interpolation::Bilinear,
             snap: None,
         }
     }

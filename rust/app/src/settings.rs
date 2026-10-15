@@ -8,7 +8,7 @@ use crate::{checkerboard::Checkerboard, dock::DockLayout, grid::Grid, tools::Rig
 
 const MAX_RECENT_FILES: usize = 10;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Folder the file dialogs start in.
@@ -17,11 +17,27 @@ pub struct Settings {
     recent_files: Vec<PathBuf>,
     /// What the right button does with the tools that draw in a colour.
     right_click: RightClick,
+    /// Whether the drawing tools show the selection's box and the button by it.
+    selection_controls: bool,
     /// Last, as they are tables.
     grid: Grid,
     checkerboard: Checkerboard,
     /// Which dock each section is in.
     dock: DockLayout,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            last_dir: None,
+            recent_files: Vec::new(),
+            right_click: RightClick::default(),
+            selection_controls: true,
+            grid: Grid::default(),
+            checkerboard: Checkerboard::default(),
+            dock: DockLayout::default(),
+        }
+    }
 }
 
 impl Settings {
@@ -116,6 +132,15 @@ impl Settings {
 
     pub fn set_right_click(&mut self, right_click: RightClick) {
         self.right_click = right_click;
+        self.save();
+    }
+
+    pub fn selection_controls(&self) -> bool {
+        self.selection_controls
+    }
+
+    pub fn set_selection_controls(&mut self, shown: bool) {
+        self.selection_controls = shown;
         self.save();
     }
 }

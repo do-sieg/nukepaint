@@ -74,6 +74,12 @@ impl Document {
         self.history.record(step, &self.layers, self.active_layer, &self.selection);
     }
 
+    /// Records the layers, the active one and the selection as they now are in place of
+    /// the current step, for a change that carries on the one it records.
+    pub fn amend(&mut self) {
+        self.history.amend(&self.layers, self.active_layer, &self.selection);
+    }
+
     /// Each step, the first being how the document was opened or made.
     pub fn steps(&self) -> impl ExactSizeIterator<Item = &Step> {
         self.history.steps()

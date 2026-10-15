@@ -7,7 +7,7 @@
 //! tool zooms in on a left click or on the area a left drag frames, and out on a right
 //! click. The Paintbrush, the Pencil and the Eraser draw a line along a left drag, and
 //! the Spray leaves dots for as long as the left button is held, on the selected
-//! pixels alone if any are. They resize or move the selection from a handle
+//! pixels alone if any are. Unless their selection controls are off, they resize or move the selection from a handle
 //! of its box, or the one out from its bottom right corner, or rotate it from around
 //! the box. The selection shows as a tinted area in a dashed outline, with a button by it: with the
 //! selection tools and Move Selection, to go from one to the other, and with the other
@@ -28,7 +28,7 @@ use crate::{
     grid::{self, Cells, Grid},
     icons::{self, Icon, Icons},
     tools::{RightClick, SampleSource, Tool, Tools, ZoomDrag},
-    transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, Transform},
+    transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, PIVOT_RADIUS, Transform},
     view::View,
 };
 
@@ -152,7 +152,8 @@ pub fn show(
             let painter = ui.painter();
             paint_checker(painter, rect, checker_size as f32 / pixels_per_point, checker);
             let transform = image.transform.as_ref();
-            if !transform.is_some_and(|transform| transform.paint_preview(painter, &image.view)) {
+            let previewed = transform.is_some_and(|transform| transform.paint_preview(painter, &image.view, tools.resampling));
+            if !previewed {
                 image.texture.paint(painter, rect, 1.0);
             }
             grid::paint_lines(painter, &image.view, grid);
@@ -213,7 +214,8 @@ pub fn show(
     }
     let (mut tool_requested, mut deselect_requested) = (None, false);
     let idle = !tools.frame_select.is_dragging() && tools.zoom_drag.is_none() && !image.is_dragging();
-    if idle && let Some(clicked) = selection_button(ui, image, tools, icons, viewport, box_shown) {
+    let button_shown = !tools.tool.draws() || tools.selection_controls;
+    if idle && button_shown && let Some(clicked) = selection_button(ui, image, tools, icons, viewport, box_shown) {
         match clicked {
             SelectionButton::Deselect => deselect_requested = true,
             SelectionButton::Switch(tool) => tool_requested = Some(tool),
@@ -235,7 +237,7 @@ pub fn show(
 /// the one out from its bottom right corner, and rotates it from around it.
 fn box_state(image: &OpenImage, tools: &Tools) -> Option<BoxState> {
     let shown = tools.tool == Tool::MoveSelection
-        || tools.tool.draws()
+        || (tools.tool.draws() && tools.selection_controls)
         || (tools.tool.select_shape().is_some() && !tools.frame_select.is_dragging());
     if !shown {
         return None;
@@ -272,6 +274,8 @@ fn use_tool(
     let box_drag_at = |image: &OpenImage, tools: &Tools, point: Pos2| {
         box_state(image, tools)?.drag_at(image.view.point_at(point), reach)
     };
+    // Ctrl on an edge or corner resizes the box about its middle, rather than drawing.
+    let takes_box = |kind: &DragKind| !draws_anyway || (command && matches!(kind, DragKind::Resize(_)));
 
     let started = [PointerButton::Primary, PointerButton::Secondary]
         .into_iter()
@@ -282,7 +286,7 @@ fn use_tool(
     {
         let on_box = box_drag_at(image, tools, press);
         let kind = match button {
-            PointerButton::Primary if !draws_anyway => on_box,
+            PointerButton::Primary => on_box.filter(takes_box),
             // The right button rotates the box: anywhere with Move Selection, which has nothing else to do.
             PointerButton::Secondary if on_box.is_some() || tools.tool == Tool::MoveSelection => {
                 box_state(image, tools).map(|_| DragKind::Rotate)
@@ -294,7 +298,7 @@ fn use_tool(
                 image.transform = Transform::begin(ui.ctx(), &image.document, shape.is_some());
             }
             if let Some(transform) = &mut image.transform {
-                transform.press(kind, image.view.point_at(press));
+                transform.press(kind, image.view.point_at(press), reach);
             }
         } else if button == PointerButton::Primary
             && let Some(shape) = shape
@@ -310,7 +314,7 @@ fn use_tool(
             tools.frame_select.drag_to(&mut image.document.selection, corner, shift);
         }
         if let Some(transform) = image.transform.as_mut()
-            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift, tools.snap)
+            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift, command, tools.snap)
         {
             image.document.selection = selection;
         }
@@ -319,15 +323,12 @@ fn use_tool(
     if response.drag_stopped() {
         release_selecting(image, tools);
         if let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging()) {
-            let clicked = transform.drag_kind().is_some() && response.drag_stopped_by(PointerButton::Primary);
-            let (moved, placed) = transform.release();
-            let document = &mut image.document;
-            if let Some(pixels) = placed {
-                document.active_mut().pixels = pixels;
-                document.commit("Move Selected Pixels", Some(icons::MOVE_PIXELS.name()));
-                image.refresh(ui.ctx());
-            } else if moved {
-                document.commit(Tool::MoveSelection.name(), Some(Tool::MoveSelection.icon().name()));
+            // Not of the centre of rotation, which is left where it is let go.
+            let clicked = transform.drag_kind().is_some_and(|kind| kind != DragKind::Pivot)
+                && response.drag_stopped_by(PointerButton::Primary);
+            let (moved, placed) = transform.release(tools.resampling);
+            if moved {
+                commit_transform(ui.ctx(), image, placed);
             }
             // A click on the box of a selection tool does what a click with the tool does.
             if !moved
@@ -344,12 +345,48 @@ fn use_tool(
     // The pointer shows what a press would do.
     let dragging_box = image.transform.as_ref().and_then(Transform::drag_kind);
     let angle = box_state(image, tools).map_or(0.0, |state| state.angle);
-    let hovered_box = pointer.filter(|_| !draws_anyway && !tools.frame_select.is_dragging());
-    if let Some(kind) = dragging_box.or_else(|| hovered_box.and_then(|at| box_drag_at(image, tools, at))) {
+    let hovered_box = pointer.filter(|_| !tools.frame_select.is_dragging());
+    let hovered_kind = || hovered_box.and_then(|at| box_drag_at(image, tools, at)).filter(takes_box);
+    if let Some(kind) = dragging_box.or_else(hovered_kind) {
         ui.ctx().set_cursor_icon(kind.cursor(angle));
     } else if shape.is_some() && (response.hovered() || tools.frame_select.is_dragging()) {
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
     }
+}
+
+/// The selection's box moved, as a step: with `placed`, the active layer with the
+/// selected pixels drawn where they now are.
+fn commit_transform(ctx: &egui::Context, image: &mut OpenImage, placed: Option<RgbaImage>) {
+    let document = &mut image.document;
+    match placed {
+        Some(pixels) => {
+            document.active_mut().pixels = pixels;
+            document.commit("Move Selected Pixels", Some(icons::MOVE_PIXELS.name()));
+            image.refresh(ctx);
+        }
+        None => document.commit(Tool::MoveSelection.name(), Some(Tool::MoveSelection.icon().name())),
+    }
+    let step = image.document.current_step();
+    if let Some(transform) = &mut image.transform {
+        transform.committed_as(step);
+    }
+}
+
+/// Nudges the selection's box by `offset`, in pixels, with the selected pixels with the
+/// selection tools, as a step. Nothing happens while the tool shows no box, or drags it.
+pub fn nudge(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools, offset: (i32, i32)) {
+    if image.is_dragging() || tools.frame_select.is_dragging() || box_state(image, tools).is_none() {
+        return;
+    }
+    if image.transform.is_none() {
+        image.transform = Transform::begin(ctx, &image.document, tools.tool.select_shape().is_some());
+    }
+    let Some(transform) = &mut image.transform else {
+        return;
+    };
+    let (selection, placed) = transform.nudge(offset, tools.resampling);
+    image.document.selection = selection;
+    commit_transform(ctx, image, placed);
 }
 
 /// Works the Zoom tool: a click zooms a level in on the pointer, or out with the right
@@ -517,7 +554,7 @@ fn use_drawing_tool(
                 image.transform = Transform::begin(ui.ctx(), &image.document, false);
             }
             if let Some(transform) = &mut image.transform {
-                transform.press(kind, image.view.point_at(press));
+                transform.press(kind, image.view.point_at(press), reach);
             }
         } else if draws {
             // A transform would go on from the selection as it was before.
@@ -567,9 +604,9 @@ fn use_drawing_tool(
         {
             image.refresh_area(area);
         }
-        let shift = ui.input(|input| input.modifiers.shift);
+        let (shift, command) = ui.input(|input| (input.modifiers.shift, input.modifiers.command));
         if let Some(transform) = image.transform.as_mut()
-            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift, tools.snap)
+            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift, command, tools.snap)
         {
             image.document.selection = selection;
         }
@@ -582,9 +619,9 @@ fn use_drawing_tool(
             image.refresh(ui.ctx());
         }
         if let Some(transform) = image.transform.as_mut()
-            && transform.release().0
+            && transform.release(tools.resampling).0
         {
-            image.document.commit(Tool::MoveSelection.name(), Some(Tool::MoveSelection.icon().name()));
+            commit_transform(ui.ctx(), image, None);
         }
     }
     // A handle shows what dragging it would do, in place of the tool.
@@ -757,8 +794,9 @@ fn paint_selection(painter: &Painter, view: &View, selection: &Selection, tint: 
     }
 }
 
-/// A handle on each corner of the box and in the middle of each edge, and out from its
-/// bottom right corner, the one that moves it, with arrows on it.
+/// A handle on each corner of the box and in the middle of each edge, out from its
+/// bottom right corner, the one that moves it, with arrows on it, and on its centre of
+/// rotation, a ring with a cross, if the box is large enough on screen.
 fn paint_handles(painter: &Painter, view: &View, state: BoxState, icons: &mut Icons) {
     let pixel = 1.0 / painter.pixels_per_point();
     let on_screen = |(x, y): (f64, f64)| view.to_screen(x as f32, y as f32).round_to_pixels(painter.pixels_per_point());
@@ -776,6 +814,15 @@ fn paint_handles(painter: &Painter, view: &View, state: BoxState, icons: &mut Ic
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     // The icons are light gray lines, which the tint makes black.
     painter.image(texture.id(), arrows, uv, Color32::BLACK);
+    if state.shows_pivot(view.pixels_per_screen_point()) {
+        let center = on_screen(state.pivot_point());
+        let radius = PIVOT_RADIUS as f32 - 1.0;
+        for stroke in [Stroke::new(3.0 * pixel, Color32::WHITE), Stroke::new(pixel, Color32::BLACK)] {
+            painter.circle_stroke(center, radius, stroke);
+            painter.line_segment([center - Vec2::X * radius, center + Vec2::X * radius], stroke);
+            painter.line_segment([center - Vec2::Y * radius, center + Vec2::Y * radius], stroke);
+        }
+    }
 }
 
 /// A button by the selection.
