@@ -1,7 +1,7 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::{Rgba, SelectionMode};
+use power_paint_core::{Ink, Rgba, SelectionMode};
 
 use crate::{
     frame_select::{FrameSelect, Shape},
@@ -13,7 +13,9 @@ pub const SELECT_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, 
 pub const MOVE_SELECTION_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::M);
 pub const ZOOM_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Z);
 pub const PAN_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::H);
+pub const PAINTBRUSH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::B);
 pub const PENCIL_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::P);
+pub const ERASER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::E);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -23,12 +25,22 @@ pub enum Tool {
     MoveSelection,
     Zoom,
     Pan,
+    Paintbrush,
     Pencil,
+    Eraser,
 }
 
 impl Tool {
-    pub const ALL: [Self; 6] =
-        [Self::RectangleSelect, Self::EllipseSelect, Self::MoveSelection, Self::Zoom, Self::Pan, Self::Pencil];
+    pub const ALL: [Self; 8] = [
+        Self::RectangleSelect,
+        Self::EllipseSelect,
+        Self::MoveSelection,
+        Self::Zoom,
+        Self::Pan,
+        Self::Paintbrush,
+        Self::Pencil,
+        Self::Eraser,
+    ];
     const SELECT_TOOLS: [Self; 2] = [Self::RectangleSelect, Self::EllipseSelect];
 
     pub fn name(self) -> &'static str {
@@ -38,7 +50,9 @@ impl Tool {
             Self::MoveSelection => "Move Selection",
             Self::Zoom => "Zoom",
             Self::Pan => "Pan",
+            Self::Paintbrush => "Paintbrush",
             Self::Pencil => "Pencil",
+            Self::Eraser => "Eraser",
         }
     }
 
@@ -49,7 +63,9 @@ impl Tool {
             Self::MoveSelection => icons::MOVE_SELECTION,
             Self::Zoom => icons::ZOOM,
             Self::Pan => icons::PAN,
+            Self::Paintbrush => icons::PAINTBRUSH,
             Self::Pencil => icons::PENCIL,
+            Self::Eraser => icons::ERASER,
         }
     }
 
@@ -59,7 +75,9 @@ impl Tool {
             Self::MoveSelection => MOVE_SELECTION_KEY,
             Self::Zoom => ZOOM_KEY,
             Self::Pan => PAN_KEY,
+            Self::Paintbrush => PAINTBRUSH_KEY,
             Self::Pencil => PENCIL_KEY,
+            Self::Eraser => ERASER_KEY,
         }
     }
 
@@ -83,10 +101,20 @@ impl Tool {
                 "Drag to scroll the image. The middle button, or the left one while Space is held, does it with \
                  any tool."
             }
+            Self::Paintbrush => {
+                "Drag to paint lines in the colour, blended over the pixels under it, with smooth edges if \
+                 Antialiasing is on. With a selection, only the selected pixels change. Drag a handle of its box \
+                 to resize it, the arrows by its corner to move it, or around it to rotate it."
+            }
             Self::Pencil => {
                 "Drag to draw hard-edged lines in the colour, which replaces the pixels under it. With a \
                  selection, only the selected pixels change. Drag a handle of its box to resize it, the \
                  arrows by its corner to move it, or around it to rotate it."
+            }
+            Self::Eraser => {
+                "Drag to rub out the pixels of the active layer, with smooth edges if Antialiasing is on. With a \
+                 selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows by \
+                 its corner to move it, or around it to rotate it."
             }
         }
     }
@@ -96,8 +124,18 @@ impl Tool {
         match self {
             Self::RectangleSelect => Some(Shape::Rectangle),
             Self::EllipseSelect => Some(Shape::Ellipse),
-            Self::MoveSelection | Self::Zoom | Self::Pan | Self::Pencil => None,
+            Self::MoveSelection | Self::Zoom | Self::Pan | Self::Paintbrush | Self::Pencil | Self::Eraser => None,
         }
+    }
+
+    /// Whether the tool draws lines on the active layer.
+    pub fn draws(self) -> bool {
+        matches!(self, Self::Paintbrush | Self::Pencil | Self::Eraser)
+    }
+
+    /// Whether the tool can draw with smooth edges.
+    pub fn can_smooth(self) -> bool {
+        matches!(self, Self::Paintbrush | Self::Eraser)
     }
 }
 
@@ -111,8 +149,12 @@ pub struct Tools {
     pub zoom_drag: Option<ZoomDrag>,
     /// What the drawing tools draw with, in straight RGBA.
     pub color: Rgba<u8>,
-    /// How wide the Pencil draws, in pixels.
+    /// How wide the Paintbrush, the Pencil and the Eraser draw, in pixels.
+    pub brush_size: u32,
     pub pencil_size: u32,
+    pub eraser_size: u32,
+    /// Whether the tools that can draw with smooth edges do.
+    pub antialiasing: bool,
 }
 
 impl Default for Tools {
@@ -124,7 +166,10 @@ impl Default for Tools {
             frame_select: FrameSelect::default(),
             zoom_drag: None,
             color: Rgba([0, 0, 0, 255]),
+            brush_size: 2,
             pencil_size: 1,
+            eraser_size: 8,
+            antialiasing: true,
         }
     }
 }
@@ -145,6 +190,40 @@ impl Tools {
         if tool.select_shape().is_some() {
             self.last_select_tool = tool;
         }
+    }
+
+    /// How wide the tool draws, in pixels: the Pencil's width for the other tools.
+    pub fn tip_size(&self) -> u32 {
+        match self.tool {
+            Tool::Paintbrush => self.brush_size,
+            Tool::Eraser => self.eraser_size,
+            _ => self.pencil_size,
+        }
+    }
+
+    /// How wide the tool draws, in pixels, for the drawing tools.
+    pub fn tip_size_mut(&mut self) -> Option<&mut u32> {
+        match self.tool {
+            Tool::Paintbrush => Some(&mut self.brush_size),
+            Tool::Pencil => Some(&mut self.pencil_size),
+            Tool::Eraser => Some(&mut self.eraser_size),
+            _ => None,
+        }
+    }
+
+    /// What the tool leaves on the pixels it goes over, for the drawing tools.
+    pub fn ink(&self) -> Option<Ink> {
+        match self.tool {
+            Tool::Paintbrush => Some(Ink::Paint(self.color)),
+            Tool::Pencil => Some(Ink::Replace(self.color)),
+            Tool::Eraser => Some(Ink::Erase),
+            _ => None,
+        }
+    }
+
+    /// Whether the tool draws with smooth edges.
+    pub fn smooth(&self) -> bool {
+        self.antialiasing && self.tool.can_smooth()
     }
 
     /// The next selection tool, or the one used last from another tool.

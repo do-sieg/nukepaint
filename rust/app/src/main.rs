@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use dock::DockSide;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{
-    Affine, Document, FloatingPixels, MAX_PENCIL_SIZE, OPEN_EXTENSIONS, PencilStroke, PixelRect, Rgba, RgbaImage,
+    Affine, BrushStroke, Document, FloatingPixels, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, Rgba, RgbaImage,
     SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
@@ -85,7 +85,7 @@ pub struct OpenImage {
     /// The selection being moved, resized or rotated, and its pixels with the selection tools.
     pub transform: Option<Transform>,
     /// The line being drawn on the active layer, until the button is let go.
-    pub stroke: Option<PencilStroke>,
+    pub stroke: Option<BrushStroke>,
 }
 
 impl OpenImage {
@@ -798,8 +798,8 @@ impl App {
                     self.set_tool(tool);
                 }
             }
-            if self.tools.tool == Tool::Pencil {
-                self.pencil_options(ui);
+            if self.tools.tool.draws() {
+                self.drawing_options(ui);
             }
             if self.tools.tool.select_shape().is_none() {
                 return;
@@ -827,17 +827,31 @@ impl App {
         });
     }
 
-    /// The Pencil's width, and the colour it draws with.
-    fn pencil_options(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.label("Size:");
-        let size = egui::DragValue::new(&mut self.tools.pencil_size).range(1..=MAX_PENCIL_SIZE).suffix(" px");
-        ui.add(size).on_hover_text("How wide the Pencil draws.");
-        ui.separator();
-        ui.label("Color:");
-        let mut color = self.tools.color.0;
-        ui.color_edit_button_srgba_unmultiplied(&mut color).on_hover_text("What the Pencil draws with.");
-        self.tools.color = Rgba(color);
+    /// The drawing tool's width, whether it smooths its edges, and the colour it draws
+    /// with, as far as it has them.
+    fn drawing_options(&mut self, ui: &mut egui::Ui) {
+        let tool = self.tools.tool;
+        if let Some(size) = self.tools.tip_size_mut() {
+            ui.separator();
+            ui.label("Size:");
+            let size = egui::DragValue::new(size).range(1..=MAX_TIP_SIZE).suffix(" px");
+            ui.add(size).on_hover_text(format!("How wide the {} draws.", tool.name()));
+        }
+        if tool.can_smooth() {
+            ui.separator();
+            ui.checkbox(&mut self.tools.antialiasing, "Antialiasing").on_hover_text(
+                "On, the Paintbrush and the Eraser fade the edges of what they draw out over a pixel. Off, \
+                 their edges are hard, as the Pencil's always are.",
+            );
+        }
+        if tool != Tool::Eraser {
+            ui.separator();
+            ui.label("Color:");
+            let mut color = self.tools.color.0;
+            ui.color_edit_button_srgba_unmultiplied(&mut color)
+                .on_hover_text(format!("What the {} draws with.", tool.name()));
+            self.tools.color = Rgba(color);
+        }
     }
 
     /// Changes the tool, which ends any transform: the next one starts from the
@@ -917,7 +931,7 @@ impl App {
         if !busy && ctx.input_mut(|input| input.consume_shortcut(&tools::SELECT_KEY)) {
             self.set_tool(self.tools.next_select_tool());
         }
-        for tool in [Tool::MoveSelection, Tool::Zoom, Tool::Pan, Tool::Pencil] {
+        for tool in [Tool::MoveSelection, Tool::Zoom, Tool::Pan, Tool::Paintbrush, Tool::Pencil, Tool::Eraser] {
             if !busy && ctx.input_mut(|input| input.consume_shortcut(&tool.key())) {
                 self.set_tool(tool);
             }

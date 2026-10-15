@@ -78,7 +78,7 @@ pub fn blend_layer(under: &mut RgbaImage, layer: &Layer) {
 
 /// One straight RGBA pixel over another. The two only mix where both are: elsewhere,
 /// each shows as it is.
-fn blend_pixel(under: &mut [u8; 4], over: &[u8; 4], opacity: f32, mode: BlendMode) {
+pub(crate) fn blend_pixel(under: &mut [u8; 4], over: &[u8; 4], opacity: f32, mode: BlendMode) {
     let over_alpha = over[3] as f32 / 255.0 * opacity;
     if over_alpha <= 0.0 {
         return;

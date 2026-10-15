@@ -5,10 +5,10 @@
 //! rectangle or an ellipse, or move, resize and rotate the selected pixels from the
 //! selection's box, and Move Selection does the same to the selection alone. The Zoom
 //! tool zooms in on a left click or on the area a left drag frames, and out on a right
-//! click. The Pencil draws a line along a left drag, on the selected pixels alone if
-//! any are, or resizes or moves the selection from a handle of its box, or the one
-//! out from its bottom right corner, or rotates it from around the box. The
-//! selection shows as a tinted area in a dashed outline, with a button by it: with the
+//! click. The Paintbrush, the Pencil and the Eraser draw a line along a left drag, on
+//! the selected pixels alone if any are, or resize or move the selection from a handle
+//! of its box, or the one out from its bottom right corner, or rotate it from around
+//! the box. The selection shows as a tinted area in a dashed outline, with a button by it: with the
 //! selection tools and Move Selection, to go from one to the other, and with the other
 //! tools, to deselect.
 
@@ -16,7 +16,7 @@ use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
-use power_paint_core::{PencilStroke, Selection, SelectionMode, pencil_tip};
+use power_paint_core::{BrushStroke, Selection, SelectionMode, hard_tip};
 
 use crate::{
     OpenImage,
@@ -55,9 +55,9 @@ const BUTTON_PADDING: Vec2 = Vec2::splat(6.0);
 /// than ringed from outside.
 const OUTLINED_TIP: f32 = 8.0;
 /// Size of the cursors of the drawing tools, in points, as their files are drawn for,
-/// and the point of the Pencil's that draws, from its top left.
+/// and the point of theirs that draws, from its top left.
 const CURSOR_SIZE: Vec2 = Vec2::splat(24.0);
-const PENCIL_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
+const DRAWING_HOTSPOT: Vec2 = Vec2::new(1.0, 23.0);
 /// The point of the rotate cursor that is on the pointer, its middle.
 const ROTATE_HOTSPOT: Vec2 = Vec2::new(12.0, 12.0);
 
@@ -138,8 +138,8 @@ pub fn show(
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
     } else if tools.tool == Tool::Zoom {
         use_zoom(ui, &response, &mut image.view, tools, space);
-    } else if tools.tool == Tool::Pencil {
-        drawing_at = pointer.filter(|_| use_pencil(ui, &response, image, tools, space));
+    } else if tools.tool.draws() {
+        drawing_at = pointer.filter(|_| use_drawing_tool(ui, &response, image, tools, space));
     } else if tools.tool != Tool::Pan {
         use_tool(ui, &response, image, tools, pointer, space);
     }
@@ -151,8 +151,13 @@ pub fn show(
         paint_zoom_frame(&painter, &image.view, drag);
     }
     if let Some(at) = drawing_at {
-        paint_tip(&painter, &image.view, image.view.pixel_at(at), tools);
-        paint_cursor(ui, icons, icons::CURSOR_PENCIL, PENCIL_HOTSPOT, at);
+        paint_tip(&painter, &image.view, at, tools);
+        let cursor = match tools.tool {
+            Tool::Paintbrush => icons::CURSOR_PAINTBRUSH,
+            Tool::Eraser => icons::CURSOR_ERASER,
+            _ => icons::CURSOR_PENCIL,
+        };
+        paint_cursor(ui, icons, cursor, DRAWING_HOTSPOT, at);
     }
     let box_shown = box_state(image, tools);
     if let Some(state) = box_shown {
@@ -178,10 +183,11 @@ pub fn show(
 
 /// The selection's box, if the tool shows one: Move Selection's moves the outline
 /// alone, and the selection tools' moves the selected pixels, except while they draw
-/// a new selection. The Pencil's resizes the outline by its handles, moves it by the
-/// one out from its bottom right corner, and rotates it from around it.
+/// a new selection. The drawing tools' resizes the outline by its handles, moves it by
+/// the one out from its bottom right corner, and rotates it from around it.
 fn box_state(image: &OpenImage, tools: &Tools) -> Option<BoxState> {
-    let shown = matches!(tools.tool, Tool::MoveSelection | Tool::Pencil)
+    let shown = tools.tool == Tool::MoveSelection
+        || tools.tool.draws()
         || (tools.tool.select_shape().is_some() && !tools.frame_select.is_dragging());
     if !shown {
         return None;
@@ -340,13 +346,13 @@ fn use_zoom(ui: &egui::Ui, response: &egui::Response, view: &mut View, tools: &m
     }
 }
 
-/// Works the Pencil: a left drag draws a line on the active layer, which is a step
+/// Works a drawing tool: a left drag draws a line on the active layer, which is a step
 /// once let go if it changed anything. A left drag from a handle of the selection's
 /// box resizes the selection instead, and one from the handle out from its bottom
 /// right corner moves it, and one from around the box rotates it, without its pixels,
 /// as Move Selection does.
-/// Returns whether the pointer is the Pencil's, over the image or drawing.
-fn use_pencil(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, tools: &Tools, space: bool) -> bool {
+/// Returns whether the pointer is the tool's, over the image or drawing.
+fn use_drawing_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, tools: &Tools, space: bool) -> bool {
     let reach = image.view.pixels_per_screen_point();
     let handle_at = |image: &OpenImage, point: Pos2| {
         box_state(image, tools)?.handle_at(image.view.point_at(point), reach)
@@ -371,9 +377,10 @@ fn use_pencil(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, t
             // A transform would go on from the selection as it was before.
             image.transform = None;
             let mask = image.document.selection_mask();
-            let at = image.view.pixel_at(press);
+            let at = image.view.point_at(press);
             let layer = &mut image.document.active_mut().pixels;
-            let (stroke, area) = PencilStroke::begin(layer, at, tools.color, tools.pencil_size, mask);
+            let ink = tools.ink().expect("a drawing tool has ink");
+            let (stroke, area) = BrushStroke::begin(layer, at, ink, tools.tip_size(), tools.smooth(), mask);
             // Nothing to show again while all it went over was left as it was.
             if let Some(area) = area.filter(|_| stroke.changed()) {
                 image.refresh_area(area);
@@ -384,7 +391,7 @@ fn use_pencil(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, t
     let dragged = response.dragged_by(PointerButton::Primary) && response.drag_delta() != Vec2::ZERO;
     if dragged && let Some(at) = response.interact_pointer_pos() {
         if let Some(stroke) = &mut image.stroke
-            && let Some(area) = stroke.draw_to(&mut image.document.active_mut().pixels, image.view.pixel_at(at))
+            && let Some(area) = stroke.draw_to(&mut image.document.active_mut().pixels, image.view.point_at(at))
             && stroke.changed()
         {
             image.refresh_area(area);
@@ -400,7 +407,7 @@ fn use_pencil(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, t
         if let Some(stroke) = image.stroke.take()
             && stroke.changed()
         {
-            image.document.commit(Tool::Pencil.name(), Some(Tool::Pencil.icon().name()));
+            image.document.commit(tools.tool.name(), Some(tools.tool.icon().name()));
             image.refresh(ui.ctx());
         }
         if let Some(transform) = image.transform.as_mut()
@@ -409,7 +416,7 @@ fn use_pencil(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, t
             image.document.commit(Tool::MoveSelection.name(), Some(Tool::MoveSelection.icon().name()));
         }
     }
-    // A handle shows what dragging it would do, in place of the Pencil.
+    // A handle shows what dragging it would do, in place of the tool.
     let angle = box_state(image, tools).map_or(0.0, |state| state.angle);
     let resizing = image.transform.as_ref().and_then(Transform::drag_kind);
     let on_handle = || ui.ctx().pointer_hover_pos().and_then(|at| handle_at(image, at));
@@ -420,19 +427,36 @@ fn use_pencil(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, t
     response.hovered() || image.stroke.is_some()
 }
 
-/// Shows the pixels the Pencil would change on the pixel at `at`, in the colour it
-/// would leave. A tip large enough on screen is outlined along its edge. That would
-/// hide a smaller one, down to a single pixel, which is ringed from outside instead.
-fn paint_tip(painter: &Painter, view: &View, at: (i64, i64), tools: &Tools) {
-    let [red, green, blue, alpha] = tools.color.0;
-    let fill = Color32::from_rgba_unmultiplied(red, green, blue, alpha);
-    let rows: Vec<(i64, i64, i64)> = pencil_tip(at, tools.pencil_size).collect();
-    let screen = |x: i64, y: i64| view.to_screen(x as f32, y as f32);
-    for &(y, from, to) in &rows {
-        painter.rect_filled(Rect::from_min_max(screen(from, y), screen(to, y + 1)), 0.0, fill);
-    }
+/// Shows what the drawing tool would cover with the pointer at `at`, in the colour it
+/// would leave, if it leaves one. A tip large enough on screen is outlined along its
+/// edge. That would hide a smaller one, down to a single pixel, which is ringed from
+/// outside instead.
+fn paint_tip(painter: &Painter, view: &View, at: Pos2, tools: &Tools) {
+    let fill = (tools.tool != Tool::Eraser).then(|| {
+        let [red, green, blue, alpha] = tools.color.0;
+        Color32::from_rgba_unmultiplied(red, green, blue, alpha)
+    });
     let pixel = 1.0 / painter.pixels_per_point();
-    let tip_side = tools.pencil_size as f32 * view.zoom;
+    let tip_side = tools.tip_size() as f32 * view.zoom;
+    if tools.smooth() {
+        // A smooth tip is round about the point itself, not about a pixel.
+        let radius = tools.tip_size() as f32 / 2.0 * view.zoom * pixel;
+        if let Some(fill) = fill {
+            painter.circle_filled(at, radius, fill);
+        }
+        let ring = if tip_side >= OUTLINED_TIP { radius } else { radius + 1.5 * pixel };
+        painter.circle_stroke(at, ring, Stroke::new(3.0 * pixel, Color32::WHITE));
+        painter.circle_stroke(at, ring, Stroke::new(pixel, Color32::BLACK));
+        return;
+    }
+    let at = view.pixel_at(at);
+    let rows: Vec<(i64, i64, i64)> = hard_tip(at, tools.tip_size()).collect();
+    let screen = |x: i64, y: i64| view.to_screen(x as f32, y as f32);
+    if let Some(fill) = fill {
+        for &(y, from, to) in &rows {
+            painter.rect_filled(Rect::from_min_max(screen(from, y), screen(to, y + 1)), 0.0, fill);
+        }
+    }
     if tip_side >= OUTLINED_TIP {
         // The two ends of each row, and the parts of its top and bottom that the rows
         // above and below do not cover.
