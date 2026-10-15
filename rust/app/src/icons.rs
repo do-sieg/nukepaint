@@ -25,6 +25,9 @@ macro_rules! icon {
 pub const RECT_SELECT: Icon = icon!("rect_select");
 pub const ELLIPSE_SELECT: Icon = icon!("ellipse_select");
 pub const MOVE_SELECTION: Icon = icon!("move_selection");
+pub const SELECT_ALL: Icon = icon!("select_all");
+pub const DESELECT: Icon = icon!("deselect");
+pub const INVERT_SELECTION: Icon = icon!("invert_selection");
 pub const LAYER_ADD: Icon = icon!("layer_add");
 pub const LAYER_DELETE: Icon = icon!("layer_delete");
 pub const LAYER_DUPLICATE: Icon = icon!("layer_duplicate");
@@ -42,10 +45,13 @@ pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
 /// Those the history can list steps with, which it keeps by name.
-const STEP_ICONS: [Icon; 16] = [
+const STEP_ICONS: [Icon; 19] = [
     RECT_SELECT,
     ELLIPSE_SELECT,
     MOVE_SELECTION,
+    SELECT_ALL,
+    DESELECT,
+    INVERT_SELECTION,
     LAYER_ADD,
     LAYER_DELETE,
     LAYER_DUPLICATE,

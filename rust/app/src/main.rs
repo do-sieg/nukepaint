@@ -47,6 +47,9 @@ const PASTE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::V
 const PASTE_INTO_NEW_LAYER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::V);
 const PASTE_INTO_NEW_IMAGE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::V);
 const ERASE_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Delete);
+const SELECT_ALL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::A);
+const DESELECT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
+const INVERT_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
 const ZOOM_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
 /// Plus is a shifted key on most keyboards, so the key it shares counts as well.
 const ZOOM_IN_EQUALS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
@@ -151,6 +154,9 @@ enum EditCommand {
     PasteIntoNewLayer,
     PasteIntoNewImage,
     EraseSelection,
+    SelectAll,
+    Deselect,
+    InvertSelection,
 }
 
 /// What is being closed, waiting on the user to say what becomes of unsaved changes.
@@ -494,7 +500,9 @@ impl App {
             EditCommand::Redo => self.can_go_to_step() && document.can_redo(),
             // A drag would carry on with pixels that are no longer there, or not yet.
             EditCommand::Paste | EditCommand::PasteIntoNewLayer => self.clipboard.is_some() && !self.is_dragging(),
-            EditCommand::Cut | EditCommand::EraseSelection if self.is_dragging() => false,
+            // A drag would carry on with the selection it began with.
+            EditCommand::Cut | EditCommand::EraseSelection | EditCommand::Deselect if self.is_dragging() => false,
+            EditCommand::SelectAll | EditCommand::InvertSelection => !self.is_dragging(),
             _ => !document.selection.is_empty(),
         }
     }
@@ -514,6 +522,24 @@ impl App {
             EditCommand::Cut | EditCommand::Copy | EditCommand::CopyMerged | EditCommand::EraseSelection => {
                 self.copy_or_erase(ctx, command);
             }
+            EditCommand::SelectAll | EditCommand::Deselect | EditCommand::InvertSelection => {
+                self.change_selection(command);
+            }
+        }
+    }
+
+    fn change_selection(&mut self, command: EditCommand) {
+        let image = &mut self.images[self.current.unwrap()];
+        let document = &mut image.document;
+        let (changed, name, icon) = match command {
+            EditCommand::SelectAll => (document.select_all(), "Select All", icons::SELECT_ALL),
+            EditCommand::Deselect => (document.deselect(), "Deselect", icons::DESELECT),
+            _ => (document.invert_selection(), "Invert Selection", icons::INVERT_SELECTION),
+        };
+        if changed {
+            commit_selection(document, name, icon);
+            // A transform would go on with the selection as it was.
+            image.transform = None;
         }
     }
 
@@ -585,9 +611,12 @@ impl App {
                 ("Paste in to New Layer", PASTE_INTO_NEW_LAYER, EditCommand::PasteIntoNewLayer),
                 ("Paste in to New Image", PASTE_INTO_NEW_IMAGE, EditCommand::PasteIntoNewImage),
                 ("Erase Selection", ERASE_SELECTION, EditCommand::EraseSelection),
+                ("Select All", SELECT_ALL, EditCommand::SelectAll),
+                ("Deselect", DESELECT, EditCommand::Deselect),
+                ("Invert Selection", INVERT_SELECTION, EditCommand::InvertSelection),
             ];
             for (label, shortcut, command) in items {
-                if command == EditCommand::Cut {
+                if matches!(command, EditCommand::Cut | EditCommand::SelectAll) {
                     ui.separator();
                 }
                 let button = egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
@@ -908,9 +937,18 @@ impl App {
                     }
                 }
             }
-            // After Delete Layer, which takes Delete with Ctrl and Shift.
-            if ctx.input_mut(|input| input.consume_shortcut(&ERASE_SELECTION)) {
-                self.edit(ctx, EditCommand::EraseSelection);
+            // After the layer commands, as Delete Layer takes Delete with Ctrl and Shift,
+            // and Duplicate Layer D.
+            let edit_shortcuts = [
+                (ERASE_SELECTION, EditCommand::EraseSelection),
+                (SELECT_ALL, EditCommand::SelectAll),
+                (DESELECT, EditCommand::Deselect),
+                (INVERT_SELECTION, EditCommand::InvertSelection),
+            ];
+            for (shortcut, command) in edit_shortcuts {
+                if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+                    self.edit(ctx, command);
+                }
             }
         }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN)) {
@@ -1094,6 +1132,13 @@ impl App {
             self.title = title;
         }
     }
+}
+
+/// Records a change to the selection alone as a step, named after what made it, or
+/// Deselect when nothing is left selected.
+pub fn commit_selection(document: &mut Document, name: &str, icon: Icon) {
+    let (name, icon) = if document.selection.is_empty() { ("Deselect", icons::DESELECT) } else { (name, icon) };
+    document.commit(name, Some(icon.name()));
 }
 
 /// Shows why files could not be opened or saved, until the user closes the message.

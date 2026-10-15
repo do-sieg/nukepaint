@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use image::{RgbaImage, imageops};
 
 use crate::{
-    BlendMode, Layer, MAX_OPACITY, OpenError, Selection, Step, blend_layer, composite, copy_selected, erase_selected,
-    history::History, load_image, save_image,
+    BlendMode, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMode, Step, blend_layer, composite,
+    copy_selected, erase_selected, history::History, load_image, save_image,
 };
 
 /// An image being edited: its layers, bottom first, the file it came from, and the
@@ -140,6 +140,35 @@ impl Document {
     /// Makes the selected pixels of the active layer transparent. Returns whether any were.
     pub fn erase_selection(&mut self) -> bool {
         erase_selected(&mut self.layers[self.active_layer].pixels, &self.selection)
+    }
+
+    /// Selects the whole image. Returns whether the selection changed.
+    pub fn select_all(&mut self) -> bool {
+        self.set_selection(self.whole())
+    }
+
+    /// Selects nothing. Returns whether anything was selected.
+    pub fn deselect(&mut self) -> bool {
+        self.set_selection(Selection::default())
+    }
+
+    /// Selects what of the image was not selected, and nothing else. With nothing
+    /// selected, that is the whole image. Returns whether the selection changed.
+    pub fn invert_selection(&mut self) -> bool {
+        self.set_selection(self.whole().combine(&self.selection, SelectionMode::Subtract))
+    }
+
+    fn whole(&self) -> Selection {
+        let (width, height) = self.size();
+        Selection::rect(PixelRect { left: 0, top: 0, right: width as i32, bottom: height as i32 })
+    }
+
+    fn set_selection(&mut self, selection: Selection) -> bool {
+        if selection == self.selection {
+            return false;
+        }
+        self.selection = selection;
+        true
     }
 
     /// The layers blended into one image.
@@ -345,6 +374,37 @@ mod tests {
         assert_eq!(merged.pixels[(0, 0)], Rgba([0, 0, 255, 255]));
         assert_eq!(merged.pixels[(1, 0)], Rgba([255, 0, 0, 255]));
         assert!(!document.merge_layer_down());
+    }
+
+    #[test]
+    fn select_all_and_deselect() {
+        let mut document = Document::new(RgbaImage::new(4, 3));
+        assert!(!document.deselect());
+        assert!(document.select_all());
+        assert_eq!(document.selection, Selection::rect(PixelRect { left: 0, top: 0, right: 4, bottom: 3 }));
+        assert!(!document.select_all());
+        assert!(document.deselect());
+        assert!(document.selection.is_empty());
+    }
+
+    #[test]
+    fn invert_selects_the_rest_of_the_image() {
+        let mut document = Document::new(RgbaImage::new(4, 3));
+        assert!(document.invert_selection());
+        assert_eq!(document.selection, Selection::rect(PixelRect { left: 0, top: 0, right: 4, bottom: 3 }));
+        assert!(document.invert_selection());
+        assert!(document.selection.is_empty());
+        // What is off the image is left out.
+        document.selection = Selection::rect(PixelRect { left: -2, top: 1, right: 2, bottom: 2 });
+        assert!(document.invert_selection());
+        let selected = |document: &Document| {
+            (0..3).flat_map(|y| (0..4).map(move |x| (x, y))).filter(|&(x, y)| document.selection.contains(x, y)).count()
+        };
+        assert_eq!(selected(&document), 12 - 2);
+        assert!(!document.selection.contains(1, 1) && document.selection.contains(2, 1));
+        assert!(!document.selection.contains(-1, 1));
+        assert!(document.invert_selection());
+        assert_eq!(selected(&document), 2);
     }
 
     #[test]

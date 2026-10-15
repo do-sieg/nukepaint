@@ -265,7 +265,7 @@ fn release_selecting(image: &mut OpenImage, tools: &mut Tools) {
     if let Some(before) = tools.frame_select.release(&mut document.selection)
         && document.selection != before
     {
-        document.commit(tools.tool.name(), Some(tools.tool.icon().name()));
+        crate::commit_selection(document, tools.tool.name(), tools.tool.icon());
     }
 }
 
