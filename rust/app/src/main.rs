@@ -1,7 +1,11 @@
 mod canvas;
+mod dock;
 mod image_strip;
 mod frame_select;
 mod icons;
+mod layer_commands;
+mod layer_properties;
+mod layers_panel;
 mod settings;
 mod tiled_texture;
 mod tools;
@@ -10,12 +14,15 @@ mod view;
 
 use std::path::{Path, PathBuf};
 
+use dock::DockSide;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{
     Affine, Document, FloatingPixels, OPEN_EXTENSIONS, RgbaImage, SAVE_EXTENSIONS, SelectionMode, is_savable,
     thumbnail,
 };
 use icons::{ICON_SIZE, Icons};
+use layer_commands::LayerCommand;
+use layer_properties::Properties;
 use settings::Settings;
 use tiled_texture::TiledTexture;
 use tools::{Tool, Tools};
@@ -32,6 +39,7 @@ const CUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::X);
 const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
 const COPY_MERGED: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::C);
 const PASTE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::V);
+const PASTE_INTO_NEW_LAYER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::V);
 const PASTE_INTO_NEW_IMAGE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::V);
 const ERASE_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Delete);
 const ZOOM_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
@@ -63,18 +71,53 @@ pub struct OpenImage {
     pub texture: TiledTexture,
     /// The image shrunk for the image strip, as textures are not mipmapped.
     pub thumbnail: TextureHandle,
+    /// Each layer shrunk for the layers list, in the order of the layers.
+    pub layer_thumbnails: Vec<TextureHandle>,
     pub view: View,
     /// The selection being moved, resized or rotated, and its pixels with the selection tools.
     pub transform: Option<Transform>,
 }
 
 impl OpenImage {
-    /// Shows the layers again after their pixels changed.
+    fn new(ctx: &egui::Context, document: Document) -> Self {
+        let flat = document.flattened();
+        let texture = TiledTexture::new(ctx, &document.name(), &flat);
+        let view = View::new(texture.size());
+        let thumbnail = make_thumbnail(ctx, &document.name(), &flat, image_strip::THUMBNAIL_SIZE);
+        let mut image = Self { document, texture, thumbnail, layer_thumbnails: Vec::new(), view, transform: None };
+        image.refresh_layer_thumbnails(ctx);
+        image
+    }
+
+    /// Shows the image again after the pixels of the active layer changed.
     pub fn refresh(&mut self, ctx: &egui::Context) {
+        self.refresh_image(ctx);
+        let active = self.document.active_layer;
+        self.layer_thumbnails[active] = self.make_layer_thumbnail(ctx, active);
+    }
+
+    /// Shows the image and its layers again after layers were added, removed, moved or
+    /// changed.
+    pub fn refresh_layers(&mut self, ctx: &egui::Context) {
+        self.refresh_image(ctx);
+        self.refresh_layer_thumbnails(ctx);
+    }
+
+    /// Shows the image again after how its layers are blended changed, not their pixels.
+    pub fn refresh_image(&mut self, ctx: &egui::Context) {
         let flat = self.document.flattened();
         let name = self.document.name();
         self.texture = TiledTexture::new(ctx, &name, &flat);
-        self.thumbnail = make_thumbnail(ctx, &name, &flat);
+        self.thumbnail = make_thumbnail(ctx, &name, &flat, image_strip::THUMBNAIL_SIZE);
+    }
+
+    fn refresh_layer_thumbnails(&mut self, ctx: &egui::Context) {
+        self.layer_thumbnails = (0..self.document.layers.len()).map(|index| self.make_layer_thumbnail(ctx, index)).collect();
+    }
+
+    fn make_layer_thumbnail(&self, ctx: &egui::Context, index: usize) -> TextureHandle {
+        let name = format!("{} layer {index}", self.document.name());
+        make_thumbnail(ctx, &name, &self.document.layers[index].pixels, layers_panel::THUMBNAIL_SIZE)
     }
 
     fn is_dragging(&self) -> bool {
@@ -98,6 +141,7 @@ enum EditCommand {
     Copy,
     CopyMerged,
     Paste,
+    PasteIntoNewLayer,
     PasteIntoNewImage,
     EraseSelection,
 }
@@ -107,6 +151,23 @@ enum Closing {
     Image(usize),
     /// The whole app, once every image has been saved or given up on, as these ones were.
     Quit { discarded: Vec<usize> },
+}
+
+/// A save waiting on the user to agree to flatten the image, which the file cannot keep
+/// the layers of.
+struct FlattenPrompt {
+    image: usize,
+    path: PathBuf,
+}
+
+/// How a save went.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Saving {
+    Saved,
+    /// Given up on, or failed.
+    NotSaved,
+    /// Waiting on the user to agree to flatten the image.
+    AskingToFlatten,
 }
 
 /// What the user chose to do with unsaved changes.
@@ -130,6 +191,8 @@ struct App {
     save_errors: Vec<String>,
     /// Set while asking whether to save the changes of what is being closed.
     closing: Option<Closing>,
+    /// Set while asking whether to flatten an image to save it.
+    flatten_prompt: Option<FlattenPrompt>,
     /// Set once the user has said what to do with every unsaved change, for the window to close.
     may_quit: bool,
     /// What the window's title was last set to.
@@ -142,6 +205,8 @@ struct App {
     tools: Tools,
     /// The pixels copied last, kept in the app until the system clipboard takes images.
     clipboard: Option<RgbaImage>,
+    /// Set while the properties of a layer are being edited.
+    layer_dialog: Option<layer_properties::Dialog>,
 }
 
 impl App {
@@ -156,6 +221,7 @@ impl App {
             open_errors: Vec::new(),
             save_errors: Vec::new(),
             closing: None,
+            flatten_prompt: None,
             may_quit: false,
             title: APP_NAME.to_owned(),
             settings: Settings::load(),
@@ -164,6 +230,7 @@ impl App {
             icons: Icons::default(),
             tools: Tools::default(),
             clipboard: None,
+            layer_dialog: None,
         }
     }
 
@@ -205,11 +272,7 @@ impl App {
 
     /// Shows the document as the current image, after the others.
     fn add_image(&mut self, ctx: &egui::Context, document: Document) {
-        let flat = document.flattened();
-        let texture = TiledTexture::new(ctx, &document.name(), &flat);
-        let view = View::new(texture.size());
-        let thumbnail = make_thumbnail(ctx, &document.name(), &flat);
-        self.images.push(OpenImage { document, texture, thumbnail, view, transform: None });
+        self.images.push(OpenImage::new(ctx, document));
         self.select(self.images.len() - 1);
     }
 
@@ -226,24 +289,34 @@ impl App {
     }
 
     /// Saves the image to its own file, or to one the user picks when `ask_path` is set
-    /// or its own file cannot be saved to. Returns whether it was saved.
-    fn save(&mut self, index: usize, ask_path: bool) -> bool {
+    /// or its own file cannot be saved to. None of the formats keep layers yet, so an
+    /// image of more than one plain layer is only saved once the user agrees to flatten it.
+    fn save(&mut self, index: usize, ask_path: bool) -> Saving {
         let document = &self.images[index].document;
         let path = match &document.path {
             Some(path) if !ask_path && is_savable(path) => path.clone(),
             _ => match self.pick_save_path(document) {
                 Some(path) => path,
-                None => return false,
+                None => return Saving::NotSaved,
             },
         };
-        if let Err(error) = self.images[index].document.save(&path) {
+        if !document.is_flat() {
+            self.flatten_prompt = Some(FlattenPrompt { image: index, path });
+            return Saving::AskingToFlatten;
+        }
+        if self.write(index, &path) { Saving::Saved } else { Saving::NotSaved }
+    }
+
+    /// Writes the image to the file. Returns whether it was written.
+    fn write(&mut self, index: usize, path: &Path) -> bool {
+        if let Err(error) = self.images[index].document.save(path) {
             self.save_errors.push(format!("{}: {error}", path.display()));
             return false;
         }
         if let Some(dir) = path.parent() {
             self.settings.set_last_dir(dir);
         }
-        self.settings.add_recent_file(&path);
+        self.settings.add_recent_file(path);
         true
     }
 
@@ -387,6 +460,15 @@ impl App {
                     self.run(command);
                 }
             }
+            ui.separator();
+            ui.menu_button("Dock", |ui| {
+                for side in DockSide::ALL {
+                    let selected = self.settings.dock_side() == side;
+                    if ui.radio(selected, format!("On the {}", side.name())).clicked() {
+                        self.settings.set_dock_side(side);
+                    }
+                }
+            });
         });
     }
 
@@ -399,7 +481,7 @@ impl App {
         };
         match command {
             // A drag would carry on with pixels that are no longer there, or not yet.
-            EditCommand::Paste => self.clipboard.is_some() && !self.is_dragging(),
+            EditCommand::Paste | EditCommand::PasteIntoNewLayer => self.clipboard.is_some() && !self.is_dragging(),
             EditCommand::Cut | EditCommand::EraseSelection if self.is_dragging() => false,
             _ => !self.images[current].document.selection.is_empty(),
         }
@@ -410,7 +492,8 @@ impl App {
             return;
         }
         match command {
-            EditCommand::Paste => self.paste(ctx),
+            EditCommand::Paste => self.paste(ctx, false),
+            EditCommand::PasteIntoNewLayer => self.paste(ctx, true),
             EditCommand::PasteIntoNewImage => {
                 let mut document = Document::new(self.clipboard.clone().unwrap());
                 // Closing it asks whether to save it, as it is in no file.
@@ -442,10 +525,11 @@ impl App {
         }
     }
 
-    /// Pastes into the active layer, at the selection's top left corner or the image's
-    /// without one. The pixels can then be moved, resized and rotated with the
-    /// selection's box, over what is under them, until the selection changes some other way.
-    fn paste(&mut self, ctx: &egui::Context) {
+    /// Pastes into the active layer, or a new one over it with `new_layer`, at the
+    /// selection's top left corner or the image's without one. The pixels can then be
+    /// moved, resized and rotated with the selection's box, over what is under them,
+    /// until the selection changes some other way.
+    fn paste(&mut self, ctx: &egui::Context, new_layer: bool) {
         let Some(current) = self.current else {
             return;
         };
@@ -455,16 +539,23 @@ impl App {
         self.set_tool(tool);
         let image = &mut self.images[current];
         let document = &mut image.document;
+        if new_layer {
+            document.add_layer();
+        }
         let bounds = document.selection.bounds();
         let at = bounds.map_or((0, 0), |bounds| (bounds.left.floor() as i32, bounds.top.floor() as i32));
-        let layer = &mut document.layers[document.active_layer].pixels;
+        let layer = &mut document.active_mut().pixels;
         let floating = FloatingPixels::pasted(layer, self.clipboard.clone().unwrap(), at);
         *layer = floating.place(&Affine::IDENTITY);
-        let transform = Transform::begin_pasted(ctx, floating);
+        let transform = Transform::begin_pasted(ctx, floating, document);
         document.selection = transform.selection();
         document.unsaved = true;
         image.transform = Some(transform);
-        image.refresh(ctx);
+        if new_layer {
+            image.refresh_layers(ctx);
+        } else {
+            image.refresh(ctx);
+        }
     }
 
     fn edit_menu(&mut self, ui: &mut egui::Ui) {
@@ -475,6 +566,7 @@ impl App {
                 ("Copy", COPY, EditCommand::Copy),
                 ("Copy Merged", COPY_MERGED, EditCommand::CopyMerged),
                 ("Paste", PASTE, EditCommand::Paste),
+                ("Paste in to New Layer", PASTE_INTO_NEW_LAYER, EditCommand::PasteIntoNewLayer),
                 ("Paste in to New Image", PASTE_INTO_NEW_IMAGE, EditCommand::PasteIntoNewImage),
                 ("Erase Selection", ERASE_SELECTION, EditCommand::EraseSelection),
             ];
@@ -485,6 +577,129 @@ impl App {
                 }
             }
         });
+    }
+
+    /// A menu of layer commands, in groups that separators keep apart.
+    fn layer_command_menu(&mut self, ui: &mut egui::Ui, title: &str, groups: &[&[LayerCommand]]) {
+        let ctx = ui.ctx().clone();
+        ui.menu_button(title, |ui| {
+            for (group, commands) in groups.iter().enumerate() {
+                if group > 0 {
+                    ui.separator();
+                }
+                for &command in *commands {
+                    let mut button = egui::Button::new(command.label());
+                    if let Some(shortcut) = command.shortcut() {
+                        button = button.shortcut_text(ctx.format_shortcut(&shortcut));
+                    }
+                    if ui.add_enabled(self.can_run_layer(command), button).clicked() {
+                        self.run_layer(&ctx, command);
+                    }
+                }
+            }
+        });
+    }
+
+    fn can_run_layer(&self, command: LayerCommand) -> bool {
+        let Some(current) = self.current else {
+            return false;
+        };
+        // A drag would carry on with a layer that is no longer the active one.
+        !self.is_dragging() && self.layer_dialog.is_none() && command.can_run(&self.images[current].document)
+    }
+
+    fn run_layer(&mut self, ctx: &egui::Context, command: LayerCommand) {
+        if !self.can_run_layer(command) {
+            return;
+        }
+        let current = self.current.unwrap();
+        if command == LayerCommand::Properties {
+            self.edit_layer_properties(current, self.images[current].document.active_layer);
+            return;
+        }
+        let image = &mut self.images[current];
+        // A transform would go on with the pixels of the layer it began on.
+        image.transform = None;
+        if command.run(&mut image.document) {
+            image.refresh_layers(ctx);
+        }
+    }
+
+    /// Does what was done in the layers list.
+    fn layers_panel_action(&mut self, ctx: &egui::Context, action: layers_panel::Action) {
+        let Some(current) = self.current.filter(|_| !self.is_dragging() && self.layer_dialog.is_none()) else {
+            return;
+        };
+        let image = &mut self.images[current];
+        let document = &mut image.document;
+        match action {
+            layers_panel::Action::Select(index) => {
+                if document.set_active_layer(index) {
+                    image.transform = None;
+                }
+            }
+            layers_panel::Action::SetVisible(index, visible) => {
+                // The transform shows the layers as they were when it began.
+                image.transform = None;
+                document.layers[index].visible = visible;
+                document.unsaved = true;
+                image.refresh_image(ctx);
+            }
+            layers_panel::Action::Move { from, to } => {
+                image.transform = None;
+                if document.move_layer(from, to) {
+                    image.refresh_layers(ctx);
+                }
+            }
+            layers_panel::Action::Properties(index) => {
+                if document.set_active_layer(index) {
+                    image.transform = None;
+                }
+                self.edit_layer_properties(current, index);
+            }
+            layers_panel::Action::Run(command) => self.run_layer(ctx, command),
+        }
+    }
+
+    fn edit_layer_properties(&mut self, image: usize, layer: usize) {
+        // The transform shows the layers as they were when it began.
+        self.images[image].transform = None;
+        let properties = Properties::of(&self.images[image].document.layers[layer]);
+        self.layer_dialog = Some(layer_properties::Dialog::new(image, layer, properties));
+    }
+
+    /// Shows the layer properties dialog while it is open, and the layer as it says.
+    fn layer_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.layer_dialog else {
+            return;
+        };
+        let Some(outcome) = dialog.show(ctx) else {
+            return;
+        };
+        let image = &mut self.images[dialog.image];
+        let layer = &mut image.document.layers[dialog.layer];
+        match outcome {
+            layer_properties::Outcome::Edited => dialog.properties.apply(layer),
+            layer_properties::Outcome::Accepted => {
+                dialog.properties.apply(layer);
+                image.document.unsaved |= dialog.properties != dialog.before;
+                self.layer_dialog = None;
+            }
+            layer_properties::Outcome::Canceled => {
+                dialog.before.apply(layer);
+                self.layer_dialog = None;
+            }
+        }
+        image.refresh_image(ctx);
+    }
+
+    /// Puts the layer back as it was and closes the layer properties dialog, if it is open.
+    fn cancel_layer_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(dialog) = self.layer_dialog.take() {
+            let image = &mut self.images[dialog.image];
+            dialog.before.apply(&mut image.document.layers[dialog.layer]);
+            image.refresh_image(ctx);
+        }
     }
 
     /// The settings of the tool, under the menu bar.
@@ -582,8 +797,8 @@ impl App {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        // Nothing else happens while the user is asked about unsaved changes.
-        if self.closing.is_some() {
+        // Nothing else happens while the user is asked about unsaved changes, flattening or a layer's properties.
+        if self.closing.is_some() || self.flatten_prompt.is_some() || self.layer_dialog.is_some() {
             return;
         }
         let view_shortcuts = [
@@ -622,15 +837,28 @@ impl App {
             // pasting waits for the key to be let go.
             let pasted = ctx.input(|input| {
                 input.events.iter().find_map(|event| match event {
-                    Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command => {
-                        Some(modifiers.alt)
-                    }
+                    Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command => Some(*modifiers),
                     _ => None,
                 })
             });
-            if let Some(alt) = pasted {
-                self.edit(ctx, if alt { EditCommand::PasteIntoNewImage } else { EditCommand::Paste });
+            if let Some(modifiers) = pasted {
+                let command = match () {
+                    _ if modifiers.alt => EditCommand::PasteIntoNewImage,
+                    _ if modifiers.shift => EditCommand::PasteIntoNewLayer,
+                    _ => EditCommand::Paste,
+                };
+                self.edit(ctx, command);
             }
+            for commands in LayerCommand::MENU.into_iter().chain(LayerCommand::IMAGE_MENU) {
+                for &command in commands {
+                    if let Some(shortcut) = command.shortcut()
+                        && ctx.input_mut(|input| input.consume_shortcut(&shortcut))
+                    {
+                        self.run_layer(ctx, command);
+                    }
+                }
+            }
+            // After Delete Layer, which takes Delete with Ctrl and Shift.
             if ctx.input_mut(|input| input.consume_shortcut(&ERASE_SELECTION)) {
                 self.edit(ctx, EditCommand::EraseSelection);
             }
@@ -691,6 +919,10 @@ impl App {
     /// Asks whether to save the changes of what is being closed, one image at a time,
     /// and closes it once the user has said.
     fn unsaved_prompt(&mut self, ctx: &egui::Context) {
+        // An image being saved is first asked about flattening.
+        if self.flatten_prompt.is_some() {
+            return;
+        }
         let index = match &self.closing {
             None => return,
             Some(Closing::Image(index)) => *index,
@@ -734,19 +966,67 @@ impl App {
         match choice {
             None => {}
             Some(UnsavedChoice::Cancel) => self.closing = None,
-            // Saving can be given up on as well, or fail.
-            Some(UnsavedChoice::Save) if !self.save(index, false) => self.closing = None,
-            // Quitting goes on to the next image with changes, closing none until then.
-            Some(UnsavedChoice::Save) if quitting => {}
+            Some(UnsavedChoice::Save) => match self.save(index, false) {
+                Saving::Saved => self.close_saved(index),
+                // Saving can be given up on as well, or fail.
+                Saving::NotSaved => self.closing = None,
+                // The flatten prompt carries on from here.
+                Saving::AskingToFlatten => {}
+            },
             Some(UnsavedChoice::Discard) if quitting => {
                 if let Some(Closing::Quit { discarded }) = &mut self.closing {
                     discarded.push(index);
                 }
             }
-            Some(UnsavedChoice::Save | UnsavedChoice::Discard) => {
+            Some(UnsavedChoice::Discard) => {
                 self.closing = None;
                 self.close(index);
             }
+        }
+    }
+
+    /// Goes on closing once an image asked about has been saved. Quitting goes on to the
+    /// next image with changes, closing none until then.
+    fn close_saved(&mut self, index: usize) {
+        if let Some(Closing::Image(_)) = self.closing {
+            self.closing = None;
+            self.close(index);
+        }
+    }
+
+    /// Asks whether to flatten the image to save it, and saves it once the user agrees.
+    /// The image is flattened once the file is written, to be as it is in the file.
+    fn flatten_prompt(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &self.flatten_prompt else {
+            return;
+        };
+        let format = prompt.path.extension().map(|extension| extension.to_string_lossy().to_uppercase());
+        let response = egui::Modal::new(egui::Id::new("flatten_prompt")).show(ctx, |ui| {
+            ui.heading("Flatten the image?");
+            ui.label(format!("{} files cannot keep layers.\nFlatten the image and save it?", format.unwrap_or_default()));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let flatten = ui.button("Flatten and Save").clicked();
+                let cancel = ui.button("Cancel").clicked();
+                flatten.then_some(true).or(cancel.then_some(false))
+            })
+            .inner
+        });
+        let flatten = if response.should_close() { Some(false) } else { response.inner };
+        let Some(flatten) = flatten else {
+            return;
+        };
+        let FlattenPrompt { image: index, path } = self.flatten_prompt.take().unwrap();
+        if flatten && self.write(index, &path) {
+            let image = &mut self.images[index];
+            image.document.flatten();
+            image.document.unsaved = false;
+            // A transform would go on with layers that are no longer there.
+            image.transform = None;
+            image.refresh_layers(ctx);
+            self.close_saved(index);
+        } else {
+            self.closing = None;
         }
     }
 
@@ -786,9 +1066,9 @@ fn show_errors(ctx: &egui::Context, id: &str, heading: &str, errors: &mut Vec<St
     }
 }
 
-/// The texture the image strip shows, sharp at the screen's scale.
-fn make_thumbnail(ctx: &egui::Context, name: &str, image: &power_paint_core::RgbaImage) -> TextureHandle {
-    let max_side = (image_strip::THUMBNAIL_SIZE * ctx.pixels_per_point()).ceil() as u32;
+/// The image shrunk to fit in a square of `size` points, sharp at the screen's scale.
+fn make_thumbnail(ctx: &egui::Context, name: &str, image: &RgbaImage, size: f32) -> TextureHandle {
+    let max_side = (size * ctx.pixels_per_point()).ceil() as u32;
     let small = thumbnail(image, max_side);
     let size = [small.width() as usize, small.height() as usize];
     let pixels = ColorImage::from_rgba_unmultiplied(size, small.as_raw());
@@ -822,6 +1102,8 @@ impl eframe::App for App {
             egui::MenuBar::new().ui(ui, |ui| {
                 self.file_menu(ui);
                 self.edit_menu(ui);
+                self.layer_command_menu(ui, "Image", &LayerCommand::IMAGE_MENU);
+                self.layer_command_menu(ui, "Layers", &LayerCommand::MENU);
                 self.view_menu(ui);
                 let action = image_strip::show(ui, &self.images, self.current, scroll_to_current, &self.checker);
                 match action {
@@ -837,6 +1119,26 @@ impl eframe::App for App {
             egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
         }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+
+        // Only the layers are in the dock for now, which there are none of without an image.
+        if let Some(current) = self.current {
+            let mut action = None;
+            let busy = self.is_dragging() || self.layer_dialog.is_some();
+            let image = &self.images[current];
+            let (checker, icons) = (&self.checker, &mut self.icons);
+            let moved = dock::show(ui, self.settings.dock_side(), |ui| {
+                dock::section(ui, "Layers", |ui| {
+                    let enabled = |command: LayerCommand| !busy && command.can_run(&image.document);
+                    action = layers_panel::show(ui, image, checker, icons, enabled);
+                });
+            });
+            if let Some(side) = moved {
+                self.settings.set_dock_side(side);
+            }
+            if let Some(action) = action {
+                self.layers_panel_action(&ctx, action);
+            }
+        }
 
         // The image goes right up to the panels around it.
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(0.0);
@@ -855,7 +1157,13 @@ impl eframe::App for App {
             }
         });
 
+        // Closing an image or the app first gives up on the layer's properties being edited.
+        if self.closing.is_some() {
+            self.cancel_layer_dialog(&ctx);
+        }
+        self.layer_dialog(&ctx);
         self.unsaved_prompt(&ctx);
+        self.flatten_prompt(&ctx);
         show_errors(&ctx, "open_errors", "Could not open", &mut self.open_errors);
         show_errors(&ctx, "save_errors", "Could not save", &mut self.save_errors);
         self.update_title(&ctx);

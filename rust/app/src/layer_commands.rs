@@ -1,0 +1,153 @@
+//! What the Layers menu, the Image menu, their shortcuts, the buttons under the layers
+//! list and the menu of a layer in it do. The Image menu only holds Flatten for now.
+
+use eframe::egui::{Key, KeyboardShortcut, Modifiers};
+use power_paint_core::Document;
+
+use crate::icons::{self, Icon};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayerCommand {
+    Add,
+    Delete,
+    Duplicate,
+    MergeDown,
+    Flatten,
+    FlipHorizontal,
+    FlipVertical,
+    Rotate180,
+    GoToTop,
+    GoToAbove,
+    GoToBelow,
+    GoToBottom,
+    MoveToTop,
+    MoveUp,
+    MoveDown,
+    MoveToBottom,
+    Properties,
+}
+
+use LayerCommand::*;
+
+impl LayerCommand {
+    /// The Layers menu, in groups that separators keep apart.
+    pub const MENU: [&[Self]; 5] = [
+        &[Add, Delete, Duplicate, MergeDown],
+        &[FlipHorizontal, FlipVertical, Rotate180],
+        &[GoToTop, GoToAbove, GoToBelow, GoToBottom],
+        &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
+        &[Properties],
+    ];
+    /// The Image menu.
+    pub const IMAGE_MENU: [&[Self]; 1] = [&[Flatten]];
+    /// The menu of a layer in the layers list, which acts on it: the Layers menu without
+    /// the commands that go to another layer, and Flatten.
+    pub const CONTEXT_MENU: [&[Self]; 4] = [
+        &[Add, Delete, Duplicate, MergeDown, Flatten],
+        &[FlipHorizontal, FlipVertical, Rotate180],
+        &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
+        &[Properties],
+    ];
+    /// The buttons under the layers list: the commands with an icon.
+    pub const BUTTONS: [Self; 7] = [Add, Delete, Duplicate, MergeDown, MoveUp, MoveDown, Properties];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Add => "Add New Layer",
+            Delete => "Delete Layer",
+            Duplicate => "Duplicate Layer",
+            MergeDown => "Merge Layer Down",
+            Flatten => "Flatten",
+            FlipHorizontal => "Flip Horizontal",
+            FlipVertical => "Flip Vertical",
+            Rotate180 => "Rotate 180°",
+            GoToTop => "Go to Top Layer",
+            GoToAbove => "Go to Layer Above",
+            GoToBelow => "Go to Layer Below",
+            GoToBottom => "Go to Bottom Layer",
+            MoveToTop => "Move Layer to Top",
+            MoveUp => "Move Layer Up",
+            MoveDown => "Move Layer Down",
+            MoveToBottom => "Move Layer to Bottom",
+            Properties => "Layer Properties…",
+        }
+    }
+
+    pub fn shortcut(self) -> Option<KeyboardShortcut> {
+        let ctrl_shift = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+        let ctrl_alt = Modifiers::COMMAND.plus(Modifiers::ALT);
+        let (modifiers, key) = match self {
+            Add => (ctrl_shift, Key::N),
+            Delete => (ctrl_shift, Key::Delete),
+            Duplicate => (ctrl_shift, Key::D),
+            MergeDown => (Modifiers::COMMAND, Key::M),
+            Flatten => (ctrl_shift, Key::F),
+            GoToTop => (ctrl_alt, Key::PageUp),
+            GoToAbove => (Modifiers::ALT, Key::PageUp),
+            GoToBelow => (Modifiers::ALT, Key::PageDown),
+            GoToBottom => (ctrl_alt, Key::PageDown),
+            Properties => (Modifiers::NONE, Key::F4),
+            _ => return None,
+        };
+        Some(KeyboardShortcut::new(modifiers, key))
+    }
+
+    pub fn icon(self) -> Option<Icon> {
+        Some(match self {
+            Add => icons::LAYER_ADD,
+            Delete => icons::LAYER_DELETE,
+            Duplicate => icons::LAYER_DUPLICATE,
+            MergeDown => icons::LAYER_MERGE_DOWN,
+            MoveUp => icons::LAYER_UP,
+            MoveDown => icons::LAYER_DOWN,
+            Properties => icons::LAYER_PROPERTIES,
+            _ => return None,
+        })
+    }
+
+    /// Whether the command has anything to do on the document.
+    pub fn can_run(self, document: &Document) -> bool {
+        let has_above = document.active_layer + 1 < document.layers.len();
+        let has_below = document.active_layer > 0;
+        match self {
+            Delete => document.layers.len() > 1,
+            Flatten => !document.is_flat(),
+            GoToTop | GoToAbove | MoveToTop | MoveUp => has_above,
+            MergeDown | GoToBottom | GoToBelow | MoveToBottom | MoveDown => has_below,
+            Add | Duplicate | FlipHorizontal | FlipVertical | Rotate180 | Properties => true,
+        }
+    }
+
+    /// Runs the command on the document, but for Properties, which asks the user first.
+    /// Returns whether the layers changed, rather than only which one is active.
+    pub fn run(self, document: &mut Document) -> bool {
+        let active = document.active_layer;
+        let top = document.layers.len() - 1;
+        match self {
+            Add => document.add_layer(),
+            Delete => return document.delete_layer(),
+            Duplicate => document.duplicate_layer(),
+            MergeDown => return document.merge_layer_down(),
+            Flatten => document.flatten(),
+            FlipHorizontal => document.flip_layer(true, false),
+            FlipVertical => document.flip_layer(false, true),
+            Rotate180 => document.flip_layer(true, true),
+            GoToTop | GoToAbove | GoToBelow | GoToBottom => {
+                let index = match self {
+                    GoToTop => top,
+                    GoToAbove => active + 1,
+                    GoToBelow => active.saturating_sub(1),
+                    _ => 0,
+                };
+                document.set_active_layer(index);
+                return false;
+            }
+            MoveToTop => return document.move_layer(active, top),
+            MoveUp => return document.move_layer(active, active + 1),
+            MoveDown => return document.move_layer(active, active.saturating_sub(1)),
+            MoveToBottom => return document.move_layer(active, 0),
+            Properties => return false,
+        }
+        true
+    }
+}

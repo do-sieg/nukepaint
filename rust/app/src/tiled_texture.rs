@@ -45,16 +45,17 @@ impl TiledTexture {
     }
 
     /// Draws the whole, stretched over `rect`, from the copy closest to that size
-    /// without being smaller.
-    pub fn paint(&self, painter: &Painter, rect: Rect) {
+    /// without being smaller, as opaque as `opacity` says, from 0 to 1.
+    pub fn paint(&self, painter: &Painter, rect: Rect, opacity: f32) {
         let screen_scale = rect.width() * painter.pixels_per_point() / self.size.x;
-        self.level(screen_scale).paint(painter, rect);
+        self.level(screen_scale).paint(painter, rect, Color32::WHITE.gamma_multiply(opacity));
     }
 
     /// Draws the whole, each point of it, in pixels, carried to the screen by `map`,
     /// which may turn and stretch it. `screen_scale` is about how many screen pixels
     /// one of its pixels takes, to draw from the copy that suits.
-    pub fn paint_mapped(&self, painter: &Painter, map: impl Fn(Pos2) -> Pos2, screen_scale: f32) {
+    pub fn paint_mapped(&self, painter: &Painter, map: impl Fn(Pos2) -> Pos2, screen_scale: f32, opacity: f32) {
+        let color = Color32::WHITE.gamma_multiply(opacity);
         let level = self.level(screen_scale);
         let to_full = self.size / level.size;
         for (tile, texture) in &level.tiles {
@@ -65,7 +66,7 @@ impl TiledTexture {
                 mesh.vertices.push(egui::epaint::Vertex {
                     pos: map((corner.to_vec2() * to_full).to_pos2()),
                     uv,
-                    color: Color32::WHITE,
+                    color,
                 });
             }
             mesh.add_triangle(0, 1, 2);
@@ -110,12 +111,12 @@ impl Level {
         Self { size: Vec2::new(width as f32, height as f32), tiles }
     }
 
-    fn paint(&self, painter: &Painter, rect: Rect) {
+    fn paint(&self, painter: &Painter, rect: Rect, tint: Color32) {
         let scale = rect.size() / self.size;
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         for (tile, texture) in &self.tiles {
             let tile_rect = Rect::from_min_size(rect.min + tile.min.to_vec2() * scale, tile.size() * scale);
-            painter.image(texture.id(), tile_rect, uv, Color32::WHITE);
+            painter.image(texture.id(), tile_rect, uv, tint);
         }
     }
 }

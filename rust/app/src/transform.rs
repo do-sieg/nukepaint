@@ -12,7 +12,7 @@
 use std::f64::consts::PI;
 
 use eframe::egui::{self, CursorIcon, Pos2};
-use power_paint_core::{Affine, Bounds, FloatingPixels, RgbaImage, Selection};
+use power_paint_core::{Affine, Bounds, Document, FloatingPixels, Layer, MAX_OPACITY, RgbaImage, Selection, composite};
 
 use crate::{tiled_texture::TiledTexture, view::View};
 
@@ -186,19 +186,34 @@ struct Drag {
     moved: bool,
 }
 
-/// The selected pixels taken out of the layer, and their textures to show them moving.
+/// The selected pixels taken out of the layer, and their textures to show them moving
+/// among the other layers. Those are blended normally in the preview, whatever their
+/// mode: the image is blended as it should be once the pixels are put down.
 struct Floating {
     pixels: FloatingPixels,
     texture: TiledTexture,
     /// The layer without them.
     base_texture: TiledTexture,
+    /// How opaque the layer is, or nothing if it is hidden.
+    opacity: Option<f32>,
+    /// The layers under it and those over it, each blended together, if any show.
+    below: Option<TiledTexture>,
+    above: Option<TiledTexture>,
 }
 
 impl Floating {
-    fn new(ctx: &egui::Context, pixels: FloatingPixels) -> Self {
+    fn new(ctx: &egui::Context, pixels: FloatingPixels, document: &Document) -> Self {
         let texture = TiledTexture::new(ctx, "floating pixels", pixels.pixels());
         let base_texture = TiledTexture::new(ctx, "floating base", pixels.base());
-        Self { pixels, texture, base_texture }
+        let layer = document.active();
+        let opacity = layer.shows().then_some(layer.opacity as f32 / MAX_OPACITY as f32);
+        let blended = |name: &str, layers: &[Layer]| {
+            layers.iter().any(Layer::shows).then(|| TiledTexture::new(ctx, name, &composite(layers)))
+        };
+        let (below, above) = document.layers.split_at(document.active_layer);
+        let below = blended("layers below", below);
+        let above = blended("layers above", &above[1..]);
+        Self { pixels, texture, base_texture, opacity, below, above }
     }
 }
 
@@ -213,21 +228,22 @@ pub struct Transform {
 }
 
 impl Transform {
-    /// Starts moving the selection, and the pixels of `layer` it holds if given. There
-    /// is nothing to move without a selection.
-    pub fn begin(ctx: &egui::Context, selection: &Selection, layer: Option<&RgbaImage>) -> Option<Self> {
+    /// Starts moving the document's selection, and the pixels of the active layer it
+    /// holds with `with_pixels`. There is nothing to move without a selection.
+    pub fn begin(ctx: &egui::Context, document: &Document, with_pixels: bool) -> Option<Self> {
+        let selection = &document.selection;
         let start = selection.bounds()?;
-        let floating = layer.and_then(|layer| FloatingPixels::lift(layer, selection));
-        let floating = floating.map(|pixels| Floating::new(ctx, pixels));
+        let floating = with_pixels.then(|| FloatingPixels::lift(&document.active().pixels, selection)).flatten();
+        let floating = floating.map(|pixels| Floating::new(ctx, pixels, document));
         Some(Self { start, selection_start: selection.clone(), floating, state: BoxState::around(start), drag: None })
     }
 
-    /// Starts moving pasted pixels, selected all around.
-    pub fn begin_pasted(ctx: &egui::Context, pixels: FloatingPixels) -> Self {
+    /// Starts moving pixels pasted on the document's active layer, selected all around.
+    pub fn begin_pasted(ctx: &egui::Context, pixels: FloatingPixels, document: &Document) -> Self {
         let selection = Selection::rect(pixels.area());
         // Pasted pixels are never empty, so neither is their selection.
         let start = selection.bounds().expect("pasted pixels are selected");
-        let floating = Some(Floating::new(ctx, pixels));
+        let floating = Some(Floating::new(ctx, pixels, document));
         Self { start, selection_start: selection, floating, state: BoxState::around(start), drag: None }
     }
 
@@ -298,13 +314,27 @@ impl Transform {
             .then(Affine::translation(self.state.center.0, self.state.center.1))
     }
 
-    /// While pixels are being dragged, draws the layer without them and them where
-    /// they now are, in place of the layer. Returns whether it did.
+    /// While pixels are being dragged, draws the image with the layer without them and
+    /// them where they now are, in place of the image. Returns whether it did.
     pub fn paint_preview(&self, painter: &egui::Painter, view: &View) -> bool {
         let Some(floating) = self.floating.as_ref().filter(|_| self.is_dragging()) else {
             return false;
         };
-        floating.base_texture.paint(painter, view.image_rect());
+        let rect = view.image_rect();
+        if let Some(below) = &floating.below {
+            below.paint(painter, rect, 1.0);
+        }
+        if let Some(opacity) = floating.opacity {
+            self.paint_layer(painter, view, floating, opacity);
+        }
+        if let Some(above) = &floating.above {
+            above.paint(painter, rect, 1.0);
+        }
+        true
+    }
+
+    fn paint_layer(&self, painter: &egui::Painter, view: &View, floating: &Floating, opacity: f32) {
+        floating.base_texture.paint(painter, view.image_rect(), opacity);
         let area = floating.pixels.area();
         let map = self.affine();
         let to_screen = |point: Pos2| {
@@ -313,8 +343,7 @@ impl Transform {
         };
         // About how many screen pixels each of the pixels takes, to draw from the copy that suits.
         let scale = (self.state.size.0.abs() / self.start.width()).max(self.state.size.1.abs() / self.start.height());
-        floating.texture.paint_mapped(painter, to_screen, scale as f32 * view.zoom);
-        true
+        floating.texture.paint_mapped(painter, to_screen, scale as f32 * view.zoom, opacity);
     }
 }
 
@@ -396,9 +425,10 @@ mod tests {
 
     #[test]
     fn transform_moves_the_selection() {
-        let selection = Selection::rect(power_paint_core::PixelRect { left: 0, top: 0, right: 10, bottom: 10 });
+        let mut document = Document::new(RgbaImage::new(20, 20));
+        document.selection = Selection::rect(power_paint_core::PixelRect { left: 0, top: 0, right: 10, bottom: 10 });
         let ctx = egui::Context::default();
-        let mut transform = Transform::begin(&ctx, &selection, None).unwrap();
+        let mut transform = Transform::begin(&ctx, &document, false).unwrap();
         transform.press(DragKind::Move, (5.0, 5.0));
         let moved = transform.drag_to((8.0, 5.0), false).unwrap();
         assert_eq!(moved.bounds(), Some(Bounds { left: 3.0, top: 0.0, right: 13.0, bottom: 10.0 }));

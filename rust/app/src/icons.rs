@@ -25,6 +25,13 @@ macro_rules! icon {
 pub const RECT_SELECT: Icon = icon!("rect_select");
 pub const ELLIPSE_SELECT: Icon = icon!("ellipse_select");
 pub const MOVE_SELECTION: Icon = icon!("move_selection");
+pub const LAYER_ADD: Icon = icon!("layer_add");
+pub const LAYER_DELETE: Icon = icon!("layer_delete");
+pub const LAYER_DUPLICATE: Icon = icon!("layer_duplicate");
+pub const LAYER_MERGE_DOWN: Icon = icon!("layer_merge_down");
+pub const LAYER_UP: Icon = icon!("layer_up");
+pub const LAYER_DOWN: Icon = icon!("layer_down");
+pub const LAYER_PROPERTIES: Icon = icon!("layer_properties");
 
 #[derive(Default)]
 pub struct Icons {

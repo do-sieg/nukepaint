@@ -4,6 +4,8 @@ use std::{fs, path::{Path, PathBuf}};
 
 use serde::{Deserialize, Serialize};
 
+use crate::dock::DockSide;
+
 const MAX_RECENT_FILES: usize = 10;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -13,6 +15,7 @@ pub struct Settings {
     last_dir: Option<PathBuf>,
     /// Files last opened, most recent first.
     recent_files: Vec<PathBuf>,
+    dock_side: DockSide,
 }
 
 impl Settings {
@@ -69,6 +72,15 @@ impl Settings {
 
     pub fn clear_recent_files(&mut self) {
         self.recent_files.clear();
+        self.save();
+    }
+
+    pub fn dock_side(&self) -> DockSide {
+        self.dock_side
+    }
+
+    pub fn set_dock_side(&mut self, side: DockSide) {
+        self.dock_side = side;
         self.save();
     }
 }

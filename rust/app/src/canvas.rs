@@ -96,7 +96,7 @@ pub fn show(
             paint_checker(painter, rect, CHECKER_CELL / pixels_per_point, checker);
             let transform = image.transform.as_ref();
             if !transform.is_some_and(|transform| transform.paint_preview(painter, &image.view)) {
-                image.texture.paint(painter, rect);
+                image.texture.paint(painter, rect, 1.0);
             }
             response
         });
@@ -189,9 +189,7 @@ fn use_tool(
         };
         if let Some(kind) = kind {
             if image.transform.is_none() {
-                let layer = &image.document.layers[image.document.active_layer].pixels;
-                let layer = shape.is_some().then_some(layer);
-                image.transform = Transform::begin(ui.ctx(), &image.document.selection, layer);
+                image.transform = Transform::begin(ui.ctx(), &image.document, shape.is_some());
             }
             if let Some(transform) = &mut image.transform {
                 transform.press(kind, image.view.point_at(press));
@@ -221,8 +219,7 @@ fn use_tool(
             let clicked = transform.drag_kind().is_some() && response.drag_stopped_by(PointerButton::Primary);
             let (moved, placed) = transform.release();
             if let Some(pixels) = placed {
-                let active = image.document.active_layer;
-                image.document.layers[active].pixels = pixels;
+                image.document.active_mut().pixels = pixels;
                 image.document.unsaved = true;
                 image.refresh(ui.ctx());
             }
