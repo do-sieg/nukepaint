@@ -1,4 +1,5 @@
 mod canvas;
+mod colors_panel;
 mod dock;
 mod image_strip;
 mod frame_select;
@@ -20,7 +21,7 @@ use canvas::Drawing;
 use dock::DockSide;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use power_paint_core::{
-    Affine, Document, FloatingPixels, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, Rgba, RgbaImage,
+    Affine, Document, FloatingPixels, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, PixelRect, RgbaImage,
     SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
@@ -877,8 +878,7 @@ impl App {
         });
     }
 
-    /// The drawing tool's width, whether it smooths its edges, and the colour it draws
-    /// with, as far as it has them.
+    /// The drawing tool's width and whether it smooths its edges, as far as it has them.
     fn drawing_options(&mut self, ui: &mut egui::Ui) {
         let tool = self.tools.tool;
         if let Some(size) = self.tools.tip_size_mut() {
@@ -900,14 +900,6 @@ impl App {
                 "On, the Paintbrush and the Eraser fade the edges of what they draw out over a pixel, and the \
                  Spray's dots can land between pixels. Off, their edges are hard, as the Pencil's always are.",
             );
-        }
-        if tool != Tool::Eraser {
-            ui.separator();
-            ui.label("Color:");
-            let mut color = self.tools.color.0;
-            ui.color_edit_button_srgba_unmultiplied(&mut color)
-                .on_hover_text(format!("What the {} draws with.", tool.name()));
-            self.tools.color = Rgba(color);
         }
     }
 
@@ -993,6 +985,12 @@ impl App {
             if !busy && ctx.input_mut(|input| input.consume_shortcut(&tool.key())) {
                 self.set_tool(tool);
             }
+        }
+        if !busy && ctx.input_mut(|input| input.consume_shortcut(&colors_panel::SWAP_KEY)) {
+            self.tools.colors.swap();
+        }
+        if !busy && ctx.input_mut(|input| input.consume_shortcut(&colors_panel::RESET_KEY)) {
+            self.tools.colors.reset();
         }
         let typing = ctx.memory(|memory| memory.focused().is_some());
         if !typing {
@@ -1323,10 +1321,11 @@ impl eframe::App for App {
             let (mut history_action, mut layers_action) = (None, None);
             let busy = self.is_dragging() || self.has_dialog();
             let image = &self.images[current];
-            let (checker, icons) = (&self.checker, &mut self.icons);
+            let (checker, icons, colors) = (&self.checker, &mut self.icons, &mut self.tools.colors);
             let tooltip = |label: &str, shortcut| format!("{label} ({})", ctx.format_shortcut(&shortcut));
             let (undo, redo) = (tooltip("Undo", UNDO), tooltip("Redo", REDO));
             let moved = dock::show(ui, self.settings.dock_side(), |ui| {
+                dock::section(ui, "Colors", |ui| colors.show(ui));
                 dock::section(ui, "History", |ui| {
                     let document = &image.document;
                     history_action = history_panel::show(ui, document, icons, !busy, scroll_to_current, &undo, &redo);

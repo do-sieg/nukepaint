@@ -1,9 +1,10 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::{Ink, Rgba, SelectionMode};
+use power_paint_core::{Ink, SelectionMode};
 
 use crate::{
+    colors_panel::Colors,
     frame_select::{FrameSelect, Shape},
     icons::{self, Icon},
 };
@@ -108,12 +109,12 @@ impl Tool {
                  any tool."
             }
             Self::Paintbrush => {
-                "Drag to paint lines in the colour, blended over the pixels under it, with smooth edges if \
+                "Drag to paint lines in the primary colour, blended over the pixels under it, with smooth edges if \
                  Antialiasing is on. With a selection, only the selected pixels change. Drag a handle of its box \
                  to resize it, the arrows by its corner to move it, or around it to rotate it."
             }
             Self::Pencil => {
-                "Drag to draw hard-edged lines in the colour, which replaces the pixels under it. With a \
+                "Drag to draw hard-edged lines in the primary colour, which replaces the pixels under it. With a \
                  selection, only the selected pixels change. Drag a handle of its box to resize it, the \
                  arrows by its corner to move it, or around it to rotate it."
             }
@@ -123,7 +124,7 @@ impl Tool {
                  its corner to move it, or around it to rotate it."
             }
             Self::Spray => {
-                "Hold to scatter dots of the colour around the pointer, which build up the longer it stays. With \
+                "Hold to scatter dots of the primary colour around the pointer, which build up the longer it stays. With \
                  a selection, only the selected pixels change. Drag a handle of its box to resize it, the arrows \
                  by its corner to move it, or around it to rotate it."
             }
@@ -164,8 +165,8 @@ pub struct Tools {
     pub selection_mode: SelectionMode,
     pub frame_select: FrameSelect,
     pub zoom_drag: Option<ZoomDrag>,
-    /// What the drawing tools draw with, in straight RGBA.
-    pub color: Rgba<u8>,
+    /// The primary colour, which the drawing tools draw with, and the secondary one.
+    pub colors: Colors,
     /// How wide the Paintbrush, the Pencil and the Eraser draw, and the Spray sprays,
     /// in pixels.
     pub brush_size: u32,
@@ -186,7 +187,7 @@ impl Default for Tools {
             selection_mode: SelectionMode::default(),
             frame_select: FrameSelect::default(),
             zoom_drag: None,
-            color: Rgba([0, 0, 0, 255]),
+            colors: Colors::default(),
             brush_size: 2,
             pencil_size: 1,
             eraser_size: 8,
@@ -239,8 +240,8 @@ impl Tools {
     /// What the tool leaves on the pixels it goes over, for the tools that draw lines.
     pub fn ink(&self) -> Option<Ink> {
         match self.tool {
-            Tool::Paintbrush => Some(Ink::Paint(self.color)),
-            Tool::Pencil => Some(Ink::Replace(self.color)),
+            Tool::Paintbrush => Some(Ink::Paint(self.colors.primary)),
+            Tool::Pencil => Some(Ink::Replace(self.colors.primary)),
             Tool::Eraser => Some(Ink::Erase),
             _ => None,
         }

@@ -417,7 +417,7 @@ fn use_drawing_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenIm
                 }
                 None => {
                     let (size, speed, smooth) = (tools.spray_size, tools.spray_speed, tools.smooth());
-                    let (spray, area) = Spray::begin(layer, at, tools.color, size, speed, smooth, mask, seed());
+                    let (spray, area) = Spray::begin(layer, at, tools.colors.primary, size, speed, smooth, mask, seed());
                     (Drawing::Spray(spray), area)
                 }
             };
@@ -480,7 +480,7 @@ fn use_drawing_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenIm
 /// outside instead.
 fn paint_tip(painter: &Painter, view: &View, at: Pos2, tools: &Tools) {
     let fill = (tools.tool != Tool::Eraser).then(|| {
-        let [red, green, blue, alpha] = tools.color.0;
+        let [red, green, blue, alpha] = tools.colors.primary.0;
         Color32::from_rgba_unmultiplied(red, green, blue, alpha)
     });
     let pixel = 1.0 / painter.pixels_per_point();
