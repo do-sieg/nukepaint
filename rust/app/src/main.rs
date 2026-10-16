@@ -20,6 +20,7 @@ mod lasso;
 mod layer_commands;
 mod layer_properties;
 mod layers_panel;
+mod navigator;
 mod resample_preview;
 mod settings;
 mod shapes;
@@ -2081,7 +2082,7 @@ impl eframe::App for App {
 
         // There is nothing for the dock to work on without an image.
         if let Some(current) = self.current {
-            let (mut tool_clicked, mut history_action, mut layers_action) = (None, None, None);
+            let (mut tool_clicked, mut history_action, mut layers_action, mut navigated) = (None, None, None, None);
             let tool = self.tools.tool;
             let busy = self.is_dragging() || self.has_dialog();
             let image = &self.images[current];
@@ -2099,6 +2100,7 @@ impl eframe::App for App {
                     let enabled = |command: LayerCommand| !busy && command.can_run(&image.document);
                     layers_action = layers_panel::show(ui, image, checker, icons, enabled);
                 }
+                Section::Navigator => navigated = navigator::show(ui, image, checker),
             });
             if self.tools.right_click != right_click_before {
                 self.settings.set_right_click(self.tools.right_click);
@@ -2114,6 +2116,18 @@ impl eframe::App for App {
             }
             if let Some(action) = layers_action {
                 self.layers_panel_action(&ctx, action);
+            }
+            if let Some(action) = navigated {
+                let view = &mut self.images[current].view;
+                match action {
+                    navigator::Action::CenterOn(point) => view.center_on(point),
+                    navigator::Action::StepZoom(steps) => {
+                        for _ in 0..steps.unsigned_abs() {
+                            if steps > 0 { view.zoom_in() } else { view.zoom_out() }
+                        }
+                    }
+                    navigator::Action::ZoomTo(zoom) => view.zoom_to(zoom),
+                }
             }
         }
 

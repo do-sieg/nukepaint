@@ -97,6 +97,28 @@ impl View {
         }
     }
 
+    /// The part of the image in view, in pixels, to a fraction of one.
+    pub fn visible_area(&self) -> Rect {
+        let (left, top) = self.point_at(self.viewport.min);
+        let (right, bottom) = self.point_at(self.viewport.max);
+        let area = Rect::from_min_max(Pos2::new(left as f32, top as f32), Pos2::new(right as f32, bottom as f32));
+        area.intersect(Rect::from_min_size(Pos2::ZERO, self.image_size))
+    }
+
+    /// The part of the image that [`View::center_on`] would bring into view.
+    pub fn area_centered_on(&self, point: Pos2) -> Rect {
+        let size = self.viewport.size() * self.pixels_per_point / self.zoom;
+        let max = (self.image_size - size).max(Vec2::ZERO);
+        let min = (point.to_vec2() - size / 2.0).clamp(Vec2::ZERO, max);
+        Rect::from_min_size(min.to_pos2(), size).intersect(Rect::from_min_size(Pos2::ZERO, self.image_size))
+    }
+
+    /// Scrolls to have a point of the image, in pixels, in the middle of the view, as
+    /// far as scrolling allows.
+    pub fn center_on(&mut self, point: Pos2) {
+        self.pan(self.viewport.center() - self.to_screen(point.x, point.y));
+    }
+
     /// How many pixels of the image a point of the screen takes.
     pub fn pixels_per_screen_point(&self) -> f64 {
         (self.pixels_per_point / self.zoom) as f64
@@ -150,8 +172,7 @@ impl View {
     pub fn zoom_to_rect(&mut self, area: Rect) {
         let fit = self.viewport.size() * self.pixels_per_point / area.size();
         self.set_zoom(fit.x.min(fit.y), self.viewport.center());
-        let center = area.center();
-        self.pan(self.viewport.center() - self.to_screen(center.x, center.y));
+        self.center_on(area.center());
     }
 
     /// Moves to the next zoom level up or down. What is under `anchor`, a point of
@@ -277,6 +298,22 @@ mod tests {
         assert_eq!(view.corner_at(origin + Vec2::new(9.0, 6.0)), (2, 2));
         assert_eq!(view.corner_at(origin + Vec2::new(-50.0, 1000.0)), (0, 50));
         assert_eq!(view.to_screen(2.0, 2.0), origin + Vec2::new(8.0, 8.0));
+    }
+
+    #[test]
+    fn center_on_shows_the_area_it_said() {
+        let mut view = placed(Vec2::new(1000.0, 1000.0), Vec2::new(400.0, 200.0));
+        view.zoom_to(1.0);
+        let point = Pos2::new(700.0, 100.0);
+        let area = view.area_centered_on(point);
+        assert_eq!(area, Rect::from_min_size(Pos2::new(500.0, 0.0), Vec2::new(400.0, 200.0)));
+        view.center_on(point);
+        assert_eq!(view.visible_area(), area);
+        // Near an edge, as far as scrolling allows.
+        let area = view.area_centered_on(Pos2::new(990.0, 990.0));
+        assert_eq!(area, Rect::from_min_size(Pos2::new(600.0, 800.0), Vec2::new(400.0, 200.0)));
+        view.center_on(Pos2::new(990.0, 990.0));
+        assert_eq!(view.visible_area(), area);
     }
 
     #[test]

@@ -83,10 +83,11 @@ pub enum Section {
     Colors,
     History,
     Layers,
+    Navigator,
 }
 
 impl Section {
-    pub const ALL: [Self; 4] = [Self::Tools, Self::Colors, Self::History, Self::Layers];
+    pub const ALL: [Self; 5] = [Self::Tools, Self::Colors, Self::History, Self::Layers, Self::Navigator];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -94,6 +95,7 @@ impl Section {
             Self::Colors => "Colors",
             Self::History => "History",
             Self::Layers => "Layers",
+            Self::Navigator => "Navigator",
         }
     }
 }
@@ -460,9 +462,9 @@ mod tests {
     fn move_section_within_and_between_docks() {
         let mut layout = DockLayout::default();
         layout.move_section(Layers, DockSide::Left, 0);
-        assert_eq!(layout.sections(DockSide::Left), [Layers, Tools, Colors, History]);
+        assert_eq!(layout.sections(DockSide::Left), [Layers, Tools, Colors, History, Navigator]);
         layout.move_section(Colors, DockSide::Bottom, 5);
-        assert_eq!(layout.sections(DockSide::Left), [Layers, Tools, History]);
+        assert_eq!(layout.sections(DockSide::Left), [Layers, Tools, History, Navigator]);
         assert_eq!(layout.sections(DockSide::Bottom), [Colors]);
         layout.move_section(Tools, DockSide::Bottom, 0);
         assert_eq!(layout.sections(DockSide::Bottom), [Tools, Colors]);
@@ -472,7 +474,7 @@ mod tests {
     fn normalize_has_each_section_once() {
         let mut layout = DockLayout { left: vec![Colors], right: vec![Colors, Layers], top: vec![], bottom: vec![], ..DockLayout::default() };
         layout.normalize();
-        assert_eq!(layout.sections(DockSide::Left), [Colors, Tools, History]);
+        assert_eq!(layout.sections(DockSide::Left), [Colors, Tools, History, Navigator]);
         assert_eq!(layout.sections(DockSide::Right), [Layers]);
     }
 

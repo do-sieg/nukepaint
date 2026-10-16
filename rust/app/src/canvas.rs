@@ -19,7 +19,7 @@
 //! selection tools put their corners on its cells' corners.
 
 use eframe::egui::{
-    self, Color32, ColorImage, CursorIcon, Event, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
+    self, Color32, ColorImage, CursorIcon, Event, Id, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
 use power_paint_core::{
@@ -1727,15 +1727,26 @@ fn clip_segment(from: Pos2, to: Pos2, clip: Rect) -> Option<(f32, f32)> {
 /// Zooms a level in or out at each notch of the wheel turned with Ctrl held, and
 /// along with a pinch.
 fn zoom_with_wheel(ui: &egui::Ui, view: &mut View, pointer: Pos2) {
-    let id = ui.id().with("zoom_scroll");
-    // What a touchpad scrolled short of a whole step, kept for the next frames.
+    let (steps, pinch) = wheel_zoom(ui, ui.id().with("zoom_scroll"), true);
+    for _ in 0..steps.unsigned_abs() {
+        view.step_zoom(steps.signum(), pointer);
+    }
+    if pinch != 1.0 {
+        view.set_zoom(view.zoom * pinch, pointer);
+    }
+}
+
+/// How many zoom levels the wheel went up or down this frame, with Ctrl held if
+/// `needs_command`, and by how much a pinch scaled. What a touchpad scrolled short
+/// of a whole level is kept under `id` for the next frames.
+pub fn wheel_zoom(ui: &egui::Ui, id: Id, needs_command: bool) -> (i32, f32) {
     let mut leftover: f32 = ui.data(|data| data.get_temp(id).unwrap_or(0.0));
     let mut steps = 0;
     let mut pinch = 1.0;
     ui.input(|input| {
         for event in &input.events {
             match event {
-                Event::MouseWheel { unit, delta, modifiers, .. } if modifiers.command => match unit {
+                Event::MouseWheel { unit, delta, modifiers, .. } if modifiers.command || !needs_command => match unit {
                     egui::MouseWheelUnit::Point => {
                         leftover += delta.y;
                         let whole = (leftover / POINTS_PER_ZOOM_STEP).trunc();
@@ -1750,12 +1761,7 @@ fn zoom_with_wheel(ui: &egui::Ui, view: &mut View, pointer: Pos2) {
         }
     });
     ui.data_mut(|data| data.insert_temp(id, leftover));
-    for _ in 0..steps.unsigned_abs() {
-        view.step_zoom(steps.signum(), pointer);
-    }
-    if pinch != 1.0 {
-        view.set_zoom(view.zoom * pinch, pointer);
-    }
+    (steps, pinch)
 }
 
 /// The largest rectangle of the image's proportions that fits in `room`, centered.
