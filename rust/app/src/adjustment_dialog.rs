@@ -27,7 +27,8 @@ const CHANNEL_COLORS: [Color32; 3] =
     [Color32::from_rgb(255, 77, 77), Color32::from_rgb(77, 255, 77), Color32::from_rgb(102, 128, 255)];
 
 /// A number a dialog asks for, as `input` says, on a slider from `min` to `max`,
-/// going up and down by `step`, with `suffix` shown after it.
+/// going up and down by `step`, with `suffix` shown after it, which can be changed
+/// only while the box to check at `enabled_by`, if any, is checked.
 pub struct Setting {
     pub label: &'static str,
     pub min: f64,
@@ -36,6 +37,14 @@ pub struct Setting {
     pub default: f64,
     pub suffix: &'static str,
     pub input: Input,
+    pub enabled_by: Option<usize>,
+}
+
+impl Setting {
+    /// The same, which can be changed only while the box to check at `index` is checked.
+    pub const fn enabled_by(self, index: usize) -> Self {
+        Self { enabled_by: Some(index), ..self }
+    }
 }
 
 /// How a dialog asks for a setting.
@@ -52,21 +61,21 @@ pub enum Input {
 }
 
 pub const fn slider(label: &'static str, min: f64, max: f64, step: f64, default: f64, suffix: &'static str) -> Setting {
-    Setting { label, min, max, step, default, suffix, input: Input::Slider }
+    Setting { label, min, max, step, default, suffix, input: Input::Slider, enabled_by: None }
 }
 
 pub const fn check(label: &'static str, default: bool) -> Setting {
     let default = if default { 1.0 } else { 0.0 };
-    Setting { label, min: 0.0, max: 1.0, step: 1.0, default, suffix: "", input: Input::Check }
+    Setting { label, min: 0.0, max: 1.0, step: 1.0, default, suffix: "", input: Input::Check, enabled_by: None }
 }
 
 pub const fn choice(label: &'static str, choices: &'static [&'static str], default: usize) -> Setting {
     let max = choices.len() as f64 - 1.0;
-    Setting { label, min: 0.0, max, step: 1.0, default: default as f64, suffix: "", input: Input::Choice(choices) }
+    Setting { label, min: 0.0, max, step: 1.0, default: default as f64, suffix: "", input: Input::Choice(choices), enabled_by: None }
 }
 
 pub const fn layer(label: &'static str) -> Setting {
-    Setting { label, min: 0.0, max: 0.0, step: 1.0, default: -1.0, suffix: "", input: Input::Layer }
+    Setting { label, min: 0.0, max: 0.0, step: 1.0, default: -1.0, suffix: "", input: Input::Layer, enabled_by: None }
 }
 
 /// What a dialog asks the settings of: an adjustment of the Colors menu or an effect
@@ -263,14 +272,19 @@ impl Dialog {
     /// Returns whether a setting changed.
     fn settings_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut edited = false;
+        let settings = self.kind.settings();
+        let enabled: Vec<bool> =
+            settings.iter().map(|setting| setting.enabled_by.is_none_or(|index| self.values[index] != 0.0)).collect();
         egui::Grid::new("adjustment_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-            for (setting, value) in self.kind.settings().iter().zip(&mut self.values) {
+            for ((setting, value), enabled) in settings.iter().zip(&mut self.values).zip(enabled) {
+                // A box to check shows its label beside it instead.
+                let label = if setting.input == Input::Check { "" } else { setting.label };
+                ui.add_enabled_ui(enabled, |ui| ui.label(label));
                 match setting.input {
                     Input::Slider => {}
                     Input::Check => {
-                        ui.label("");
                         let mut checked = *value != 0.0;
-                        if ui.checkbox(&mut checked, setting.label).changed() {
+                        if ui.add_enabled(enabled, egui::Checkbox::new(&mut checked, setting.label)).changed() {
                             *value = if checked { 1.0 } else { 0.0 };
                             edited = true;
                         }
@@ -278,21 +292,18 @@ impl Dialog {
                         continue;
                     }
                     Input::Choice(choices) => {
-                        ui.label(setting.label);
-                        edited |= pick(ui, setting.label, value, choices);
+                        edited |= ui.add_enabled_ui(enabled, |ui| pick(ui, setting.label, value, choices)).inner;
                         ui.end_row();
                         continue;
                     }
                     Input::Layer => {
-                        ui.label(setting.label);
                         let names: Vec<&str> = self.layer_names.iter().map(String::as_str).collect();
-                        edited |= pick(ui, setting.label, value, &names);
+                        edited |= ui.add_enabled_ui(enabled, |ui| pick(ui, setting.label, value, &names)).inner;
                         ui.end_row();
                         continue;
                     }
                 }
-                ui.label(setting.label);
-                ui.horizontal(|ui| {
+                ui.add_enabled_ui(enabled, |ui| ui.horizontal(|ui| {
                     ui.spacing_mut().slider_width = SLIDER_WIDTH;
                     let range = setting.min..=setting.max;
                     let slider = egui::Slider::new(value, range.clone()).step_by(setting.step).show_value(false);
@@ -305,7 +316,7 @@ impl Dialog {
                         .suffix(setting.suffix);
                     let height = ui.spacing().interact_size.y;
                     edited |= ui.add_sized([VALUE_WIDTH, height], field).changed();
-                });
+                }));
                 ui.end_row();
             }
         });

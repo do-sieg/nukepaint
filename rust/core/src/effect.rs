@@ -1,10 +1,12 @@
-//! The blurs, the Sharpen and the Offset of the Filters menu, which, unlike the adjustments, look at
+//! The effects of the Filters menu, which, unlike the adjustments, look at
 //! the pixels around each one, as `effect.gdshader` does on the GPU in the Godot
 //! version. The colours are multiplied by how opaque they are while they are mixed, so
 //! see-through pixels add nothing to those around them, and divided out again at the
 //! end. Past its edges, the image goes on as its edge pixels. Points between pixels are
 //! read between the four around them. Large images are cut into bands of rows, worked
 //! out at the same time on as many threads as there are cores.
+
+mod artistic;
 
 use std::{
     f32::consts::TAU,
@@ -88,6 +90,51 @@ pub enum Effect {
     /// within the rectangle around the selected ones, or the whole image, filling where
     /// they move away from as `edges` says.
     Offset { x: i32, y: i32, edges: OffsetEdges },
+    /// Lays the image on woven canvas, lit from `azimuth`, which stands out by `depth`.
+    ApplyCanvas { azimuth: f32, depth: f32 },
+    /// Darkens what is darker than around it, `radius` away, as the outlines of a
+    /// cartoon: the darkest `black` share of the pixels black.
+    Cartoon { radius: f32, black: f32 },
+    /// Lights the image as if it were woven cloth, of threads as long as `blur` across
+    /// and down, lit from `azimuth` and `elevation`, in degrees, which stand out by `depth`.
+    Clothify { blur: [f32; 2], azimuth: f32, elevation: f32, depth: f32 },
+    /// Rectangles turned every way, about `size` apart, as large as `saturation` times
+    /// that at most, each the colour of the image at its middle, on `background`.
+    Cubism { size: f32, saturation: f32, background: [u8; 4] },
+    /// Shows the image through tiles of glass this large, each a lens.
+    GlassTile { width: f32, height: f32 },
+    /// Lays the image, blurred, made brighter and more contrasted, from -100 to 100,
+    /// over itself as a screen does.
+    Glow { radius: f32, brightness: f32, contrast: f32 },
+    /// Ink lines along the edges, stronger the more ink, over the colours faded towards
+    /// white the less coloring there is.
+    InkSketch { ink: f32, coloring: f32 },
+    /// Each pixel the average of those within the radius whose lightness, cut into
+    /// `levels` steps, is the most common there.
+    OilPainting { radius: f32, levels: u32 },
+    /// Grey pencil lines on white, as wide as the tip, darker or lighter as `range`,
+    /// from -20 to 20, says.
+    PencilSketch { tip: f32, range: f32 },
+    /// Black where the image is darker than around it, `radius` away, the darkest
+    /// `black` share of the pixels, and its tones elsewhere faded towards white by
+    /// `white`. The sharper, the less the image is blurred before.
+    Photocopy { radius: f32, sharpness: f32, black: f32, white: f32 },
+    /// Bright edges on black, `amount` times as strong, in squares `pixel_size` wide.
+    Predator { amount: f32, pixel_size: u32 },
+    /// Clusters of pixels about `size` across that are close in colour, rounder the
+    /// more compact, each its average colour, moved `iterations` times.
+    Slic { size: u32, compactness: f32, iterations: u32 },
+    /// Brush strokes `length` long either side of each pixel, along the edges, shaded
+    /// by noise as much as `strength` says.
+    VanGogh { length: f32, strength: f32 },
+    /// Regions about `size` across grown out to where the image, blurred by
+    /// `smoothness`, changes most, squarer the more regularization, each its average
+    /// colour, or a random one.
+    Waterpixels { size: u32, smoothness: f32, regularization: f32, random: bool },
+    /// Shades the image as if woven of ribbons `width` wide with `spacing` between
+    /// them, which darken by `darkness` over `depth` of the way down as they go under
+    /// each other, with fibres as dark as `threads` says.
+    Weave { width: f32, spacing: f32, darkness: f32, depth: f32, threads: f32 },
 }
 
 /// How the Focus Blur measures how far a pixel is from the centre, which gives the
@@ -336,6 +383,21 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         }
         Effect::Sharpen { amount, .. } if amount.abs() < f32::EPSILON => return Some(None),
         Effect::Offset { .. } => return Some(None),
+        Effect::ApplyCanvas { .. }
+        | Effect::Cartoon { .. }
+        | Effect::Clothify { .. }
+        | Effect::Cubism { .. }
+        | Effect::GlassTile { .. }
+        | Effect::Glow { .. }
+        | Effect::InkSketch { .. }
+        | Effect::OilPainting { .. }
+        | Effect::PencilSketch { .. }
+        | Effect::Photocopy { .. }
+        | Effect::Predator { .. }
+        | Effect::Slic { .. }
+        | Effect::VanGogh { .. }
+        | Effect::Waterpixels { .. }
+        | Effect::Weave { .. } => artistic::render(source, effect, stop),
         Effect::Sharpen { radius, amount, threshold } => {
             let blurred = if radius < 1.0 { None } else { Some(blur(source, Weighing::Gaussian, radius, 1.0, stop)?) };
             let blurred = blurred.as_ref().unwrap_or(source);
@@ -892,6 +954,27 @@ mod tests {
         ]
     }
 
+    /// One of each effect of the Artistic menu, most of which change even colours too.
+    fn artistic() -> Vec<Effect> {
+        vec![
+            Effect::ApplyCanvas { azimuth: 135.0, depth: 4.0 },
+            Effect::Cartoon { radius: 7.0, black: 20.0 },
+            Effect::Clothify { blur: [9.0, 9.0], azimuth: 135.0, elevation: 45.0, depth: 3.0 },
+            Effect::Cubism { size: 10.0, saturation: 2.5, background: [0, 0, 0, 0] },
+            Effect::GlassTile { width: 25.0, height: 25.0 },
+            Effect::Glow { radius: 6.0, brightness: 10.0, contrast: 10.0 },
+            Effect::InkSketch { ink: 50.0, coloring: 50.0 },
+            Effect::OilPainting { radius: 3.0, levels: 50 },
+            Effect::PencilSketch { tip: 2.0, range: 0.0 },
+            Effect::Photocopy { radius: 8.0, sharpness: 50.0, black: 20.0, white: 20.0 },
+            Effect::Predator { amount: 2.0, pixel_size: 3 },
+            Effect::Slic { size: 8, compactness: 20.0, iterations: 2 },
+            Effect::VanGogh { length: 6.0, strength: 50.0 },
+            Effect::Waterpixels { size: 8, smoothness: 1.0, regularization: 0.0, random: false },
+            Effect::Weave { width: 12.0, spacing: 4.0, darkness: 75.0, depth: 75.0, threads: 50.0 },
+        ]
+    }
+
     fn white_map(width: u32, height: u32) -> Arc<RgbaImage> {
         Arc::new(RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255])))
     }
@@ -1008,7 +1091,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &all() {
+        for effect in &[all(), artistic()].concat() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -1018,7 +1101,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &all() {
+        for effect in &[all(), artistic()].concat() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -1108,5 +1191,99 @@ mod tests {
         let within = apply_effect(&pixels, &Effect::TileableBlur { radius: 3.0 }, Some(&mask), &AtomicBool::new(false)).unwrap();
         assert_eq!(within[(10, 5)], blurred[(20, 5)]);
         assert_eq!(within[(20, 5)], pixels[(20, 5)]);
+    }
+
+    #[test]
+    fn artistic_effects_leave_see_through_pixels_see_through() {
+        let pixels = RgbaImage::new(40, 30);
+        for effect in &artistic() {
+            assert_eq!(apply(&pixels, effect), pixels, "{effect:?}");
+        }
+    }
+
+    #[test]
+    fn artistic_effects_that_only_move_colours_keep_an_even_one() {
+        let pixels = RgbaImage::from_pixel(40, 30, Rgba([200, 100, 50, 180]));
+        for effect in [
+            Effect::Cartoon { radius: 7.0, black: 20.0 },
+            Effect::GlassTile { width: 12.0, height: 10.0 },
+            Effect::OilPainting { radius: 3.0, levels: 50 },
+            Effect::Slic { size: 8, compactness: 20.0, iterations: 2 },
+            Effect::Waterpixels { size: 8, smoothness: 1.0, regularization: 5.0, random: false },
+            Effect::Cubism { size: 4.0, saturation: 3.0, background: [200, 100, 50, 180] },
+        ] {
+            assert_eq!(apply(&pixels, &effect), pixels, "{effect:?}");
+        }
+    }
+
+    #[test]
+    fn sketches_and_photocopies_draw_dark_lines_on_white() {
+        // A dark line down a light grey image.
+        let pixels = RgbaImage::from_fn(41, 21, |x, _| if x == 20 { Rgba([20, 20, 20, 255]) } else { Rgba([200, 200, 200, 255]) });
+        for effect in [
+            Effect::PencilSketch { tip: 2.0, range: 0.0 },
+            Effect::Photocopy { radius: 8.0, sharpness: 50.0, black: 5.0, white: 20.0 },
+            Effect::InkSketch { ink: 100.0, coloring: 0.0 },
+        ] {
+            let drawn = apply(&pixels, &effect);
+            assert_eq!(drawn[(2, 10)], Rgba([255, 255, 255, 255]), "{effect:?}");
+            assert!(drawn[(20, 10)][0] < 128 || drawn[(19, 10)][0] < 128, "{effect:?}: {:?}", drawn[(20, 10)]);
+        }
+        let photocopy = apply(&pixels, &Effect::Photocopy { radius: 8.0, sharpness: 50.0, black: 5.0, white: 20.0 });
+        assert_eq!(photocopy[(20, 10)], Rgba([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn a_cartoon_outlines_what_is_darker_than_around_it() {
+        let pixels = RgbaImage::from_fn(41, 21, |x, _| if x < 20 { Rgba([60, 60, 200, 255]) } else { Rgba([240, 240, 100, 255]) });
+        let cartoon = apply(&pixels, &Effect::Cartoon { radius: 7.0, black: 10.0 });
+        // The darker side of the edge goes black, the lighter one and those far from it stay.
+        assert_eq!(cartoon[(19, 10)], Rgba([0, 0, 0, 255]));
+        assert_eq!(cartoon[(21, 10)], pixels[(21, 10)]);
+        assert_eq!(cartoon[(2, 10)], pixels[(2, 10)]);
+    }
+
+    #[test]
+    fn clusters_keep_to_the_edges_between_colours() {
+        let pixels = RgbaImage::from_fn(32, 16, |x, _| if x < 16 { Rgba([200, 30, 30, 255]) } else { Rgba([30, 30, 200, 255]) });
+        for effect in [
+            Effect::Slic { size: 8, compactness: 20.0, iterations: 3 },
+            Effect::Waterpixels { size: 8, smoothness: 1.0, regularization: 0.0, random: false },
+        ] {
+            assert_eq!(apply(&pixels, &effect), pixels, "{effect:?}");
+        }
+        let random = apply(&pixels, &Effect::Waterpixels { size: 8, smoothness: 1.0, regularization: 0.0, random: true });
+        assert_ne!(random[(0, 0)], random[(31, 0)]);
+    }
+
+    #[test]
+    fn a_cubism_without_rectangles_is_all_background() {
+        let pixels = dot();
+        let background = [10, 20, 30, 255];
+        let cubism = apply(&pixels, &Effect::Cubism { size: 5.0, saturation: 0.0, background });
+        assert!(cubism.pixels().all(|pixel| pixel.0 == background));
+    }
+
+    #[test]
+    fn a_predator_sees_only_edges() {
+        let predator = apply(&dot(), &Effect::Predator { amount: 2.0, pixel_size: 1 });
+        assert_eq!(predator[(2, 2)], Rgba([0, 0, 0, 255]));
+        // A white dot's edges have all three channels as strong.
+        let edge = predator[(11, 10)];
+        assert!(edge[0] > 0 && edge[0] == edge[1] && edge[1] == edge[2], "{edge:?}");
+    }
+
+    #[test]
+    fn textures_keep_how_opaque_each_pixel_is() {
+        let pixels = RgbaImage::from_fn(40, 40, |x, y| Rgba([180, 120, 60, (x * 6 + y) as u8]));
+        for effect in [
+            Effect::ApplyCanvas { azimuth: 45.0, depth: 10.0 },
+            Effect::Clothify { blur: [9.0, 3.0], azimuth: 135.0, elevation: 30.0, depth: 5.0 },
+            Effect::Weave { width: 10.0, spacing: 3.0, darkness: 75.0, depth: 75.0, threads: 50.0 },
+        ] {
+            let textured = apply(&pixels, &effect);
+            assert!(textured.pixels().zip(pixels.pixels()).all(|(a, b)| a[3] == b[3]), "{effect:?}");
+            assert_ne!(textured, pixels, "{effect:?}");
+        }
     }
 }
