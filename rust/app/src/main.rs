@@ -1,8 +1,11 @@
+mod adjustment_dialog;
+mod adjustments;
 mod canvas;
 mod checkerboard;
 mod clipboard;
 mod colors_panel;
 mod composite;
+mod curve_editor;
 mod dock;
 mod image_strip;
 mod frame_select;
@@ -26,6 +29,7 @@ mod view;
 
 use std::path::{Path, PathBuf};
 
+use adjustments::{AdjustmentKind, LastSettings};
 use canvas::Drawing;
 use dock::{DockLayout, DockSide, Section};
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
@@ -34,7 +38,7 @@ use clipboard::Clipboard;
 use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
-    Affine, Document, FloatingPixels, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
+    Affine, Document, FloatingPixels, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
     RgbaImage, SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
@@ -454,6 +458,10 @@ struct App {
     grid_dialog: Option<grid_settings::Dialog>,
     /// Set while the checkerboard behind the image is being changed.
     checkerboard_dialog: Option<checkerboard::Dialog>,
+    /// Set while the settings of an adjustment are being tried out.
+    adjustment_dialog: Option<adjustment_dialog::Dialog>,
+    /// What each adjustment's dialog opens with.
+    last_adjustments: LastSettings,
 }
 
 impl App {
@@ -488,6 +496,8 @@ impl App {
             size_dialog: None,
             grid_dialog: None,
             checkerboard_dialog: None,
+            adjustment_dialog: None,
+            last_adjustments: LastSettings::default(),
         }
     }
 
@@ -1199,7 +1209,11 @@ impl App {
 
     /// Whether a dialog is open, which nothing else may change the images under.
     fn has_dialog(&self) -> bool {
-        self.layer_dialog.is_some() || self.size_dialog.is_some() || self.grid_dialog.is_some() || self.checkerboard_dialog.is_some()
+        self.layer_dialog.is_some()
+            || self.size_dialog.is_some()
+            || self.grid_dialog.is_some()
+            || self.checkerboard_dialog.is_some()
+            || self.adjustment_dialog.is_some()
     }
 
     /// Puts the layer back as it was and closes the layer properties dialog, if it is open.
@@ -1208,6 +1222,101 @@ impl App {
             let image = &mut self.images[dialog.image];
             dialog.before.apply(&mut image.document.layers[dialog.layer]);
             image.refresh_image();
+        }
+    }
+
+    fn adjustments_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.menu_button("Colors", |ui| {
+            for kind in AdjustmentKind::MENU {
+                let mut button = egui::Button::new(kind.label());
+                if let Some(shortcut) = kind.shortcut() {
+                    button = button.shortcut_text(ctx.format_shortcut(&shortcut));
+                }
+                if ui.add_enabled(self.can_adjust(), button).clicked() {
+                    self.adjust(&ctx, kind);
+                }
+            }
+        });
+    }
+
+    fn can_adjust(&self) -> bool {
+        self.current.is_some() && !self.is_dragging() && !self.has_dialog()
+    }
+
+    /// Adjusts the active layer of the current image, inside the selection if there is
+    /// one, at once for an adjustment without settings, or else once its dialog says so.
+    fn adjust(&mut self, ctx: &egui::Context, kind: AdjustmentKind) {
+        if !self.can_adjust() {
+            return;
+        }
+        let current = self.current.unwrap();
+        let image = &mut self.images[current];
+        // A transform would go on with the pixels of the layer as they were.
+        image.transform = None;
+        image.cancel_lasso();
+        image.drop_shape();
+        let document = &mut image.document;
+        if !kind.has_dialog() {
+            if document.adjust(&kind.adjustment(&[], &self.last_adjustments.curves)) {
+                document.commit(kind.name(), None);
+                image.refresh(ctx);
+            }
+            return;
+        }
+        let values = self.last_adjustments.values(kind);
+        let curves = self.last_adjustments.curves.clone();
+        let dialog = adjustment_dialog::Dialog::new(current, document.active_layer, kind, values, curves, document.selection_mask());
+        self.adjustment_dialog = Some(dialog);
+        self.preview_adjustment();
+    }
+
+    /// Shows the layer as the adjustment dialog's settings make it.
+    fn preview_adjustment(&mut self) {
+        let Some(dialog) = &mut self.adjustment_dialog else {
+            return;
+        };
+        let image = &mut self.images[dialog.image];
+        let layers = &image.document.layers;
+        let adjustment = dialog.kind.adjustment(&dialog.values, &dialog.curves);
+        let preview = adjust(&layers[dialog.layer].pixels, &adjustment, dialog.mask.as_ref());
+        image.texture.show_layer_as(layers, dialog.layer, &preview, None);
+        dialog.preview = Some(preview);
+    }
+
+    /// Shows the adjustment dialog while it is open, and the layer as it says.
+    fn adjustment_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.adjustment_dialog else {
+            return;
+        };
+        match dialog.show(ctx) {
+            None => {}
+            Some(adjustment_dialog::Outcome::Edited) => self.preview_adjustment(),
+            Some(adjustment_dialog::Outcome::Accepted) => {
+                let dialog = self.adjustment_dialog.take().unwrap();
+                let image = &mut self.images[dialog.image];
+                let layer = &mut image.document.layers[dialog.layer];
+                if let Some(preview) = dialog.preview
+                    && preview != layer.pixels
+                {
+                    layer.pixels = preview;
+                    image.document.commit(dialog.kind.name(), None);
+                }
+                image.refresh(ctx);
+                self.last_adjustments.set_values(dialog.kind, dialog.values);
+                if dialog.kind == AdjustmentKind::Curves {
+                    self.last_adjustments.curves = dialog.curves;
+                }
+            }
+            Some(adjustment_dialog::Outcome::Canceled) => self.cancel_adjustment_dialog(),
+        }
+    }
+
+    /// Shows the layer as it is again and closes the adjustment dialog, if it is open.
+    fn cancel_adjustment_dialog(&mut self) {
+        if let Some(dialog) = self.adjustment_dialog.take() {
+            let image = &mut self.images[dialog.image];
+            image.texture.update_layer(&image.document.layers, dialog.layer, None);
         }
     }
 
@@ -1575,6 +1684,14 @@ impl App {
                 };
                 self.edit(ctx, command);
             }
+            // Before the layer commands, as Merge Layer Down takes M with Ctrl, which Curves takes with Shift as well.
+            for kind in AdjustmentKind::MENU {
+                if let Some(shortcut) = kind.shortcut()
+                    && ctx.input_mut(|input| input.consume_shortcut(&shortcut))
+                {
+                    self.adjust(ctx, kind);
+                }
+            }
             for commands in LayerCommand::MENU.into_iter().chain(LayerCommand::IMAGE_MENU) {
                 for &command in commands {
                     if let Some(shortcut) = command.shortcut()
@@ -1849,6 +1966,7 @@ impl eframe::App for App {
                 self.edit_menu(ui);
                 self.layer_command_menu(ui, "Image", &LayerCommand::IMAGE_MENU);
                 self.layer_command_menu(ui, "Layers", &LayerCommand::MENU);
+                self.adjustments_menu(ui);
                 self.view_menu(ui);
                 let action = image_strip::show(ui, &self.images, self.current, scroll_to_current, &self.checker);
                 match action {
@@ -1933,8 +2051,10 @@ impl eframe::App for App {
             self.size_dialog = None;
             self.grid_dialog = None;
             self.checkerboard_dialog = None;
+            self.cancel_adjustment_dialog();
         }
         self.layer_dialog(&ctx);
+        self.adjustment_dialog(&ctx);
         self.size_dialog(&ctx);
         self.grid_dialog(&ctx);
         self.checkerboard_dialog(&ctx);

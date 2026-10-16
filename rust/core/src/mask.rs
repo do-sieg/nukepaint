@@ -36,6 +36,11 @@ impl SelectionMask {
         x < self.width && y < self.height && self.selected[(y * self.width + x) as usize]
     }
 
+    /// Whether each pixel of the image is selected, row after row.
+    pub(crate) fn flags(&self) -> &[bool] {
+        &self.selected
+    }
+
     /// Puts the pixels of `area` that are not selected back as they were in `before`,
     /// undoing what changed them. Both images must be as large as the mask.
     pub fn restore_unselected(&self, before: &RgbaImage, after: &mut RgbaImage, area: PixelRect) {

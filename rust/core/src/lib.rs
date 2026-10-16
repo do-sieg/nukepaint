@@ -1,5 +1,6 @@
 //! Document model and pixel operations. No UI code here.
 
+mod adjustment;
 mod affine;
 mod blend;
 mod document;
@@ -17,6 +18,7 @@ mod shape;
 mod spray;
 mod stroke;
 
+pub use adjustment::{Adjustment, Curves, adjust, sample_curve};
 pub use affine::Affine;
 pub use blend::{blend_layer, composite, composite_area};
 pub use document::Document;

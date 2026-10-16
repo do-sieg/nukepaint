@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use image::{RgbaImage, imageops};
 
 use crate::{
-    Affine, BlendMode, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
+    Adjustment, Affine, BlendMode, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
     SelectionMode, Step, blend_layer, composite, composite_area, copy_selected, erase_selected, history::History,
-    load_image, resize, save_image,
+    adjust, load_image, resize, save_image,
 };
 
 /// An image being edited: its layers, bottom first, the file it came from, and the
@@ -308,6 +308,18 @@ impl Document {
         if vertically {
             imageops::flip_vertical_in_place(pixels);
         }
+    }
+
+    /// Changes the colours of the active layer's selected pixels, or of all of them
+    /// while nothing is selected, as the adjustment does. Returns whether any changed.
+    pub fn adjust(&mut self, adjustment: &Adjustment) -> bool {
+        let mask = self.selection_mask();
+        let adjusted = adjust(&self.active().pixels, adjustment, mask.as_ref());
+        if adjusted == self.active().pixels {
+            return false;
+        }
+        self.active_mut().pixels = adjusted;
+        true
     }
 
     /// Mirrors the whole image, every layer and the selection, along either axis or
