@@ -1,5 +1,6 @@
 mod canvas;
 mod checkerboard;
+mod clipboard;
 mod colors_panel;
 mod composite;
 mod dock;
@@ -29,6 +30,7 @@ use canvas::Drawing;
 use dock::{DockLayout, DockSide, Section};
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use checkerboard::Checkerboard;
+use clipboard::Clipboard;
 use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
@@ -442,8 +444,8 @@ struct App {
     pointer_pixel: Option<(i64, i64)>,
     icons: Icons,
     tools: Tools,
-    /// The pixels copied last, kept in the app until the system clipboard takes images.
-    clipboard: Option<RgbaImage>,
+    /// The pixels to paste, from the app or other applications.
+    clipboard: Clipboard,
     /// Set while the properties of a layer are being edited.
     layer_dialog: Option<layer_properties::Dialog>,
     /// Set while asking for a new size of an image or its canvas.
@@ -481,7 +483,7 @@ impl App {
             pointer_pixel: None,
             icons: Icons::default(),
             tools,
-            clipboard: None,
+            clipboard: Clipboard::new(),
             layer_dialog: None,
             size_dialog: None,
             grid_dialog: None,
@@ -888,7 +890,7 @@ impl App {
 
     fn can_edit(&self, command: EditCommand) -> bool {
         if command == EditCommand::PasteIntoNewImage {
-            return self.clipboard.is_some();
+            return self.clipboard.image().is_some();
         }
         let Some(current) = self.current else {
             return false;
@@ -899,7 +901,7 @@ impl App {
             EditCommand::Undo => self.can_go_to_step() && document.can_undo(),
             EditCommand::Redo => self.can_go_to_step() && document.can_redo(),
             // A drag would carry on with pixels that are no longer there, or not yet.
-            EditCommand::Paste | EditCommand::PasteIntoNewLayer => self.clipboard.is_some() && !self.is_dragging(),
+            EditCommand::Paste | EditCommand::PasteIntoNewLayer => self.clipboard.image().is_some() && !self.is_dragging(),
             // A drag would carry on with the selection it began with.
             EditCommand::Cut | EditCommand::EraseSelection | EditCommand::Deselect if self.is_dragging() => false,
             EditCommand::SelectAll | EditCommand::InvertSelection => !self.is_dragging(),
@@ -918,7 +920,7 @@ impl App {
             }
             EditCommand::Paste => self.paste(ctx, false),
             EditCommand::PasteIntoNewLayer => self.paste(ctx, true),
-            EditCommand::PasteIntoNewImage => self.add_image(ctx, Document::pasted(self.clipboard.clone().unwrap())),
+            EditCommand::PasteIntoNewImage => self.add_image(ctx, Document::pasted(self.clipboard.image().unwrap().clone())),
             EditCommand::Cut | EditCommand::Copy | EditCommand::CopyMerged | EditCommand::EraseSelection => {
                 self.copy_or_erase(ctx, command);
             }
@@ -952,8 +954,8 @@ impl App {
             _ => None,
         };
         // Nothing replaces what was copied before when the selection is off the image.
-        if copied.is_some() {
-            self.clipboard = copied;
+        if let Some(copied) = copied {
+            self.clipboard.set(copied);
         }
         if matches!(command, EditCommand::Cut | EditCommand::EraseSelection) && document.erase_selection() {
             let (name, icon) = if command == EditCommand::Cut { ("Cut", icons::CUT) } else { ("Erase Selection", icons::ERASE) };
@@ -988,7 +990,7 @@ impl App {
         let bounds = document.selection.bounds();
         let at = bounds.map_or((0, 0), |bounds| (bounds.left.floor() as i32, bounds.top.floor() as i32));
         let layer = &mut document.active_mut().pixels;
-        let floating = FloatingPixels::pasted(layer, self.clipboard.clone().unwrap(), at);
+        let floating = FloatingPixels::pasted(layer, self.clipboard.image().unwrap().clone(), at);
         *layer = floating.place(&Affine::IDENTITY, Interpolation::Nearest);
         let transform = Transform::begin_pasted(ctx, floating, document);
         document.selection = transform.selection();
@@ -1832,6 +1834,10 @@ impl eframe::App for App {
             if !matches!(self.closing, Some(Closing::Quit { .. })) {
                 self.closing = Some(Closing::Quit { discarded: Vec::new() });
             }
+        }
+        // Other applications may have copied something while the window was away.
+        if ctx.input(|input| input.events.contains(&Event::WindowFocused(true))) {
+            self.clipboard.refresh();
         }
         self.handle_shortcuts(&ctx);
 

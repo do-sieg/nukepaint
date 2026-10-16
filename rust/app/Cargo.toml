@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 directories = "6.0.0"
 eframe = "0.36.2"
 power-paint-core = { path = "../core" }
