@@ -122,6 +122,11 @@ impl History {
         state.selection = selection.clone();
     }
 
+    /// Gives the current step another name and icon.
+    pub(crate) fn rename(&mut self, step: Step) {
+        self.states[self.current].step = step;
+    }
+
     /// Adds the document as it now is as the step after the current one, in place of
     /// any that were undone.
     pub(crate) fn record(&mut self, step: Step, layers: &[Layer], active_layer: usize, selection: &Selection) {
@@ -219,6 +224,18 @@ mod tests {
         assert_eq!(*history.states[1].layers[0].pixels.get_pixel(0, 0), Rgba([0, 255, 0, 255]));
         // What was saved is no longer what the step holds.
         assert!(!history.is_saved());
+    }
+
+    #[test]
+    fn renaming_names_the_current_step() {
+        let layers = vec![Layer::new("Background", RgbaImage::new(4, 4))];
+        let selection = Selection::default();
+        let mut history = History::new(step("Open"), &layers, 0, &selection, true);
+        history.record(step("Magic Wand"), &layers, 0, &selection);
+        history.rename(step("Deselect"));
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.states[0].step, step("Open"));
+        assert_eq!(history.states[1].step, step("Deselect"));
     }
 
     #[test]

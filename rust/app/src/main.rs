@@ -24,17 +24,21 @@ mod navigator;
 mod resample_preview;
 mod settings;
 mod shapes;
+mod slider_field;
 mod tiled_texture;
 mod tools;
 mod tools_panel;
 mod transform;
 mod view;
 
-use std::path::{Path, PathBuf};
+use std::{
+    ops::RangeInclusive,
+    path::{Path, PathBuf},
+};
 
 use adjustment_dialog::FilterKind;
 use adjustments::{AdjustmentKind, LastSettings};
-use canvas::{Drawing, GradientDrag};
+use canvas::{Drawing, GradientDrag, WandClick};
 use dock::{DockLayout, DockSide, Section};
 use effects::EffectKind;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
@@ -52,6 +56,7 @@ use layer_commands::LayerCommand;
 use layer_properties::Properties;
 use settings::Settings;
 use shapes::ShapeEdit;
+use slider_field::SliderField;
 use tools::{SampleSource, Tool, Tools};
 use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
@@ -88,6 +93,10 @@ const SHOW_GRID: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Ke
 const SNAP_TO_GRID: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::S);
 
 const APP_NAME: &str = "Power Paint";
+
+/// Width of a number's field in the tool options, in points: wide enough for any of
+/// their numbers.
+const TOOL_FIELD_WIDTH: f32 = 64.0;
 
 /// Widest the list of recent files gets, in points.
 const WELCOME_WIDTH: f32 = 600.0;
@@ -132,6 +141,8 @@ pub struct OpenImage {
     pub shape: Option<ShapeEdit>,
     /// The gradient the Gradient is drawing on the active layer, until the button is let go.
     pub gradient: Option<GradientDrag>,
+    /// The Magic Wand's last click, to select again as its settings change.
+    pub wand: Option<WandClick>,
 }
 
 impl OpenImage {
@@ -149,6 +160,7 @@ impl OpenImage {
             polygon: None,
             shape: None,
             gradient: None,
+            wand: None,
         };
         image.refresh_layer_thumbnails(ctx);
         image
@@ -1561,7 +1573,7 @@ impl App {
     fn shape_options(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.label("Size:");
-        let size = egui::DragValue::new(&mut self.tools.shape_size).range(1..=MAX_TIP_SIZE).suffix(" px");
+        let size = tool_field(&mut self.tools.shape_size, 1..=MAX_TIP_SIZE, " px").logarithmic();
         ui.add(size).on_hover_text("How wide the shapes' lines are.");
         self.antialiasing_option(ui);
         if matches!(self.tools.tool, Tool::Contour | Tool::Polygon) {
@@ -1616,15 +1628,13 @@ impl App {
             ui.separator();
             ui.label("Size:");
             let max = if tool == Tool::Spray { MAX_SPRAY_SIZE } else { MAX_TIP_SIZE };
-            let size = egui::DragValue::new(size).range(1..=max).suffix(" px");
             let verb = if tool.retouch().is_some() { "goes over" } else { "draws" };
-            ui.add(size).on_hover_text(format!("How wide the {} {verb}.", tool.name()));
+            ui.add(tool_field(size, 1..=max, " px").logarithmic()).on_hover_text(format!("How wide the {} {verb}.", tool.name()));
         }
         if tool == Tool::Spray {
             ui.separator();
             ui.label("Speed:");
-            let speed = egui::DragValue::new(&mut self.tools.spray_speed).range(1..=100).suffix(" %");
-            ui.add(speed).on_hover_text("How fast the Spray leaves dots, as a share of the fastest it can.");
+            ui.add(tool_field(&mut self.tools.spray_speed, 1..=100, " %")).on_hover_text("How fast the Spray leaves dots, as a share of the fastest it can.");
         }
         if let Some(strength) = self.tools.strength_mut() {
             ui.separator();
@@ -1634,7 +1644,7 @@ impl App {
                 Tool::Sharpen => "How much each pass sharpens. Going over the same place again sharpens it more.",
                 _ => "How much each pass blurs. Going over the same place again blurs it more.",
             };
-            ui.add(egui::DragValue::new(strength).range(1..=100).suffix(" %")).on_hover_text(help);
+            ui.add(tool_field(strength, 1..=100, " %")).on_hover_text(help);
         }
         if tool.can_smooth() {
             self.antialiasing_option(ui);
@@ -1671,8 +1681,7 @@ impl App {
         ));
         ui.separator();
         ui.label("Tolerance:");
-        let tolerance = egui::DragValue::new(&mut self.tools.tolerance).range(0..=100).suffix(" %");
-        ui.add(tolerance).on_hover_text(format!(
+        ui.add(tool_field(&mut self.tools.tolerance, 0..=100, " %")).on_hover_text(format!(
             "How different a colour can be from the one clicked to be {taken}. 0% {take} only the same colour, \
              100% any.",
         ));
@@ -2077,6 +2086,21 @@ pub fn commit_selection(document: &mut Document, tile: Option<PixelRect>, name: 
     document.commit(name, Some(icon.name()));
 }
 
+/// A tool's setting in a field, without a slider, for the tool options' row to keep room.
+fn tool_field<'a>(value: &'a mut u32, range: RangeInclusive<u32>, suffix: &'a str) -> SliderField<'a, u32> {
+    SliderField::new(value, range).suffix(suffix).field_only().field_width(TOOL_FIELD_WIDTH)
+}
+
+/// Records the selection in place of the one the current step left, as
+/// [`commit_selection`] records it.
+pub fn amend_selection(document: &mut Document, tile: Option<PixelRect>, name: &str, icon: Icon) {
+    if let Some(tile) = tile {
+        document.selection = document.selection.wrapped(tile);
+    }
+    let (name, icon) = if document.selection.is_empty() { ("Deselect", icons::DESELECT) } else { (name, icon) };
+    document.amend_as(name, Some(icon.name()));
+}
+
 /// Shows why files could not be opened or saved, until the user closes the message.
 fn show_errors(ctx: &egui::Context, id: &str, heading: &str, errors: &mut Vec<String>) {
     if errors.is_empty() {
@@ -2155,6 +2179,14 @@ impl eframe::App for App {
             egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
         }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        // Only while the Magic Wand is the tool, on the image it clicked in.
+        for (index, image) in self.images.iter_mut().enumerate() {
+            if self.tools.tool == Tool::MagicWand && self.current == Some(index) {
+                canvas::reselect_with_wand(image, &self.tools);
+            } else {
+                image.wand = None;
+            }
+        }
 
         // There is nothing for the dock to work on without an image.
         if let Some(current) = self.current {

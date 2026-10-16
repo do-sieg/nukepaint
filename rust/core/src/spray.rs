@@ -9,9 +9,12 @@ use image::{Rgba, RgbaImage};
 use crate::{BlendMode, PixelRect, SelectionMask, blend::blend_pixel, wrap};
 
 /// Widest the area the Spray covers can be, in pixels.
-pub const MAX_SPRAY_SIZE: u32 = 256;
-/// Dots it leaves every second at full speed.
+pub const MAX_SPRAY_SIZE: u32 = 2000;
+/// Dots it leaves every second at full speed, up to [`DENSE_SIZE`].
 const MAX_RATE: f64 = 4000.0;
+/// Widest it leaves [`MAX_RATE`] dots at, in pixels. Wider, it leaves more, as many more
+/// as its area is bigger, for the dots to be as close together.
+const DENSE_SIZE: f64 = 256.0;
 /// How long a press leaves dots for, in seconds, however short it is.
 const PRESS_TIME: f64 = 1.0 / 60.0;
 
@@ -51,10 +54,12 @@ impl Spray {
         seed: u64,
         wrap: Option<PixelRect>,
     ) -> (Self, Option<PixelRect>) {
+        let size = size.clamp(1, MAX_SPRAY_SIZE);
+        let spread = (size as f64 / DENSE_SIZE).max(1.0).powi(2);
         let mut spray = Self {
             color,
-            size: size.clamp(1, MAX_SPRAY_SIZE),
-            rate: MAX_RATE * speed.clamp(1, 100) as f64 / 100.0,
+            size,
+            rate: MAX_RATE * spread * speed.clamp(1, 100) as f64 / 100.0,
             smooth,
             mask,
             wrap,
@@ -195,6 +200,15 @@ mod tests {
         let early = sprayed(&image).len();
         spray.spray(&mut image, (32.0, 32.0), 0.25);
         assert!(sprayed(&image).len() > early * 5);
+    }
+
+    #[test]
+    fn wider_than_dense_leaves_as_many_more_as_its_area_is_bigger() {
+        let mut image = RgbaImage::new(1, 1);
+        let mut rate = |size| Spray::begin(&mut image, (0.5, 0.5), BLACK, size, 100, false, None, 1, None).0.rate;
+        assert_eq!(rate(32), MAX_RATE);
+        assert_eq!(rate(256), MAX_RATE);
+        assert_eq!(rate(512), MAX_RATE * 4.0);
     }
 
     #[test]

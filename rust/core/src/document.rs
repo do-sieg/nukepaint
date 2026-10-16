@@ -81,6 +81,12 @@ impl Document {
         self.history.amend(&self.layers, self.active_layer, &self.selection);
     }
 
+    /// Amends the current step as [`Document::amend`] does, renaming it.
+    pub fn amend_as(&mut self, name: impl Into<String>, icon: Option<&'static str>) {
+        self.amend();
+        self.history.rename(Step { name: name.into(), icon });
+    }
+
     /// Each step, the first being how the document was opened or made.
     pub fn steps(&self) -> impl ExactSizeIterator<Item = &Step> {
         self.history.steps()

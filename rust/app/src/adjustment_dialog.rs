@@ -15,13 +15,10 @@ use std::{
 use eframe::egui::{self, Color32, Key};
 use power_paint_core::{Curves, Effect, OffsetEdges, RgbaImage, SelectionMask, apply_effect};
 
-use crate::{adjustments::AdjustmentKind, curve_editor::CurveEditor, dialog, effects::EffectKind};
+use crate::{adjustments::AdjustmentKind, curve_editor::CurveEditor, dialog, effects::EffectKind, slider_field::SliderField};
 
 /// Width of the sliders, in points.
 const SLIDER_WIDTH: f32 = 220.0;
-/// Width of the field next to each slider, in points: wide enough for any of the
-/// numbers, so the dialog keeps its width as they change.
-const VALUE_WIDTH: f32 = 72.0;
 const CHANNEL_NAMES: [&str; 3] = ["Red", "Green", "Blue"];
 const CHANNEL_COLORS: [Color32; 3] =
     [Color32::from_rgb(255, 77, 77), Color32::from_rgb(77, 255, 77), Color32::from_rgb(102, 128, 255)];
@@ -303,20 +300,8 @@ impl Dialog {
                         continue;
                     }
                 }
-                ui.add_enabled_ui(enabled, |ui| ui.horizontal(|ui| {
-                    ui.spacing_mut().slider_width = SLIDER_WIDTH;
-                    let range = setting.min..=setting.max;
-                    let slider = egui::Slider::new(value, range.clone()).step_by(setting.step).show_value(false);
-                    edited |= ui.add(slider).changed();
-                    let decimals = (-setting.step.log10()).ceil().max(0.0) as usize;
-                    let field = egui::DragValue::new(value)
-                        .range(range)
-                        .speed(setting.step)
-                        .fixed_decimals(decimals)
-                        .suffix(setting.suffix);
-                    let height = ui.spacing().interact_size.y;
-                    edited |= ui.add_sized([VALUE_WIDTH, height], field).changed();
-                }));
+                let field = SliderField::new(value, setting.min..=setting.max).step(setting.step).suffix(setting.suffix);
+                edited |= ui.add_enabled(enabled, field.slider_width(SLIDER_WIDTH)).changed();
                 ui.end_row();
             }
         });
@@ -331,15 +316,8 @@ impl Dialog {
         egui::Grid::new("offset_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
             for (index, (label, size)) in [("Horizontal:", width), ("Vertical:", height)].into_iter().enumerate() {
                 ui.label(label);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().slider_width = SLIDER_WIDTH;
-                    let value = &mut self.values[index];
-                    let range = -(size as f64)..=size as f64;
-                    edited |= ui.add(egui::Slider::new(value, range.clone()).step_by(1.0).show_value(false)).changed();
-                    let field = egui::DragValue::new(value).range(range).speed(1.0).fixed_decimals(0).suffix(" px");
-                    let height = ui.spacing().interact_size.y;
-                    edited |= ui.add_sized([VALUE_WIDTH, height], field).changed();
-                });
+                let field = SliderField::new(&mut self.values[index], -(size as f64)..=size as f64).suffix(" px");
+                edited |= ui.add(field.slider_width(SLIDER_WIDTH)).changed();
                 ui.end_row();
             }
             ui.label("");

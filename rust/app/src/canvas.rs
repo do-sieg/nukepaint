@@ -1174,8 +1174,8 @@ fn paint_gradient_line(painter: &Painter, view: &View, gradient: &Gradient) {
 
 /// Works the Magic Wand: a click on the image selects the pixels whose colour is close
 /// to that of the one clicked, changing the selection as the selection mode says, or
-/// adding to it with Ctrl, which is a step if it changed anything. Returns whether
-/// the pointer is the tool's, over the image.
+/// adding to it with Ctrl, which is a step if it changed anything. The click is kept
+/// for [`reselect_with_wand`]. Returns whether the pointer is the tool's, over the image.
 fn use_magic_wand(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -1194,23 +1194,114 @@ fn use_magic_wand(
     if !(0..width as i64).contains(&x) || !(0..height as i64).contains(&y) {
         return response.hovered();
     }
-    let found = flood_at(ui, image, tools, (x as u32, y as u32), None).selection();
+    let modifiers = ui.input(|input| input.modifiers);
+    let mut click = WandClick {
+        seed: (x as u32, y as u32),
+        before: image.document.selection.clone(),
+        after: Selection::default(),
+        step: 0,
+        committed: false,
+        options: WandOptions::of(tools),
+        contiguous: tools.contiguous != modifiers.shift,
+        mode: if modifiers.command { SelectionMode::Add } else { tools.selection_mode },
+    };
+    let selection = wand_selection(image, &click);
+    // A transform would go on from the selection it began with.
+    image.transform = None;
+    let tile = image.view.tile();
+    let document = &mut image.document;
+    if selection != document.selection {
+        document.selection = selection;
+        crate::commit_selection(document, tile, Tool::MagicWand.name(), Tool::MagicWand.icon());
+        click.committed = true;
+    }
+    (click.step, click.after) = (document.current_step(), document.selection.clone());
+    image.wand = Some(click);
+    response.hovered()
+}
+
+/// A Magic Wand click, to select again from the same pixel as the wand's settings
+/// change, in place of what it selected.
+pub struct WandClick {
+    seed: (u32, u32),
+    /// The selection the click changed.
+    before: Selection,
+    /// The one it left, as of this step.
+    after: Selection,
+    step: usize,
+    /// Whether the click recorded the step, rather than leaving the selection as it was.
+    committed: bool,
+    /// The settings as they were, and what Shift and Ctrl made of them.
+    options: WandOptions,
+    contiguous: bool,
+    mode: SelectionMode,
+}
+
+/// The Magic Wand's settings that change what it selects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WandOptions {
+    contiguous: bool,
+    tolerance: u32,
+    sample_source: SampleSource,
+    selection_mode: SelectionMode,
+}
+
+impl WandOptions {
+    fn of(tools: &Tools) -> Self {
+        let Tools { contiguous, tolerance, sample_source, selection_mode, .. } = *tools;
+        Self { contiguous, tolerance, sample_source, selection_mode }
+    }
+}
+
+/// Once the Magic Wand's settings have changed since its last click, selects again from
+/// the pixel it clicked as they now say, in place of the step the click left. Not once
+/// anything else has made another step current or changed the selection.
+pub fn reselect_with_wand(image: &mut OpenImage, tools: &Tools) {
+    let options = WandOptions::of(tools);
+    let Some(mut click) = image.wand.take_if(|click| click.options != options) else {
+        return;
+    };
+    let document = &image.document;
+    if document.current_step() != click.step || document.selection != click.after {
+        return;
+    }
+    // A change of setting carries over what Shift and Ctrl made of the one before.
+    if options.contiguous != click.options.contiguous {
+        click.contiguous = !click.contiguous;
+    }
+    if options.selection_mode != click.options.selection_mode {
+        click.mode = options.selection_mode;
+    }
+    click.options = options;
+    let selection = wand_selection(image, &click);
+    image.transform = None;
+    let tile = image.view.tile();
+    let document = &mut image.document;
+    let (name, icon) = (Tool::MagicWand.name(), Tool::MagicWand.icon());
+    if click.committed {
+        document.selection = selection;
+        crate::amend_selection(document, tile, name, icon);
+    } else if selection != document.selection {
+        document.selection = selection;
+        crate::commit_selection(document, tile, name, icon);
+        click.committed = true;
+    }
+    (click.step, click.after) = (document.current_step(), document.selection.clone());
+    image.wand = Some(click);
+}
+
+/// What the click makes of the selection before it: the pixels of a colour close to the
+/// one clicked, with it as its settings say.
+fn wand_selection(image: &OpenImage, click: &WandClick) -> Selection {
+    let options = &click.options;
+    let fill = flood(image, options.sample_source, options.tolerance, click.seed, click.contiguous, None);
+    let found = fill.selection();
     // Tiled, the rest of the image is not shown, nor selected.
     let found = match image.view.tile() {
         Some(tile) => found.combine(&Selection::rect(tile), SelectionMode::Intersect),
         None => found,
     };
-    let mode = if ui.input(|input| input.modifiers.command) { SelectionMode::Add } else { tools.selection_mode };
-    // A transform would go on from the selection it began with.
-    image.transform = None;
-    let tile = image.view.tile();
-    let document = &mut image.document;
-    let selection = document.selection.combine(&found, mode);
-    if selection != document.selection {
-        document.selection = selection;
-        crate::commit_selection(document, tile, Tool::MagicWand.name(), Tool::MagicWand.icon());
-    }
-    response.hovered()
+    click.before.combine(&found, click.mode)
 }
 
 /// The pixels the Magic Wand or the Paint Bucket takes in from a click on the pixel
@@ -1224,14 +1315,27 @@ fn flood_at(
     seed: (u32, u32),
     mask: Option<&SelectionMask>,
 ) -> FloodFill {
-    let sample = match tools.sample_source {
+    let contiguous = tools.contiguous != ui.input(|input| input.modifiers.shift);
+    flood(image, tools.sample_source, tools.tolerance, seed, contiguous, mask)
+}
+
+/// The pixels of a colour within `tolerance` percent of that of the pixel `seed`, among
+/// the selected ones of `mask`, only those reaching it through others like it when
+/// `contiguous`.
+fn flood(
+    image: &OpenImage,
+    sample_source: SampleSource,
+    tolerance: u32,
+    seed: (u32, u32),
+    contiguous: bool,
+    mask: Option<&SelectionMask>,
+) -> FloodFill {
+    let sample = match sample_source {
         SampleSource::Layer => None,
         SampleSource::Image => Some(image.document.flattened()),
     };
     let sample = sample.as_ref().unwrap_or(&image.document.active().pixels);
-    let contiguous = tools.contiguous != ui.input(|input| input.modifiers.shift);
-    let tolerance = tools.tolerance as f32 / 100.0;
-    FloodFill::new(sample, seed, tolerance, contiguous, mask)
+    FloodFill::new(sample, seed, tolerance as f32 / 100.0, contiguous, mask)
 }
 
 /// The pixels a tool may change: the selected ones, if any are, and tiled, only those

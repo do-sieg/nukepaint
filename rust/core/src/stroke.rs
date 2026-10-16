@@ -9,8 +9,8 @@ use image::{Rgba, RgbaImage};
 
 use crate::{BlendMode, PixelRect, SelectionMask, blend::blend_pixel, wrap};
 
-/// Widest the drawing tools draw, in pixels.
-pub const MAX_TIP_SIZE: u32 = 64;
+/// Widest the drawing tools draw, in pixels, as in Paint.NET.
+pub const MAX_TIP_SIZE: u32 = 2000;
 
 const CLEAR: Rgba<u8> = Rgba([0, 0, 0, 0]);
 

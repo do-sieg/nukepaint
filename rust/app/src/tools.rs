@@ -220,7 +220,8 @@ impl Tool {
             }
             Self::MagicWand => {
                 "Click to select the pixels of similar colour around the one clicked, or all those in the image \
-                 while Contiguous is off. Shift does the other. Hold Ctrl to add to the selection."
+                 while Contiguous is off. Shift does the other. Hold Ctrl to add to the selection. Changing the \
+                 settings afterwards selects again from the same pixel."
             }
             Self::MoveSelection => {
                 "Drag the selection's box to move, resize or rotate the selection, without its pixels, its centre \
