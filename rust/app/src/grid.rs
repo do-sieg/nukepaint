@@ -6,11 +6,11 @@
 //! The lines are drawn by `grid.wgsl` on the GPU, which works out each screen pixel
 //! from whole image pixels, for every line to show however the image is zoomed.
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, sync::OnceLock};
 
 use eframe::{
-    egui::{Color32, Painter, Rect},
-    egui_wgpu::{self, wgpu},
+    egui::{Color32, Painter, Rect, Vec2},
+    egui_wgpu::{self, wgpu, wgpu::util::DeviceExt},
 };
 use power_paint_core::PixelRect;
 use serde::{Deserialize, Serialize};
@@ -102,8 +102,7 @@ impl Grid {
 /// What the GPU draws the grid with, kept with egui's renderer.
 struct Resources {
     pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
-    buffer: wgpu::Buffer,
+    layout: wgpu::BindGroupLayout,
 }
 
 /// Gets the GPU ready to draw the grid.
@@ -112,12 +111,6 @@ pub fn init(render_state: &egui_wgpu::RenderState) {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("grid"),
         source: wgpu::ShaderSource::Wgsl(include_str!("grid.wgsl").into()),
-    });
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("grid"),
-        size: PARAMS_SIZE,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("grid"),
@@ -131,11 +124,6 @@ pub fn init(render_state: &egui_wgpu::RenderState) {
             },
             count: None,
         }],
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("grid"),
-        layout: &layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("grid"),
@@ -180,23 +168,40 @@ pub fn init(render_state: &egui_wgpu::RenderState) {
         multiview_mask: None,
         cache: None,
     });
-    render_state.renderer.write().callback_resources.insert(Resources { pipeline, bind_group, buffer });
+    render_state.renderer.write().callback_resources.insert(Resources { pipeline, layout });
 }
 
 /// Draws the grid's lines over the image, if it shows, unless its cells are too small
 /// on screen to tell apart.
-pub fn paint_lines(painter: &Painter, view: &View, grid: &Grid) {
+pub fn paint_lines(painter: &Painter, view: &View, grid: &Grid, shift: Vec2) {
     let cells = grid.cells();
     if !grid.visible || cells.smallest_side() * view.zoom < MIN_CELL {
         return;
     }
     // Only over the part of the image in view.
-    let image = view.image_rect();
+    let image = view.image_rect().translate(shift);
     let rect = image.intersect(painter.clip_rect());
     if rect.is_positive() {
         let params = params(image, painter.pixels_per_point(), view.zoom, cells, grid.color32());
-        painter.add(egui_wgpu::Callback::new_paint_callback(rect, GridCallback { params }));
+        painter.add(egui_wgpu::Callback::new_paint_callback(rect, GridCallback { params, bind_group: OnceLock::new() }));
     }
+}
+
+/// A bind group of a new buffer holding `bytes`, as a uniform at binding 0, and of
+/// `entries` after it. Each drawing of a paint callback has its own: they are all
+/// prepared before any is drawn, so one buffer would only hold what the last one wrote.
+pub fn uniform_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    bytes: &[u8],
+    label: &str,
+    entries: &[wgpu::BindGroupEntry],
+) -> wgpu::BindGroup {
+    let usage = wgpu::BufferUsages::UNIFORM;
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytes, usage });
+    let mut all = vec![wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }];
+    all.extend(entries.iter().cloned());
+    device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries: &all })
 }
 
 /// What `grid.wgsl` is given, laid out as it reads it.
@@ -218,21 +223,24 @@ fn params(image: Rect, pixels_per_point: f32, zoom: f32, cells: Cells, color: Co
     bytes
 }
 
+/// The grid drawn over one rectangle: over the image, or over a copy of a tiled one,
+/// each with its own buffer, as they are all drawn after all are prepared.
 struct GridCallback {
     params: Vec<u8>,
+    bind_group: OnceLock<wgpu::BindGroup>,
 }
 
 impl egui_wgpu::CallbackTrait for GridCallback {
     fn prepare(
         &self,
-        _device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
         _egui_encoder: &mut wgpu::CommandEncoder,
         callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(resources) = callback_resources.get::<Resources>() {
-            queue.write_buffer(&resources.buffer, 0, &self.params);
+            self.bind_group.get_or_init(|| uniform_bind_group(device, &resources.layout, &self.params, "grid", &[]));
         }
         Vec::new()
     }
@@ -243,11 +251,11 @@ impl egui_wgpu::CallbackTrait for GridCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        let Some(resources) = callback_resources.get::<Resources>() else {
+        let (Some(resources), Some(bind_group)) = (callback_resources.get::<Resources>(), self.bind_group.get()) else {
             return;
         };
         render_pass.set_pipeline(&resources.pipeline);
-        render_pass.set_bind_group(0, &resources.bind_group, &[]);
+        render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..3, 0..1);
     }
 }

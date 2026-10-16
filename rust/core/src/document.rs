@@ -158,9 +158,10 @@ impl Document {
         erase_selected(&mut self.layers[self.active_layer].pixels, &self.selection)
     }
 
-    /// Selects the whole image. Returns whether the selection changed.
-    pub fn select_all(&mut self) -> bool {
-        self.set_selection(self.whole())
+    /// Selects the whole image, or only `area` of it if given, as the tile of a tiled
+    /// image. Returns whether the selection changed.
+    pub fn select_all(&mut self, area: Option<PixelRect>) -> bool {
+        self.set_selection(self.whole(area))
     }
 
     /// Selects nothing. Returns whether anything was selected.
@@ -168,15 +169,17 @@ impl Document {
         self.set_selection(Selection::default())
     }
 
-    /// Selects what of the image was not selected, and nothing else. With nothing
-    /// selected, that is the whole image. Returns whether the selection changed.
-    pub fn invert_selection(&mut self) -> bool {
-        self.set_selection(self.whole().combine(&self.selection, SelectionMode::Subtract))
+    /// Selects what of the image, or of `area` of it if given, was not selected, and
+    /// nothing else. With nothing selected, that is all of it. Returns whether the
+    /// selection changed.
+    pub fn invert_selection(&mut self, area: Option<PixelRect>) -> bool {
+        self.set_selection(self.whole(area).combine(&self.selection, SelectionMode::Subtract))
     }
 
-    fn whole(&self) -> Selection {
+    /// All of the image, or all of `area` of it.
+    fn whole(&self, area: Option<PixelRect>) -> Selection {
         let (width, height) = self.size();
-        Selection::rect(PixelRect { left: 0, top: 0, right: width as i32, bottom: height as i32 })
+        Selection::rect(area.unwrap_or(PixelRect { left: 0, top: 0, right: width as i32, bottom: height as i32 }))
     }
 
     fn set_selection(&mut self, selection: Selection) -> bool {
@@ -539,30 +542,46 @@ mod tests {
     fn select_all_and_deselect() {
         let mut document = Document::new(RgbaImage::new(4, 3));
         assert!(!document.deselect());
-        assert!(document.select_all());
+        assert!(document.select_all(None));
         assert_eq!(document.selection, Selection::rect(PixelRect { left: 0, top: 0, right: 4, bottom: 3 }));
-        assert!(!document.select_all());
+        assert!(!document.select_all(None));
         assert!(document.deselect());
         assert!(document.selection.is_empty());
     }
 
     #[test]
+    fn select_all_and_invert_keep_to_an_area() {
+        let mut document = Document::new(RgbaImage::new(8, 8));
+        let area = PixelRect { left: 2, top: 2, right: 6, bottom: 6 };
+        assert!(document.select_all(Some(area)));
+        assert_eq!(document.selection, Selection::rect(area));
+        document.selection = Selection::rect(PixelRect { left: 0, top: 0, right: 4, bottom: 8 });
+        assert!(document.invert_selection(Some(area)));
+        let selected: Vec<(i64, i64)> = (0..8)
+            .flat_map(|y| (0..8).map(move |x| (x, y)))
+            .filter(|&(x, y)| document.selection.contains(x, y))
+            .collect();
+        let expected: Vec<(i64, i64)> = (2..6).flat_map(|y| (4..6).map(move |x| (x, y))).collect();
+        assert_eq!(selected, expected);
+    }
+
+    #[test]
     fn invert_selects_the_rest_of_the_image() {
         let mut document = Document::new(RgbaImage::new(4, 3));
-        assert!(document.invert_selection());
+        assert!(document.invert_selection(None));
         assert_eq!(document.selection, Selection::rect(PixelRect { left: 0, top: 0, right: 4, bottom: 3 }));
-        assert!(document.invert_selection());
+        assert!(document.invert_selection(None));
         assert!(document.selection.is_empty());
         // What is off the image is left out.
         document.selection = Selection::rect(PixelRect { left: -2, top: 1, right: 2, bottom: 2 });
-        assert!(document.invert_selection());
+        assert!(document.invert_selection(None));
         let selected = |document: &Document| {
             (0..3).flat_map(|y| (0..4).map(move |x| (x, y))).filter(|&(x, y)| document.selection.contains(x, y)).count()
         };
         assert_eq!(selected(&document), 12 - 2);
         assert!(!document.selection.contains(1, 1) && document.selection.contains(2, 1));
         assert!(!document.selection.contains(-1, 1));
-        assert!(document.invert_selection());
+        assert!(document.invert_selection(None));
         assert_eq!(selected(&document), 2);
     }
 

@@ -49,17 +49,40 @@ impl FloatingPixels {
     /// only move by whole pixels, or are mirrored, are copied as they are; others are
     /// redrawn from those around as `interpolation` says.
     pub fn place(&self, map: &Affine, interpolation: Interpolation) -> RgbaImage {
+        self.place_wrapped(map, interpolation, None)
+    }
+
+    /// The layer with the pixels drawn over it as [`FloatingPixels::place`] does, but
+    /// wrapped around the edges of `wrap` if there is one, as on a tile repeated side by
+    /// side: those carried off one edge come back in at the other, and none land
+    /// outside it.
+    pub fn place_wrapped(&self, map: &Affine, interpolation: Interpolation, wrap: Option<PixelRect>) -> RgbaImage {
         let mut layer = self.base.clone();
-        let Some(back) = map.inverse() else {
+        let Some(area) = wrap.filter(|area| !area.is_empty()) else {
+            let (width, height) = layer.dimensions();
+            let whole = PixelRect { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+            self.draw_onto(&mut layer, map, interpolation, whole);
             return layer;
         };
-        let (width, height) = layer.dimensions();
-        // Where the area lands, wider for the blended edges, within the layer.
-        let margin = match interpolation {
-            Interpolation::Nearest | Interpolation::Bilinear => 1.0,
-            Interpolation::Bicubic => 2.0,
-            Interpolation::Lanczos => 3.0,
+        let (width, height) = (area.width() as f64, area.height() as f64);
+        let (min_x, min_y, max_x, max_y) = self.landing(map);
+        // The copies of the area they land on, counted from the area itself, with room
+        // for the blended edges of any interpolation.
+        let (min_x, min_y, max_x, max_y) = (min_x - 3.0, min_y - 3.0, max_x + 3.0, max_y + 3.0);
+        let copies = |from: f64, to: f64, start: i32, size: f64| {
+            ((from - start as f64) / size).floor() as i64..((to - start as f64) / size).ceil() as i64
         };
+        for y in copies(min_y, max_y, area.top, height) {
+            for x in copies(min_x, max_x, area.left, width) {
+                let back_on = Affine::translation(-x as f64 * width, -y as f64 * height);
+                self.draw_onto(&mut layer, &map.then(back_on), interpolation, area);
+            }
+        }
+        layer
+    }
+
+    /// The smallest rectangle around where `map` carries the area: left, top, right, bottom.
+    fn landing(&self, map: &Affine) -> (f64, f64, f64, f64) {
         let PixelRect { left, top, right, bottom } = self.area;
         let corners = [(left, top), (right, top), (right, bottom), (left, bottom)];
         let corners = corners.map(|(x, y)| map.apply((x as f64, y as f64)));
@@ -67,10 +90,30 @@ impl FloatingPixels {
         let max_x = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
         let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
         let max_y = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
-        let (from_x, to_x) =
-            ((min_x.floor() - margin).max(0.0) as u32, (max_x.ceil() + margin).min(width as f64) as u32);
-        let (from_y, to_y) =
-            ((min_y.floor() - margin).max(0.0) as u32, (max_y.ceil() + margin).min(height as f64) as u32);
+        (min_x, min_y, max_x, max_y)
+    }
+
+    /// Draws the pixels over `layer` where `map` carries them, on its pixels in `within` alone.
+    fn draw_onto(&self, layer: &mut RgbaImage, map: &Affine, interpolation: Interpolation, within: PixelRect) {
+        let Some(back) = map.inverse() else {
+            return;
+        };
+        // Where the area lands, wider for the blended edges, within the layer.
+        let margin = match interpolation {
+            Interpolation::Nearest | Interpolation::Bilinear => 1.0,
+            Interpolation::Bicubic => 2.0,
+            Interpolation::Lanczos => 3.0,
+        };
+        let (min_x, min_y, max_x, max_y) = self.landing(map);
+        let (from_x, to_x) = (
+            (min_x.floor() - margin).max(within.left as f64) as u32,
+            (max_x.ceil() + margin).min(within.right as f64).max(within.left as f64) as u32,
+        );
+        let (from_y, to_y) = (
+            (min_y.floor() - margin).max(within.top as f64) as u32,
+            (max_y.ceil() + margin).min(within.bottom as f64).max(within.top as f64) as u32,
+        );
+        let (left, top) = (self.area.left, self.area.top);
 
         let exact = Self::copies_exactly(map);
         for y in from_y..to_y {
@@ -91,7 +134,6 @@ impl FloatingPixels {
                 }
             }
         }
-        layer
     }
 
     /// Whether `map` only moves pixels by whole pixels, or mirrors them, which copies
@@ -281,5 +323,21 @@ mod tests {
         assert_eq!(blend_over([0.5, 0.0, 0.0, 0.5], BLUE), Rgba([128, 0, 128, 255]));
         assert_eq!(blend_over([0.0; 4], BLUE), BLUE);
         assert_eq!(blend_over([0.5, 0.0, 0.0, 0.5], CLEAR), Rgba([255, 0, 0, 128]));
+    }
+
+    #[test]
+    fn placed_wrapped_comes_back_in_at_the_other_edge() {
+        let mut layer = RgbaImage::new(10, 4);
+        layer.put_pixel(6, 1, Rgba([255, 0, 0, 255]));
+        layer.put_pixel(7, 1, Rgba([0, 255, 0, 255]));
+        let selection = Selection::rect(PixelRect { left: 6, top: 1, right: 8, bottom: 2 });
+        let floating = FloatingPixels::lift(&layer, &selection).unwrap();
+        // Two to the right, in an area from 2 to 8 across: the first lands on 8, past it,
+        // so back on 2, and the second on 3.
+        let area = PixelRect { left: 2, top: 0, right: 8, bottom: 4 };
+        let placed = floating.place_wrapped(&Affine::translation(2.0, 0.0), Interpolation::Nearest, Some(area));
+        let shown: Vec<u32> = (0..10).filter(|&x| placed.get_pixel(x, 1)[3] > 0).collect();
+        assert_eq!(shown, [2, 3]);
+        assert_eq!(placed.get_pixel(2, 1), &Rgba([255, 0, 0, 255]));
     }
 }

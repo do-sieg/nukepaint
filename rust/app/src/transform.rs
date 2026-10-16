@@ -17,9 +17,9 @@
 
 use std::f64::consts::PI;
 
-use eframe::egui::{self, CursorIcon};
+use eframe::egui::{self, CursorIcon, Vec2};
 use power_paint_core::{
-    Affine, Bounds, Document, FloatingPixels, Frame, Interpolation, Layer, MAX_OPACITY, RgbaImage, Selection,
+    Affine, Bounds, Document, FloatingPixels, Frame, Interpolation, Layer, MAX_OPACITY, PixelRect, RgbaImage, Selection,
     composite,
 };
 
@@ -399,6 +399,8 @@ pub struct Transform {
     drag: Option<Drag>,
     /// The step of the document's history that the box was last put down as, if any.
     committed: Option<usize>,
+    /// The area the pixels are put down wrapped around the edges of, on a tiled image.
+    pub wrap: Option<PixelRect>,
 }
 
 impl Transform {
@@ -409,7 +411,8 @@ impl Transform {
         let start = BoxState::of(selection)?;
         let floating = with_pixels.then(|| FloatingPixels::lift(&document.active().pixels, selection)).flatten();
         let floating = floating.map(|pixels| Floating::new(ctx, pixels, document));
-        Some(Self { start, selection_start: selection.clone(), floating, state: start, drag: None, committed: None })
+        let selection_start = selection.clone();
+        Some(Self { start, selection_start, floating, state: start, drag: None, committed: None, wrap: None })
     }
 
     /// Starts moving pixels pasted on the document's active layer, selected all around.
@@ -418,7 +421,7 @@ impl Transform {
         // Pasted pixels are never empty, so neither is their selection.
         let start = BoxState::of(&selection).expect("pasted pixels are selected");
         let floating = Some(Floating::new(ctx, pixels, document));
-        Self { start, selection_start: selection, floating, state: start, drag: None, committed: None }
+        Self { start, selection_start: selection, floating, state: start, drag: None, committed: None, wrap: None }
     }
 
     /// The selection the box holds, which keeps the box if it is turned.
@@ -497,7 +500,8 @@ impl Transform {
     }
 
     fn placed(&self, interpolation: Interpolation) -> Option<RgbaImage> {
-        self.floating.as_ref().map(|floating| floating.pixels.place(&self.affine(), interpolation))
+        let floating = self.floating.as_ref()?;
+        Some(floating.pixels.place_wrapped(&self.affine(), interpolation, self.wrap))
     }
 
     /// Puts the box back where it was before the drag. Returns the selection there.
@@ -521,18 +525,29 @@ impl Transform {
 
     /// While pixels are being dragged, draws the image with the layer without them and
     /// them where they now are, as `interpolation` will redraw them, in place of the
-    /// image. Returns whether it did.
-    pub fn paint_preview(&self, painter: &egui::Painter, view: &View, interpolation: Interpolation) -> bool {
+    /// image, moved by `shift` on screen, as onto a copy of a tiled image. The pixels
+    /// are drawn moved by each of `wraps` more, for those carried off the tile to come
+    /// back in at the other edge. Returns whether it did.
+    pub fn paint_preview(
+        &self,
+        painter: &egui::Painter,
+        view: &View,
+        interpolation: Interpolation,
+        shift: Vec2,
+        wraps: &[Vec2],
+    ) -> bool {
         let Some(floating) = self.floating.as_ref().filter(|_| self.is_dragging()) else {
             return false;
         };
-        let rect = view.image_rect();
+        let rect = view.image_rect().translate(shift);
         if let Some(below) = &floating.below {
             below.paint(painter, rect, 1.0);
         }
         if let Some(opacity) = floating.opacity {
             floating.base_texture.paint(painter, rect, opacity);
-            floating.preview.paint(painter, view, &self.affine(), interpolation, opacity);
+            for &wrap in wraps {
+                floating.preview.paint(painter, view, &self.affine(), interpolation, opacity, shift + wrap);
+            }
         }
         if let Some(above) = &floating.above {
             above.paint(painter, rect, 1.0);

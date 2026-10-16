@@ -126,6 +126,9 @@ pub struct GradientDrag {
     drawn: Gradient,
     /// Whether it goes from the secondary colour to the primary one, with the right button.
     secondary: bool,
+    /// How far it is moved to be drawn on the tile of a tiled image, from the copy it
+    /// was begun on, in pixels.
+    onto_tile: (f64, f64),
 }
 
 /// The point of the rotate cursor that is on the pointer, its middle.
@@ -171,6 +174,9 @@ pub fn show(
     let pixels_per_point = ui.ctx().pixels_per_point();
     let viewport = ui.available_rect_before_wrap();
     image.view.place(viewport, pixels_per_point);
+    if let Some(transform) = &mut image.transform {
+        transform.wrap = image.view.tile();
+    }
     // A drag works out where it is from the image, which must not jump to another copy.
     image.view.hold(image.is_dragging() || tools.frame_select.is_dragging() || tools.zoom_drag.is_some());
     // Not while it is over a dialog, a menu or another window in front of the image.
@@ -200,20 +206,20 @@ pub fn show(
             let tile = image.view.tile_rect();
             let shown = tile.unwrap_or(rect);
             let checker_cell = checker_size as f32 / pixels_per_point;
+            let transform = image.transform.as_ref();
+            let wraps = transform.map_or_else(Vec::new, |transform| preview_wraps(&image.view, transform));
             for copy in copies(shown, viewport, tile.is_some()) {
                 let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(copy));
+                let shift = copy.min - shown.min;
                 paint_checker(&painter, copy, checker_cell, checker);
-                if copy != shown {
-                    image.texture.paint(&painter, rect.translate(copy.min - shown.min));
+                let previewed = transform.is_some_and(|transform| {
+                    transform.paint_preview(&painter, &image.view, tools.resampling, shift, &wraps)
+                });
+                if !previewed {
+                    image.texture.paint(&painter, rect.translate(shift));
                 }
+                grid::paint_lines(&painter, &image.view, grid, shift);
             }
-            let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(shown));
-            let transform = image.transform.as_ref();
-            let previewed = transform.is_some_and(|transform| transform.paint_preview(&painter, &image.view, tools.resampling));
-            if !previewed {
-                image.texture.paint(&painter, rect);
-            }
-            grid::paint_lines(&painter, &image.view, grid);
             if let Some(tile) = tile {
                 ui.painter().rect_stroke(tile, 0.0, Stroke::new(1.0, TILE_OUTLINE), egui::StrokeKind::Outside);
             }
@@ -254,7 +260,20 @@ pub fn show(
 
     let painter = ui.painter_at(viewport);
     let tint = if tools.tool == Tool::MoveSelection { MOVE_SELECTION_TINT } else { SELECTION_TINT };
-    paint_selection(&painter, &image.view, &image.document.selection, tint);
+    // Tiled, a selection on the tile shows on each copy too.
+    let selection = &image.document.selection;
+    let on_tile = image.view.tile().zip(selection.bounds()).is_some_and(|(tile, bounds)| {
+        let (left, top) = (tile.left as f64, tile.top as f64);
+        bounds.left >= left && bounds.top >= top && bounds.right <= tile.right as f64 && bounds.bottom <= tile.bottom as f64
+    });
+    match image.view.tile_rect().filter(|_| on_tile) {
+        Some(tile) => {
+            for copy in copies(tile, viewport, true) {
+                paint_selection(&painter, &image.view, selection, tint, copy.min - tile.min);
+            }
+        }
+        None => paint_selection(&painter, &image.view, selection, tint, Vec2::ZERO),
+    }
     paint_lasso(&painter, image, tools);
     paint_shape(&painter, image, tools);
     if let Some(drag) = &image.gradient {
@@ -306,6 +325,26 @@ pub fn show(
     }
     let pointer_pixel = pointer.map(|pointer| image.view.wrap_pixel(image.view.pixel_at(pointer)));
     Output { pointer_pixel, tool_requested, deselect_requested }
+}
+
+/// How far, on screen, the pixels a transform moves are drawn again from where they
+/// land: tiled, by whole tiles, for those carried off the tile to come back in on it.
+fn preview_wraps(view: &View, transform: &Transform) -> Vec<Vec2> {
+    let (Some(tile), Some(tile_rect), Some(bounds)) = (view.tile(), view.tile_rect(), transform.selection().bounds()) else {
+        return vec![Vec2::ZERO];
+    };
+    // With room for the blended edges, and no further than the copies drawn.
+    let copies = |from: f64, to: f64, start: i32, size: i32| {
+        let along = |at: f64| (((at - start as f64) / size as f64).floor() as i64).clamp(-MAX_COPIES_AWAY as i64, MAX_COPIES_AWAY as i64);
+        along(from - 3.0)..=along(to + 3.0)
+    };
+    let mut wraps = Vec::new();
+    for y in copies(bounds.top, bounds.bottom, tile.top, tile.height()) {
+        for x in copies(bounds.left, bounds.right, tile.left, tile.width()) {
+            wraps.push(-Vec2::new(x as f32, y as f32) * tile_rect.size());
+        }
+    }
+    wraps
 }
 
 /// Where the image, or its tile, is drawn: at `rect`, and tiled, at each copy in `viewport` too.
@@ -439,7 +478,7 @@ fn use_tool(
                 image.transform = None;
                 let polygon = image.polygon.as_mut().expect("hit");
                 if let Some(corners) = polygon.remove(&mut image.document, index) {
-                    crate::commit_selection(&mut image.document, tools.tool.name(), tools.tool.icon());
+                    crate::commit_selection(&mut image.document, image.view.tile(), tools.tool.name(), tools.tool.icon());
                     polygon.record(&image.document, corners);
                 }
             }
@@ -483,7 +522,7 @@ fn use_tool(
         if let Some(polygon) = &mut image.polygon
             && let Some((_, corners)) = polygon.release()
         {
-            crate::commit_selection(&mut image.document, tools.tool.name(), tools.tool.icon());
+            crate::commit_selection(&mut image.document, image.view.tile(), tools.tool.name(), tools.tool.icon());
             polygon.record(&image.document, corners);
         }
         // A double click closes Polygon Select's outline.
@@ -601,7 +640,7 @@ fn close_lasso(image: &mut OpenImage, tools: &Tools) {
     };
     let closed = lasso.close(&mut image.document);
     if closed.before.is_some() {
-        crate::commit_selection(&mut image.document, tools.tool.name(), tools.tool.icon());
+        crate::commit_selection(&mut image.document, image.view.tile(), tools.tool.name(), tools.tool.icon());
     }
     image.polygon = closed.polygon.map(|mut polygon| {
         polygon.record(&image.document, closed.corners);
@@ -729,7 +768,7 @@ fn use_shape_tool(
                 image.drop_shape();
                 let secondary = button == PointerButton::Secondary;
                 let style = tools.shape_style(secondary);
-                let (shape, area) = ShapeEdit::begin(&image.document, kind, at, style, secondary);
+                let (shape, area) = ShapeEdit::begin(&image.document, kind, at, style, secondary, image.view.tile());
                 image.shape = Some(shape);
                 image.show_shape(area);
             }
@@ -879,6 +918,10 @@ fn finish_shape(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools) {
 /// selected pixels drawn where they now are.
 fn commit_transform(ctx: &egui::Context, image: &mut OpenImage, placed: Option<RgbaImage>) {
     let document = &mut image.document;
+    // Tiled, what was carried off the tile comes back in at the other edge, as the pixels do.
+    if let Some(tile) = image.view.tile() {
+        document.selection = document.selection.wrapped(tile);
+    }
     match placed {
         Some(pixels) => {
             document.active_mut().pixels = pixels;
@@ -1017,18 +1060,8 @@ fn use_paint_bucket(
     };
     let (x, y) = image.view.wrap_pixel(image.view.pixel_at(press));
     let (width, height) = image.document.size();
-    // Tiled, the rest of the image is not shown, nor filled.
-    let mask = match image.view.tile().map(Selection::rect) {
-        Some(tile) if image.document.selection.is_empty() => SelectionMask::of(&tile, width, height),
-        Some(tile) => {
-            let selected = image.document.selection.combine(&tile, SelectionMode::Intersect);
-            // Nothing selected on the tile leaves nothing to fill, rather than all of it.
-            if selected.is_empty() {
-                return hovered;
-            }
-            SelectionMask::of(&selected, width, height)
-        }
-        None => image.document.selection_mask(),
+    let Some(mask) = tile_mask(image) else {
+        return hovered;
     };
     let on_image = (0..width as i64).contains(&x) && (0..height as i64).contains(&y);
     if !on_image || mask.as_ref().is_some_and(|mask| !mask.contains(x as u32, y as u32)) {
@@ -1068,13 +1101,20 @@ fn use_gradient(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage,
         .filter(|_| !box_dragged(image));
     if let Some(button) = started.filter(|&button| !space && (button == PointerButton::Primary || !picking))
         && let Some(press) = ui.input(|input| input.pointer.press_origin())
+        && let Some(mask) = tile_mask(image)
     {
         // A transform would go on from the pixels as they were before.
         image.transform = None;
         let from = image.view.point_at(press);
-        let fill = GradientFill::begin(&image.document.active().pixels, image.document.selection_mask());
+        // Tiled, from a copy, the gradient goes on the tile where it shows on the copy.
+        let onto_tile = image.view.tile().map_or((0.0, 0.0), |tile| {
+            let along = |at: f64, start: i32, size: i32| ((at - start as f64) / size as f64).floor() * size as f64;
+            (along(from.0, tile.left, tile.width()), along(from.1, tile.top, tile.height()))
+        });
+        let fill = GradientFill::begin(&image.document.active().pixels, mask);
         let secondary = button == PointerButton::Secondary;
-        image.gradient = Some(GradientDrag { fill, drawn: gradient(tools, from, from, secondary), secondary });
+        let drawn = gradient(tools, from, from, secondary);
+        image.gradient = Some(GradientDrag { fill, drawn, secondary, onto_tile });
     }
     if ui.input(|input| input.key_pressed(Key::Escape))
         && let Some(drag) = image.gradient.take()
@@ -1095,7 +1135,9 @@ fn use_gradient(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage,
         let gradient = gradient(tools, from, to, drag.secondary);
         if gradient != drag.drawn {
             drag.drawn = gradient;
-            if let Some(area) = drag.fill.draw(&mut image.document.active_mut().pixels, &gradient) {
+            let (dx, dy) = drag.onto_tile;
+            let on_tile = self::gradient(tools, (from.0 - dx, from.1 - dy), (to.0 - dx, to.1 - dy), drag.secondary);
+            if let Some(area) = drag.fill.draw(&mut image.document.active_mut().pixels, &on_tile) {
                 image.refresh_area(area);
             }
         }
@@ -1153,14 +1195,20 @@ fn use_magic_wand(
         return response.hovered();
     }
     let found = flood_at(ui, image, tools, (x as u32, y as u32), None).selection();
+    // Tiled, the rest of the image is not shown, nor selected.
+    let found = match image.view.tile() {
+        Some(tile) => found.combine(&Selection::rect(tile), SelectionMode::Intersect),
+        None => found,
+    };
     let mode = if ui.input(|input| input.modifiers.command) { SelectionMode::Add } else { tools.selection_mode };
     // A transform would go on from the selection it began with.
     image.transform = None;
+    let tile = image.view.tile();
     let document = &mut image.document;
     let selection = document.selection.combine(&found, mode);
     if selection != document.selection {
         document.selection = selection;
-        crate::commit_selection(document, Tool::MagicWand.name(), Tool::MagicWand.icon());
+        crate::commit_selection(document, tile, Tool::MagicWand.name(), Tool::MagicWand.icon());
     }
     response.hovered()
 }
@@ -1184,6 +1232,22 @@ fn flood_at(
     let contiguous = tools.contiguous != ui.input(|input| input.modifiers.shift);
     let tolerance = tools.tolerance as f32 / 100.0;
     FloodFill::new(sample, seed, tolerance, contiguous, mask)
+}
+
+/// The pixels a tool may change: the selected ones, if any are, and tiled, only those
+/// of the tile, as the rest of the image is not shown. Nothing at all when nothing
+/// selected is on the tile, rather than every pixel as when nothing is selected.
+fn tile_mask(image: &OpenImage) -> Option<Option<SelectionMask>> {
+    let (width, height) = image.document.size();
+    let selection = &image.document.selection;
+    let Some(tile) = image.view.tile().map(Selection::rect) else {
+        return Some(image.document.selection_mask());
+    };
+    if selection.is_empty() {
+        return Some(SelectionMask::of(&tile, width, height));
+    }
+    let selected = selection.combine(&tile, SelectionMode::Intersect);
+    (!selected.is_empty()).then(|| SelectionMask::of(&selected, width, height))
 }
 
 /// The colour of the active layer at a point of the screen, if it is over the image.
@@ -1496,28 +1560,32 @@ fn corner_at(view: &View, at: Pos2, snap: Option<Cells>) -> (i32, i32) {
 /// A selection tool ends drawing the selection, which is a step if it changed anything.
 /// Polygon Select's outline goes on until it is closed.
 fn release_selecting(image: &mut OpenImage, tools: &mut Tools) {
+    let tile = image.view.tile();
     let document = &mut image.document;
     if let Some(before) = tools.frame_select.release(&mut document.selection)
         && document.selection != before
     {
-        crate::commit_selection(document, tools.tool.name(), tools.tool.icon());
+        crate::commit_selection(document, tile, tools.tool.name(), tools.tool.icon());
     }
     if image.lasso.as_ref().is_some_and(|lasso| lasso.kind == LassoKind::Freehand) {
         close_lasso(image, tools);
     }
 }
 
-/// Tints the selection and draws its outline, in lines one screen pixel wide.
-fn paint_selection(painter: &Painter, view: &View, selection: &Selection, tint: Color32) {
-    for span in selection.spans(view.visible_pixels()) {
-        let min = view.to_screen(span.left as f32, span.top as f32);
-        let max = view.to_screen(span.right as f32, span.bottom as f32);
+/// Tints the selection and draws its outline, in lines one screen pixel wide, moved by
+/// `shift` on screen, as onto a copy of a tiled image.
+fn paint_selection(painter: &Painter, view: &View, selection: &Selection, tint: Color32, shift: Vec2) {
+    // On a copy, the pixels in view are those of the tile.
+    let within = if shift == Vec2::ZERO { view.visible_pixels() } else { view.tile().unwrap_or(view.visible_pixels()) };
+    for span in selection.spans(within) {
+        let min = view.to_screen(span.left as f32, span.top as f32) + shift;
+        let max = view.to_screen(span.right as f32, span.bottom as f32) + shift;
         painter.rect_filled(Rect::from_min_max(min, max), 0.0, tint);
     }
     for outline in selection.outlines() {
         let points: Vec<Pos2> = outline
             .iter()
-            .map(|&(x, y)| view.to_screen(x as f32, y as f32))
+            .map(|&(x, y)| view.to_screen(x as f32, y as f32) + shift)
             .map(|point| Pos2::new(painter.round_to_pixel_center(point.x), painter.round_to_pixel_center(point.y)))
             .collect();
         paint_outline(painter, &points);

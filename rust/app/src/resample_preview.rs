@@ -8,12 +8,12 @@ use std::{
 };
 
 use eframe::{
-    egui::{Painter, Rect},
+    egui::{Painter, Rect, Vec2},
     egui_wgpu::{self, wgpu, wgpu::util::DeviceExt},
 };
 use power_paint_core::{Affine, FloatingPixels, Interpolation, PixelRect, RgbaImage};
 
-use crate::view::View;
+use crate::{grid::uniform_bind_group, view::View};
 
 /// Widest and tallest the part of the pixels each texture holds is, and how many pixels
 /// around it it holds as well, for the kernels to reach.
@@ -122,8 +122,7 @@ struct Tile {
     /// and where its texture starts, in pixels of the whole.
     core: [i32; 4],
     texture_origin: [i32; 2],
-    buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    view: wgpu::TextureView,
 }
 
 impl ResamplePreview {
@@ -132,8 +131,18 @@ impl ResamplePreview {
     }
 
     /// Draws the pixels where `map` carries them on the image, as `interpolation`
-    /// redraws them, as opaque as `opacity` says, from 0 to 1.
-    pub fn paint(&self, painter: &Painter, view: &View, map: &Affine, interpolation: Interpolation, opacity: f32) {
+    /// redraws them, as opaque as `opacity` says, from 0 to 1, moved by `shift` on
+    /// screen, as onto a copy of a tiled image. Only what is within the painter's clip
+    /// is drawn: the caller keeps it to the image.
+    pub fn paint(
+        &self,
+        painter: &Painter,
+        view: &View,
+        map: &Affine,
+        interpolation: Interpolation,
+        opacity: f32,
+        shift: Vec2,
+    ) {
         let Some(back) = map.inverse() else {
             return;
         };
@@ -148,13 +157,13 @@ impl ResamplePreview {
         let PixelRect { left, top, right, bottom } = self.area;
         let corners = [(left, top), (right, top), (right, bottom), (left, bottom)]
             .map(|(x, y)| map.apply((x as f64, y as f64)))
-            .map(|(x, y)| view.to_screen(x as f32, y as f32));
+            .map(|(x, y)| view.to_screen(x as f32, y as f32) + shift);
         let margin = (radius + 1) as f32 * view.zoom / painter.pixels_per_point();
-        let rect = Rect::from_points(&corners).expand(margin).intersect(view.image_rect()).intersect(painter.clip_rect());
+        let rect = Rect::from_points(&corners).expand(margin).intersect(painter.clip_rect());
         if !rect.is_positive() {
             return;
         }
-        let corner = (view.image_rect().min.to_vec2() * painter.pixels_per_point()).round();
+        let corner = ((view.image_rect().min.to_vec2() + shift) * painter.pixels_per_point()).round();
         let params = Params {
             view: [corner.x, corner.y, view.zoom, opacity],
             map_x: [back.xx as f32, back.xy as f32, (back.dx - left as f64 - 0.5) as f32, 0.0],
@@ -163,7 +172,12 @@ impl ResamplePreview {
             // Enlarged, each pixel of the image shows as it will be put down.
             mode: [radius, (view.zoom >= 1.0) as u32],
         };
-        let callback = PreviewCallback { pixels: Arc::clone(&self.pixels), tiles: Arc::clone(&self.tiles), params };
+        let callback = PreviewCallback {
+            pixels: Arc::clone(&self.pixels),
+            tiles: Arc::clone(&self.tiles),
+            params,
+            bind_groups: OnceLock::new(),
+        };
         painter.add(egui_wgpu::Callback::new_paint_callback(rect, callback));
     }
 }
@@ -195,14 +209,18 @@ impl Params {
     }
 }
 
+/// The pixels drawn once: on the image, or on a copy of a tiled one, each drawing
+/// with its own buffers.
 struct PreviewCallback {
     pixels: Arc<RgbaImage>,
     tiles: Arc<OnceLock<Vec<Tile>>>,
     params: Params,
+    /// Each tile's, for this drawing.
+    bind_groups: OnceLock<Vec<wgpu::BindGroup>>,
 }
 
 /// The pixels cut into tiles, each in a texture with the pixels around it.
-fn make_tiles(device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout, pixels: &RgbaImage) -> Vec<Tile> {
+fn make_tiles(device: &wgpu::Device, queue: &wgpu::Queue, pixels: &RgbaImage) -> Vec<Tile> {
     let (width, height) = pixels.dimensions();
     let mut tiles = Vec::new();
     for y in (0..height).step_by(TILE_SIZE as usize) {
@@ -237,22 +255,8 @@ fn make_tiles(device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGro
                 wgpu::util::TextureDataOrder::LayerMajor,
                 &data,
             );
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("resample"),
-                size: PARAMS_SIZE,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("resample"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                ],
-            });
-            tiles.push(Tile { core, texture_origin: [from_x as i32, from_y as i32], buffer, bind_group });
+            tiles.push(Tile { core, texture_origin: [from_x as i32, from_y as i32], view });
         }
     }
     tiles
@@ -270,10 +274,15 @@ impl egui_wgpu::CallbackTrait for PreviewCallback {
         let Some(resources) = callback_resources.get::<Resources>() else {
             return Vec::new();
         };
-        let tiles = self.tiles.get_or_init(|| make_tiles(device, queue, &resources.layout, &self.pixels));
-        for tile in tiles {
-            queue.write_buffer(&tile.buffer, 0, &self.params.bytes(tile.core, tile.texture_origin));
-        }
+        let tiles = self.tiles.get_or_init(|| make_tiles(device, queue, &self.pixels));
+        self.bind_groups.get_or_init(|| {
+            let bind = |tile: &Tile| {
+                let bytes = self.params.bytes(tile.core, tile.texture_origin);
+                let texture = wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tile.view) };
+                uniform_bind_group(device, &resources.layout, &bytes, "resample", &[texture])
+            };
+            tiles.iter().map(bind).collect()
+        });
         Vec::new()
     }
 
@@ -283,12 +292,12 @@ impl egui_wgpu::CallbackTrait for PreviewCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        let (Some(resources), Some(tiles)) = (callback_resources.get::<Resources>(), self.tiles.get()) else {
+        let (Some(resources), Some(bind_groups)) = (callback_resources.get::<Resources>(), self.bind_groups.get()) else {
             return;
         };
         render_pass.set_pipeline(&resources.pipeline);
-        for tile in tiles {
-            render_pass.set_bind_group(0, &tile.bind_group, &[]);
+        for bind_group in bind_groups {
+            render_pass.set_bind_group(0, bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         }
     }

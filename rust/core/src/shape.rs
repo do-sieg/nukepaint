@@ -2,7 +2,8 @@
 //! or filled, and a Contour or a Polygon, which are filled. Each goes through the
 //! middle of the pixels its points are on, in a line as wide as asked, of a colour
 //! blended over what is under it, with smooth edges if asked to. However often it goes
-//! over a pixel, it changes it no more than the once it covered it most.
+//! over a pixel, it changes it no more than the once it covered it most. A shape may
+//! wrap around the edges of an area, coming back in at one edge as it goes off the other.
 
 use std::f64::consts::{PI, TAU};
 
@@ -12,6 +13,7 @@ use crate::{
     BlendMode, MAX_TIP_SIZE, Overlaps, PixelRect, Selection, SelectionMask,
     blend::blend_pixel,
     stroke::{distance_to_segment, pixel_of, tip},
+    wrap,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,13 +160,20 @@ pub struct ShapeCanvas {
     mask: Option<SelectionMask>,
     /// Where it was drawn last, which is all of `pixels` that can differ from `base`.
     drawn: Option<PixelRect>,
+    /// The area shapes wrap around the edges of, if they do.
+    wrap: Option<PixelRect>,
 }
 
 impl ShapeCanvas {
     /// A canvas of the layer's pixels, on which shapes change only those `mask` holds,
     /// if there is one.
     pub fn new(base: RgbaImage, mask: Option<SelectionMask>) -> Self {
-        Self { pixels: base.clone(), base, mask, drawn: None }
+        Self { pixels: base.clone(), base, mask, drawn: None, wrap: None }
+    }
+
+    /// The canvas, with shapes wrapping around the edges of `area` if there is one.
+    pub fn wrapping(self, area: Option<PixelRect>) -> Self {
+        Self { wrap: area, ..self }
     }
 
     /// The layer's pixels with the shape drawn last.
@@ -176,7 +185,7 @@ impl ShapeCanvas {
     /// any of it is on the image.
     pub fn draw(&mut self, shape: &Shape, style: &ShapeStyle) -> Option<PixelRect> {
         let cleared = self.clear();
-        self.drawn = draw(&mut self.pixels, &self.base, shape, style, self.mask.as_ref());
+        self.drawn = draw(&mut self.pixels, &self.base, shape, style, self.mask.as_ref(), self.wrap);
         union(cleared, self.drawn)
     }
 
@@ -204,14 +213,15 @@ impl ShapeCanvas {
 }
 
 /// Draws a shape on `pixels`, over `base` where it covers them, and only on the pixels
-/// `mask` holds if there is one. Returns the area it went over, if any of it is on the
-/// image.
+/// `mask` holds if there is one, wrapping around the edges of `wrap` if there is one.
+/// Returns the area it went over, if any of it is on the image.
 fn draw(
     pixels: &mut RgbaImage,
     base: &RgbaImage,
     shape: &Shape,
     style: &ShapeStyle,
     mask: Option<&SelectionMask>,
+    wrap: Option<PixelRect>,
 ) -> Option<PixelRect> {
     let outline = shape.outline();
     let size = style.size.clamp(1, MAX_TIP_SIZE);
@@ -221,11 +231,22 @@ fn draw(
     for &(x, y) in &outline {
         (left, top, right, bottom) = (left.min(x), top.min(y), right.max(x), bottom.max(y));
     }
-    let area = PixelRect {
-        left: ((left - reach).floor().max(0.0) as i32).min(pixels.width() as i32),
-        top: ((top - reach).floor().max(0.0) as i32).min(pixels.height() as i32),
-        right: ((right + reach).ceil().max(0.0) as i32).min(pixels.width() as i32),
-        bottom: ((bottom + reach).ceil().max(0.0) as i32).min(pixels.height() as i32),
+    let reached = PixelRect {
+        left: (left - reach).floor() as i32,
+        top: (top - reach).floor() as i32,
+        right: (right + reach).ceil() as i32,
+        bottom: (bottom + reach).ceil() as i32,
+    };
+    // Wrapping, it is drawn where it is, on or off the image, then folded into the area.
+    let area = if wrap.is_some() {
+        reached
+    } else {
+        PixelRect {
+            left: reached.left.clamp(0, pixels.width() as i32),
+            top: reached.top.clamp(0, pixels.height() as i32),
+            right: reached.right.clamp(0, pixels.width() as i32),
+            bottom: reached.bottom.clamp(0, pixels.height() as i32),
+        }
     };
     if area.is_empty() {
         return None;
@@ -248,6 +269,19 @@ fn draw(
             coverage.hard_segment(from, to, &tip);
         }
     }
+    let (coverage, area) = match wrap {
+        Some(wrap) => {
+            let mut folded = Coverage::new(wrap);
+            for y in area.top..area.bottom {
+                for x in area.left..area.right {
+                    let (on_x, on_y) = wrap::pixel(wrap, x as i64, y as i64);
+                    folded.cover(on_x as i64, on_y as i64, coverage.at(x, y));
+                }
+            }
+            (folded, wrap::changed_area(wrap, area)?)
+        }
+        None => (coverage, area),
+    };
     for y in area.top..area.bottom {
         for x in area.left..area.right {
             let covered = coverage.at(x, y);
@@ -470,5 +504,18 @@ mod tests {
         let half = ShapeStyle { color: Rgba([0, 0, 0, 128]), ..style(3, false) };
         canvas.draw(&shape(ShapeKind::FilledRectangle, &[(1, 1), (8, 8)]), &half);
         assert_eq!(canvas.pixels().get_pixel(1, 1)[3], canvas.pixels().get_pixel(4, 4)[3]);
+    }
+
+    #[test]
+    fn a_wrapping_shape_comes_back_in_at_the_other_edge() {
+        let area = PixelRect { left: 2, top: 2, right: 8, bottom: 8 };
+        let mut canvas = ShapeCanvas::new(RgbaImage::new(10, 10), None).wrapping(Some(area));
+        let style = ShapeStyle { color: Rgba([0, 0, 0, 255]), size: 1, smooth: false, overlaps: Overlaps::Add };
+        // A line from inside the area to past its right edge.
+        let drawn = canvas.draw(&Shape::new(ShapeKind::Line, vec![(6, 4), (9, 4)]), &style);
+        // All the way across, with the room kept around the line.
+        assert_eq!(drawn, Some(PixelRect { left: 2, top: 2, right: 8, bottom: 7 }));
+        let black: Vec<u32> = (0..10).filter(|&x| canvas.pixels().get_pixel(x, 4)[3] > 0).collect();
+        assert_eq!(black, [2, 3, 6, 7]);
     }
 }

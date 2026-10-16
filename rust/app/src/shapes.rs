@@ -87,7 +87,8 @@ struct Drag {
 }
 
 impl ShapeEdit {
-    /// Begins drawing a shape on the active layer from the pixel `at`, in `style`.
+    /// Begins drawing a shape on the active layer from the pixel `at`, in `style`,
+    /// wrapping around the edges of `wrap` if there is one, as on a tiled image.
     /// Returns it, and the area of the layer it shows on.
     pub fn begin(
         document: &Document,
@@ -95,6 +96,7 @@ impl ShapeEdit {
         at: (i32, i32),
         style: ShapeStyle,
         secondary: bool,
+        wrap: Option<PixelRect>,
     ) -> (Self, Option<PixelRect>) {
         let points = match kind {
             ShapeKind::Curve => vec![at; 4],
@@ -111,7 +113,7 @@ impl ShapeEdit {
         let mut edit = Self {
             kind,
             layer: document.active_layer,
-            canvas: ShapeCanvas::new(document.active().pixels.clone(), document.selection_mask()),
+            canvas: ShapeCanvas::new(document.active().pixels.clone(), document.selection_mask()).wrapping(wrap),
             secondary,
             draft: Some(draft),
             versions: Vec::new(),
@@ -626,7 +628,7 @@ mod tests {
 
     /// A shape drawn with a drag from `from` to `to`, as a step.
     fn drawn(document: &mut Document, kind: ShapeKind, from: (i32, i32), to: (i32, i32)) -> ShapeEdit {
-        let (mut edit, _) = ShapeEdit::begin(document, kind, from, STYLE, false);
+        let (mut edit, _) = ShapeEdit::begin(document, kind, from, STYLE, false, None);
         edit.draw_to(to, false);
         assert!(edit.finish(document, "Shape", None));
         edit
@@ -635,7 +637,7 @@ mod tests {
     #[test]
     fn a_drag_draws_a_shape_as_a_step() {
         let mut document = document();
-        let (mut edit, area) = ShapeEdit::begin(&document, ShapeKind::Line, (2, 2), STYLE, false);
+        let (mut edit, area) = ShapeEdit::begin(&document, ShapeKind::Line, (2, 2), STYLE, false, None);
         assert!(area.is_some() && edit.is_dragging());
         edit.draw_to((8, 2), false);
         // It only shows on the layer until it is finished.
@@ -648,7 +650,7 @@ mod tests {
     #[test]
     fn a_click_draws_nothing() {
         let mut document = document();
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Rectangle, (2, 2), STYLE, false);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Rectangle, (2, 2), STYLE, false, None);
         assert!(!edit.finish(&mut document, "Rectangle", None));
         assert_eq!(document.current_step(), 0);
         assert!(!black(&document, 2, 2));
@@ -657,9 +659,9 @@ mod tests {
     #[test]
     fn shift_keeps_to_squares_and_steps_of_the_angle() {
         let mut document = document();
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Ellipse, (0, 0), STYLE, false);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Ellipse, (0, 0), STYLE, false, None);
         edit.draw_to((9, 4), true);
-        let (mut line, _) = ShapeEdit::begin(&document, ShapeKind::Line, (0, 0), STYLE, false);
+        let (mut line, _) = ShapeEdit::begin(&document, ShapeKind::Line, (0, 0), STYLE, false, None);
         line.draw_to((10, 1), true);
         edit.finish(&mut document, "Ellipse", None);
         assert_eq!(edit.shape(&document).unwrap().points, [(0, 0), (4, 4)]);
@@ -723,7 +725,7 @@ mod tests {
     #[test]
     fn a_contour_stretches_with_its_box() {
         let mut document = document();
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Contour, (0, 0), STYLE, false);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Contour, (0, 0), STYLE, false, None);
         for at in [(4, 0), (4, 4), (0, 4)] {
             edit.draw_to(at, false);
         }
@@ -737,14 +739,14 @@ mod tests {
     #[test]
     fn the_polygon_puts_down_corners_and_they_change() {
         let mut document = document();
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false, None);
         assert!(edit.is_drawing() && !edit.is_dragging());
         edit.add_corner((8, 0));
         edit.reach(Some((8, 8)));
         assert!(*edit.pixels().get_pixel(6, 2) == BLACK, "it shows closed on the pointer");
         assert!(!edit.finish(&mut document, "Polygon", None), "two corners are not enough");
 
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false, None);
         for at in [(8, 0), (8, 8), (0, 8)] {
             edit.add_corner(at);
         }
@@ -823,7 +825,7 @@ mod tests {
     #[test]
     fn a_shape_being_drawn_goes_on_while_nothing_else_changes() {
         let mut document = document();
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false, None);
         assert!(edit.is_current(&document));
         document.active_mut().pixels.put_pixel(19, 19, BLACK);
         document.commit("Pencil", None);

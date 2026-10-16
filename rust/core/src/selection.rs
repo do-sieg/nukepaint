@@ -338,6 +338,38 @@ impl Selection {
         Self { outlines, frame: None }
     }
 
+    /// The selection wrapped around the edges of `area`, as on a tile repeated side by
+    /// side: what is off one edge comes back in at the other. One already in the area
+    /// is left as it is.
+    pub fn wrapped(&self, area: PixelRect) -> Selection {
+        let Some(bounds) = self.bounds() else {
+            return self.clone();
+        };
+        let (width, height) = (area.width() as f64, area.height() as f64);
+        let inside = bounds.left >= area.left as f64
+            && bounds.top >= area.top as f64
+            && bounds.right <= area.right as f64
+            && bounds.bottom <= area.bottom as f64;
+        if inside || area.is_empty() {
+            return self.clone();
+        }
+        // The copies of the area it goes over, counted from the area itself.
+        let copies = |from: f64, to: f64, start: i32, size: f64| {
+            ((from - start as f64) / size).floor() as i64..((to - start as f64) / size).ceil() as i64
+        };
+        let mut wrapped = Selection::default();
+        for y in copies(bounds.top, bounds.bottom, area.top, height) {
+            for x in copies(bounds.left, bounds.right, area.left, width) {
+                let (dx, dy) = (x as f64 * width, y as f64 * height);
+                let copy = Selection::rect(area).transformed(&Affine::translation(dx, dy));
+                let piece = self.combine(&copy, SelectionMode::Intersect);
+                let piece = piece.transformed(&Affine::translation(-dx, -dy));
+                wrapped = wrapped.combine(&piece, SelectionMode::Add);
+            }
+        }
+        wrapped
+    }
+
     /// What a selection tool leaves selected after drawing `drawn` over this one.
     pub fn combine(&self, drawn: &Selection, mode: SelectionMode) -> Selection {
         use SelectionMode::*;
@@ -700,5 +732,21 @@ mod tests {
         let ring = [(0, 0), (6, 0), (6, 6), (0, 6), (0, 3), (2, 3), (2, 4), (4, 4), (4, 2), (2, 2), (2, 3), (0, 3)];
         assert!(Selection::polygon(&ring, Overlaps::Add).contains(3, 3));
         assert!(!Selection::polygon(&ring, Overlaps::Subtract).contains(3, 3));
+    }
+
+    #[test]
+    fn wrapped_comes_back_in_at_the_other_edge() {
+        let area = PixelRect { left: 10, top: 10, right: 20, bottom: 20 };
+        // Inside, as it is.
+        let inside = rect(12, 12, 15, 15);
+        assert_eq!(inside.wrapped(area), inside);
+        // Over the right edge: a piece by each side.
+        let wrapped = rect(18, 12, 23, 14).wrapped(area);
+        let selected: Vec<i64> = (10..20).filter(|&x| wrapped.contains(x, 12)).collect();
+        assert_eq!(selected, [10, 11, 12, 18, 19]);
+        assert!(!wrapped.contains(20, 12) && !wrapped.contains(15, 12));
+        // Wholly on a copy, moved onto the area.
+        let wrapped = rect(32, 2, 34, 4).wrapped(area);
+        assert!(wrapped.contains(12, 12) && wrapped.contains(13, 13) && !wrapped.contains(14, 12));
     }
 }

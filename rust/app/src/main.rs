@@ -991,14 +991,16 @@ impl App {
 
     fn change_selection(&mut self, command: EditCommand) {
         let image = &mut self.images[self.current.unwrap()];
+        // Tiled, all there is to select is the tile.
+        let tile = image.view.tile();
         let document = &mut image.document;
         let (changed, name, icon) = match command {
-            EditCommand::SelectAll => (document.select_all(), "Select All", icons::SELECT_ALL),
+            EditCommand::SelectAll => (document.select_all(tile), "Select All", icons::SELECT_ALL),
             EditCommand::Deselect => (document.deselect(), "Deselect", icons::DESELECT),
-            _ => (document.invert_selection(), "Invert Selection", icons::INVERT_SELECTION),
+            _ => (document.invert_selection(tile), "Invert Selection", icons::INVERT_SELECTION),
         };
         if changed {
-            commit_selection(document, name, icon);
+            commit_selection(document, None, name, icon);
             // A transform would go on with the selection as it was.
             image.transform = None;
         }
@@ -2036,8 +2038,12 @@ impl App {
 }
 
 /// Records a change to the selection alone as a step, named after what made it, or
-/// Deselect when nothing is left selected.
-pub fn commit_selection(document: &mut Document, name: &str, icon: Icon) {
+/// Deselect when nothing is left selected. Drawn on a tiled image, it is first wrapped
+/// around the edges of the tile.
+pub fn commit_selection(document: &mut Document, tile: Option<PixelRect>, name: &str, icon: Icon) {
+    if let Some(tile) = tile {
+        document.selection = document.selection.wrapped(tile);
+    }
     let (name, icon) = if document.selection.is_empty() { ("Deselect", icons::DESELECT) } else { (name, icon) };
     document.commit(name, Some(icon.name()));
 }
