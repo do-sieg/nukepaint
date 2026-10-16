@@ -6,6 +6,7 @@ use image::RgbaImage;
 use crate::{PixelRect, Selection};
 
 /// The selected pixels of an image, one flag for each of its pixels.
+#[derive(Clone)]
 pub struct SelectionMask {
     width: u32,
     height: u32,

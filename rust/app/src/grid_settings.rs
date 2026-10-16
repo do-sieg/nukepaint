@@ -1,9 +1,9 @@
 //! Asks where the grid starts, how large its cells are and what colour its lines are.
 //! The image shows the grid as it is tried out; Cancel, or Escape, leaves it as it was.
 
-use eframe::egui::{self, Color32, Key};
+use eframe::egui::{self, Color32};
 
-use crate::grid::Grid;
+use crate::{dialog, grid::Grid};
 
 /// Largest a cell can be, and furthest from the image's corner one can start, in pixels.
 const MAX_SIDE: i32 = 32768;
@@ -28,10 +28,7 @@ impl Dialog {
     /// Shows the dialog. Returns what the user did, if anything.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Outcome> {
         // The image stays in plain view, to see the grid on it.
-        let modal = egui::Modal::new(egui::Id::new("grid_settings")).backdrop_color(Color32::TRANSPARENT);
-        let response = modal.show(ctx, |ui| {
-            ui.heading("Grid Settings");
-            ui.add_space(8.0);
+        let response = dialog::show(ctx, "grid_settings", "Grid Settings", Color32::TRANSPARENT, |ui| {
             egui::Grid::new("grid_settings_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
                 let offsets = [
                     ("X offset:", "left", 0),
@@ -58,15 +55,7 @@ impl Dialog {
                 ui.color_edit_button_srgba_unmultiplied(&mut self.grid.color);
                 ui.end_row();
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let enter = ui.input(|input| input.key_pressed(Key::Enter));
-                if ui.button("OK").clicked() || enter {
-                    return Some(Outcome::Accepted);
-                }
-                ui.button("Cancel").clicked().then_some(Outcome::Canceled)
-            })
-            .inner
+            dialog::ok_cancel(ui).map(|ok| if ok { Outcome::Accepted } else { Outcome::Canceled })
         });
         if response.should_close() {
             return Some(Outcome::Canceled);

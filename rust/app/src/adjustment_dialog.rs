@@ -1,11 +1,20 @@
-//! Asks for the settings of an adjustment: each a number on a slider, as its kind
-//! lists them, or the curves of Curves. The image shows each change
-//! as it is made; Cancel, or Escape, puts the layer back as it was.
+//! Asks for the settings of an adjustment or an effect: each a number on a slider, or
+//! a box to check, as its kind lists them, or the curves of Curves. The image shows
+//! each change as it is made; Cancel, or Escape, puts the layer back as it was.
+
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+};
 
 use eframe::egui::{self, Color32, Key};
-use power_paint_core::{Curves, RgbaImage, SelectionMask};
+use power_paint_core::{Curves, Effect, RgbaImage, SelectionMask, apply_effect};
 
-use crate::{adjustments::AdjustmentKind, curve_editor::CurveEditor};
+use crate::{adjustments::AdjustmentKind, curve_editor::CurveEditor, dialog, effects::EffectKind};
 
 /// Width of the sliders, in points.
 const SLIDER_WIDTH: f32 = 220.0;
@@ -17,7 +26,8 @@ const CHANNEL_COLORS: [Color32; 3] =
     [Color32::from_rgb(255, 77, 77), Color32::from_rgb(77, 255, 77), Color32::from_rgb(102, 128, 255)];
 
 /// A number a dialog asks for on a slider, from `min` to `max`, going up and down by
-/// `step`, with `suffix` shown after it.
+/// `step`, with `suffix` shown after it, or a box to check, which is 1 when checked
+/// and 0 when not.
 pub struct Setting {
     pub label: &'static str,
     pub min: f64,
@@ -25,6 +35,77 @@ pub struct Setting {
     pub step: f64,
     pub default: f64,
     pub suffix: &'static str,
+    pub check: bool,
+}
+
+pub const fn slider(label: &'static str, min: f64, max: f64, step: f64, default: f64, suffix: &'static str) -> Setting {
+    Setting { label, min, max, step, default, suffix, check: false }
+}
+
+pub const fn check(label: &'static str, default: bool) -> Setting {
+    Setting { label, min: 0.0, max: 1.0, step: 1.0, default: if default { 1.0 } else { 0.0 }, suffix: "", check: true }
+}
+
+/// What a dialog asks the settings of: an adjustment of the Colors menu or an effect
+/// of the Filters menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FilterKind {
+    Adjustment(AdjustmentKind),
+    Effect(EffectKind),
+}
+
+impl FilterKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Adjustment(kind) => kind.name(),
+            Self::Effect(kind) => kind.name(),
+        }
+    }
+
+    pub fn settings(self) -> &'static [Setting] {
+        match self {
+            Self::Adjustment(kind) => kind.settings(),
+            Self::Effect(kind) => kind.settings(),
+        }
+    }
+}
+
+/// An effect being worked out on a thread of its own, as it may take a while, which
+/// gives up once dropped.
+pub struct Job {
+    stop: Arc<AtomicBool>,
+    result: mpsc::Receiver<RgbaImage>,
+}
+
+impl Job {
+    pub fn start(pixels: RgbaImage, effect: Effect, mask: Option<SelectionMask>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (sender, result) = mpsc::channel();
+        let stopped = Arc::clone(&stop);
+        thread::spawn(move || {
+            if let Some(pixels) = apply_effect(&pixels, &effect, mask.as_ref(), &stopped) {
+                // The dialog may be gone.
+                let _ = sender.send(pixels);
+            }
+        });
+        Self { stop, result }
+    }
+
+    /// The pixels, if they are worked out.
+    pub fn poll(&self) -> Option<RgbaImage> {
+        self.result.try_recv().ok()
+    }
+
+    /// Waits for the pixels.
+    pub fn wait(self) -> Option<RgbaImage> {
+        self.result.recv().ok()
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 pub enum Outcome {
@@ -38,7 +119,7 @@ pub struct Dialog {
     /// The image and the layer being adjusted.
     pub image: usize,
     pub layer: usize,
-    pub kind: AdjustmentKind,
+    pub kind: FilterKind,
     /// The settings, in the order the kind lists them.
     pub values: Vec<f64>,
     pub curves: Curves,
@@ -49,42 +130,42 @@ pub struct Dialog {
     pub mask: Option<SelectionMask>,
     /// The layer's pixels as the settings adjust them, once worked out.
     pub preview: Option<RgbaImage>,
+    /// The effect being worked out with the latest settings, if it is not yet.
+    pub job: Option<Job>,
 }
 
 impl Dialog {
-    pub fn new(image: usize, layer: usize, kind: AdjustmentKind, values: Vec<f64>, curves: Curves, mask: Option<SelectionMask>) -> Self {
-        Self { image, layer, kind, values, curves, channel: 0, editor: CurveEditor::default(), mask, preview: None }
+    pub fn new(image: usize, layer: usize, kind: FilterKind, values: Vec<f64>, curves: Curves, mask: Option<SelectionMask>) -> Self {
+        Self { image, layer, kind, values, curves, channel: 0, editor: CurveEditor::default(), mask, preview: None, job: None }
     }
 
     /// Shows the dialog. Returns what the user did, if anything.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Outcome> {
         let mut edited = false;
         // The image stays in plain view, to see the changes on it.
-        let modal = egui::Modal::new(egui::Id::new("adjustment")).backdrop_color(Color32::TRANSPARENT);
-        let response = modal.show(ctx, |ui| {
-            ui.heading(self.kind.name());
-            ui.add_space(8.0);
-            if self.kind == AdjustmentKind::Curves {
+        let response = dialog::show(ctx, "adjustment", self.kind.name(), Color32::TRANSPARENT, |ui| {
+            if self.kind == FilterKind::Adjustment(AdjustmentKind::Curves) {
                 edited |= self.curves_ui(ui);
             } else {
                 edited |= self.settings_ui(ui);
             }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            dialog::buttons(ui, |ui| {
                 let enter = ui.input(|input| input.key_pressed(Key::Enter));
-                if ui.button("OK").clicked() || enter {
-                    return Some(Outcome::Accepted);
-                }
                 if ui.button("Cancel").clicked() {
                     return Some(Outcome::Canceled);
+                }
+                if ui.button("OK").clicked() || enter {
+                    return Some(Outcome::Accepted);
                 }
                 if ui.button("Reset").clicked() {
                     self.reset();
                     edited = true;
                 }
+                if self.job.is_some() {
+                    ui.spinner().on_hover_text("Working out the preview");
+                }
                 None
             })
-            .inner
         });
         if response.should_close() {
             return Some(Outcome::Canceled);
@@ -97,6 +178,16 @@ impl Dialog {
         let mut edited = false;
         egui::Grid::new("adjustment_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
             for (setting, value) in self.kind.settings().iter().zip(&mut self.values) {
+                if setting.check {
+                    ui.label("");
+                    let mut checked = *value != 0.0;
+                    if ui.checkbox(&mut checked, setting.label).changed() {
+                        *value = if checked { 1.0 } else { 0.0 };
+                        edited = true;
+                    }
+                    ui.end_row();
+                    continue;
+                }
                 ui.label(setting.label);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().slider_width = SLIDER_WIDTH;

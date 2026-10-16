@@ -1,8 +1,10 @@
 //! Asks for a new size of the image: one to stretch it to, with how its pixels are
 //! redrawn, or one for the canvas around it, with where the image stays on it.
 
-use eframe::egui::{self, Key};
+use eframe::egui;
 use power_paint_core::Interpolation;
+
+use crate::dialog;
 
 /// Widest and tallest the image can be made, in pixels.
 const MAX_SIDE: u32 = 32768;
@@ -74,9 +76,7 @@ impl Dialog {
 
     /// Shows the dialog. Returns what the user did, if anything.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Outcome> {
-        let response = egui::Modal::new(egui::Id::new("image_size")).show(ctx, |ui| {
-            ui.heading(self.kind.title());
-            ui.add_space(8.0);
+        let response = dialog::show(ctx, "image_size", self.kind.title(), dialog::DIM, |ui| {
             egui::Grid::new("image_size_grid").num_columns(3).spacing([8.0, 8.0]).show(ui, |ui| {
                 if self.kind == Kind::Resize {
                     ui.label("Resampling:");
@@ -138,15 +138,7 @@ impl Dialog {
                     ui.end_row();
                 }
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let enter = ui.input(|input| input.key_pressed(Key::Enter));
-                if ui.button("OK").clicked() || enter {
-                    return Some(Outcome::Accepted);
-                }
-                ui.button("Cancel").clicked().then_some(Outcome::Canceled)
-            })
-            .inner
+            dialog::ok_cancel(ui).map(|ok| if ok { Outcome::Accepted } else { Outcome::Canceled })
         });
         if response.should_close() {
             return Some(Outcome::Canceled);

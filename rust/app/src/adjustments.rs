@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
 use power_paint_core::Adjustment;
 
-use crate::adjustment_dialog::Setting;
+use crate::adjustment_dialog::{FilterKind, Setting, slider};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdjustmentKind {
@@ -20,10 +20,6 @@ pub enum AdjustmentKind {
 }
 
 use AdjustmentKind::*;
-
-const fn slider(label: &'static str, min: f64, max: f64, step: f64, default: f64, suffix: &'static str) -> Setting {
-    Setting { label, min, max, step, default, suffix }
-}
 
 const BRIGHTNESS_CONTRAST: [Setting; 2] = [
     slider("Brightness:", -100.0, 100.0, 1.0, 0.0, ""),
@@ -104,20 +100,21 @@ impl AdjustmentKind {
     }
 }
 
-/// The settings each adjustment was last used with, which its dialog opens with again.
+/// The settings each adjustment and each effect was last used with, which its dialog
+/// opens with again.
 #[derive(Default)]
 pub struct LastSettings {
-    values: HashMap<AdjustmentKind, Vec<f64>>,
+    values: HashMap<FilterKind, Vec<f64>>,
     pub curves: power_paint_core::Curves,
 }
 
 impl LastSettings {
-    pub fn values(&self, kind: AdjustmentKind) -> Vec<f64> {
+    pub fn values(&self, kind: FilterKind) -> Vec<f64> {
         let defaults = || kind.settings().iter().map(|setting| setting.default).collect();
         self.values.get(&kind).map_or_else(defaults, Vec::clone)
     }
 
-    pub fn set_values(&mut self, kind: AdjustmentKind, values: Vec<f64>) {
+    pub fn set_values(&mut self, kind: FilterKind, values: Vec<f64>) {
         self.values.insert(kind, values);
     }
 }

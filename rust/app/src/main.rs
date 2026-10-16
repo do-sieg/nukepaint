@@ -6,7 +6,9 @@ mod clipboard;
 mod colors_panel;
 mod composite;
 mod curve_editor;
+mod dialog;
 mod dock;
+mod effects;
 mod image_strip;
 mod frame_select;
 mod grid;
@@ -29,9 +31,11 @@ mod view;
 
 use std::path::{Path, PathBuf};
 
+use adjustment_dialog::FilterKind;
 use adjustments::{AdjustmentKind, LastSettings};
 use canvas::Drawing;
 use dock::{DockLayout, DockSide, Section};
+use effects::EffectKind;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use checkerboard::Checkerboard;
 use clipboard::Clipboard;
@@ -458,9 +462,9 @@ struct App {
     grid_dialog: Option<grid_settings::Dialog>,
     /// Set while the checkerboard behind the image is being changed.
     checkerboard_dialog: Option<checkerboard::Dialog>,
-    /// Set while the settings of an adjustment are being tried out.
+    /// Set while the settings of an adjustment or an effect are being tried out.
     adjustment_dialog: Option<adjustment_dialog::Dialog>,
-    /// What each adjustment's dialog opens with.
+    /// What each adjustment's and each effect's dialog opens with.
     last_adjustments: LastSettings,
 }
 
@@ -1234,8 +1238,23 @@ impl App {
                     button = button.shortcut_text(ctx.format_shortcut(&shortcut));
                 }
                 if ui.add_enabled(self.can_adjust(), button).clicked() {
-                    self.adjust(&ctx, kind);
+                    self.adjust(&ctx, FilterKind::Adjustment(kind));
                 }
+            }
+        });
+    }
+
+    fn filters_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.menu_button("Filters", |ui| {
+            for (name, kinds) in EffectKind::MENUS {
+                ui.menu_button(name, |ui| {
+                    for &kind in kinds {
+                        if ui.add_enabled(self.can_adjust(), egui::Button::new(format!("{}…", kind.name()))).clicked() {
+                            self.adjust(&ctx, FilterKind::Effect(kind));
+                        }
+                    }
+                });
             }
         });
     }
@@ -1244,9 +1263,10 @@ impl App {
         self.current.is_some() && !self.is_dragging() && !self.has_dialog()
     }
 
-    /// Adjusts the active layer of the current image, inside the selection if there is
-    /// one, at once for an adjustment without settings, or else once its dialog says so.
-    fn adjust(&mut self, ctx: &egui::Context, kind: AdjustmentKind) {
+    /// Adjusts the active layer of the current image, or applies an effect to it, inside
+    /// the selection if there is one, at once for an adjustment without settings, or
+    /// else once its dialog says so.
+    fn adjust(&mut self, ctx: &egui::Context, kind: FilterKind) {
         if !self.can_adjust() {
             return;
         }
@@ -1257,7 +1277,9 @@ impl App {
         image.cancel_lasso();
         image.drop_shape();
         let document = &mut image.document;
-        if !kind.has_dialog() {
+        if let FilterKind::Adjustment(kind) = kind
+            && !kind.has_dialog()
+        {
             if document.adjust(&kind.adjustment(&[], &self.last_adjustments.curves)) {
                 document.commit(kind.name(), None);
                 image.refresh(ctx);
@@ -1271,21 +1293,50 @@ impl App {
         self.preview_adjustment();
     }
 
-    /// Shows the layer as the adjustment dialog's settings make it.
+    /// Shows the layer as the adjustment dialog's settings make it, at once for an
+    /// adjustment, or once worked out for an effect.
     fn preview_adjustment(&mut self) {
         let Some(dialog) = &mut self.adjustment_dialog else {
             return;
         };
         let image = &mut self.images[dialog.image];
         let layers = &image.document.layers;
-        let adjustment = dialog.kind.adjustment(&dialog.values, &dialog.curves);
-        let preview = adjust(&layers[dialog.layer].pixels, &adjustment, dialog.mask.as_ref());
-        image.texture.show_layer_as(layers, dialog.layer, &preview, None);
+        let pixels = &layers[dialog.layer].pixels;
+        match dialog.kind {
+            FilterKind::Adjustment(kind) => {
+                let preview = adjust(pixels, &kind.adjustment(&dialog.values, &dialog.curves), dialog.mask.as_ref());
+                image.texture.show_layer_as(layers, dialog.layer, &preview, None);
+                dialog.preview = Some(preview);
+            }
+            // The one working out the settings before, if any, gives up.
+            FilterKind::Effect(kind) => {
+                let effect = kind.effect(&dialog.values);
+                dialog.job = Some(adjustment_dialog::Job::start(pixels.clone(), effect, dialog.mask.clone()));
+            }
+        }
+    }
+
+    /// Shows the layer as the effect being worked out makes it, once it is.
+    fn poll_effect(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.adjustment_dialog else {
+            return;
+        };
+        let Some(job) = &dialog.job else {
+            return;
+        };
+        let Some(preview) = job.poll() else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(15));
+            return;
+        };
+        dialog.job = None;
+        let image = &mut self.images[dialog.image];
+        image.texture.show_layer_as(&image.document.layers, dialog.layer, &preview, None);
         dialog.preview = Some(preview);
     }
 
     /// Shows the adjustment dialog while it is open, and the layer as it says.
     fn adjustment_dialog(&mut self, ctx: &egui::Context) {
+        self.poll_effect(ctx);
         let Some(dialog) = &mut self.adjustment_dialog else {
             return;
         };
@@ -1293,7 +1344,10 @@ impl App {
             None => {}
             Some(adjustment_dialog::Outcome::Edited) => self.preview_adjustment(),
             Some(adjustment_dialog::Outcome::Accepted) => {
-                let dialog = self.adjustment_dialog.take().unwrap();
+                let mut dialog = self.adjustment_dialog.take().unwrap();
+                if let Some(job) = dialog.job.take() {
+                    dialog.preview = job.wait();
+                }
                 let image = &mut self.images[dialog.image];
                 let layer = &mut image.document.layers[dialog.layer];
                 if let Some(preview) = dialog.preview
@@ -1304,7 +1358,7 @@ impl App {
                 }
                 image.refresh(ctx);
                 self.last_adjustments.set_values(dialog.kind, dialog.values);
-                if dialog.kind == AdjustmentKind::Curves {
+                if dialog.kind == FilterKind::Adjustment(AdjustmentKind::Curves) {
                     self.last_adjustments.curves = dialog.curves;
                 }
             }
@@ -1689,7 +1743,7 @@ impl App {
                 if let Some(shortcut) = kind.shortcut()
                     && ctx.input_mut(|input| input.consume_shortcut(&shortcut))
                 {
-                    self.adjust(ctx, kind);
+                    self.adjust(ctx, FilterKind::Adjustment(kind));
                 }
             }
             for commands in LayerCommand::MENU.into_iter().chain(LayerCommand::IMAGE_MENU) {
@@ -1796,14 +1850,12 @@ impl App {
         }
 
         let name = self.images[index].document.name();
-        let response = egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
-            ui.heading("Unsaved changes");
+        let response = dialog::show(ctx, "unsaved_changes", "Unsaved changes", dialog::DIM, |ui| {
             ui.label(format!("Save changes to {name}?"));
-            ui.add_space(8.0);
             let mut choice = None;
-            ui.horizontal(|ui| {
+            dialog::buttons(ui, |ui| {
                 let buttons =
-                    [("Save", UnsavedChoice::Save), ("Don't Save", UnsavedChoice::Discard), ("Cancel", UnsavedChoice::Cancel)];
+                    [("Cancel", UnsavedChoice::Cancel), ("Don't Save", UnsavedChoice::Discard), ("Save", UnsavedChoice::Save)];
                 for (label, button_choice) in buttons {
                     if ui.button(label).clicked() {
                         choice = Some(button_choice);
@@ -1853,16 +1905,13 @@ impl App {
             return;
         };
         let format = prompt.path.extension().map(|extension| extension.to_string_lossy().to_uppercase());
-        let response = egui::Modal::new(egui::Id::new("flatten_prompt")).show(ctx, |ui| {
-            ui.heading("Flatten the image?");
+        let response = dialog::show(ctx, "flatten_prompt", "Flatten the image?", dialog::DIM, |ui| {
             ui.label(format!("{} files cannot keep layers.\nFlatten the image and save it?", format.unwrap_or_default()));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let flatten = ui.button("Flatten and Save").clicked();
+            dialog::buttons(ui, |ui| {
                 let cancel = ui.button("Cancel").clicked();
+                let flatten = ui.button("Flatten and Save").clicked();
                 flatten.then_some(true).or(cancel.then_some(false))
             })
-            .inner
         });
         let flatten = if response.should_close() { Some(false) } else { response.inner };
         let Some(flatten) = flatten else {
@@ -1910,13 +1959,11 @@ fn show_errors(ctx: &egui::Context, id: &str, heading: &str, errors: &mut Vec<St
     if errors.is_empty() {
         return;
     }
-    let response = egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
-        ui.heading(heading);
+    let response = dialog::show(ctx, id, heading, dialog::DIM, |ui| {
         for error in errors.iter() {
             ui.label(error);
         }
-        ui.add_space(8.0);
-        ui.button("OK").clicked()
+        dialog::buttons(ui, |ui| ui.button("OK").clicked())
     });
     if response.inner || response.should_close() {
         errors.clear();
@@ -1967,6 +2014,7 @@ impl eframe::App for App {
                 self.layer_command_menu(ui, "Image", &LayerCommand::IMAGE_MENU);
                 self.layer_command_menu(ui, "Layers", &LayerCommand::MENU);
                 self.adjustments_menu(ui);
+                self.filters_menu(ui);
                 self.view_menu(ui);
                 let action = image_strip::show(ui, &self.images, self.current, scroll_to_current, &self.checker);
                 match action {

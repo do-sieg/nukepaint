@@ -3,10 +3,12 @@
 //! Escape, puts the layer back as it was.
 
 use eframe::egui::{
-    self, Color32, Key,
+    self, Color32,
     text::{CCursor, CCursorRange},
 };
 use power_paint_core::{BlendMode, Layer, MAX_OPACITY};
+
+use crate::dialog;
 
 /// All there is to a layer but its pixels.
 #[derive(Clone, PartialEq)]
@@ -57,10 +59,7 @@ impl Dialog {
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Outcome> {
         let before = self.properties.clone();
         // The image stays in plain view, to see the changes on it.
-        let modal = egui::Modal::new(egui::Id::new("layer_properties")).backdrop_color(Color32::TRANSPARENT);
-        let response = modal.show(ctx, |ui| {
-            ui.heading("Layer Properties");
-            ui.add_space(8.0);
+        let response = dialog::show(ctx, "layer_properties", "Layer Properties", Color32::TRANSPARENT, |ui| {
             egui::Grid::new("layer_properties_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
                 ui.label("Name:");
                 let mut name = egui::TextEdit::singleline(&mut self.properties.name).desired_width(220.0).show(ui);
@@ -90,15 +89,7 @@ impl Dialog {
                 ui.add(egui::Slider::new(&mut self.properties.opacity, 0..=MAX_OPACITY));
                 ui.end_row();
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let enter = ui.input(|input| input.key_pressed(Key::Enter));
-                if ui.button("OK").clicked() || enter {
-                    return Some(Outcome::Accepted);
-                }
-                ui.button("Cancel").clicked().then_some(Outcome::Canceled)
-            })
-            .inner
+            dialog::ok_cancel(ui).map(|ok| if ok { Outcome::Accepted } else { Outcome::Canceled })
         });
         if response.should_close() {
             return Some(Outcome::Canceled);
