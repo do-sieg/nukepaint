@@ -2,11 +2,12 @@
 //! hard-edged, and of a colour that replaces what was under it. The Paintbrush blends
 //! its colour in, and the Eraser rubs out what is under it, both with smooth edges if
 //! asked to. However often a line goes over a pixel, it changes it no more than the
-//! once it went over it most.
+//! once it went over it most. A line may wrap around the image's edges, coming back
+//! in at one edge as it goes off the other.
 
 use image::{Rgba, RgbaImage};
 
-use crate::{BlendMode, PixelRect, SelectionMask, blend::blend_pixel};
+use crate::{BlendMode, PixelRect, SelectionMask, blend::blend_pixel, wrap};
 
 /// Widest the drawing tools draw, in pixels.
 pub const MAX_TIP_SIZE: u32 = 64;
@@ -41,6 +42,8 @@ pub struct BrushStroke {
     coverage: Vec<u8>,
     /// The pixels it may change, if not all of them.
     mask: Option<SelectionMask>,
+    /// The area it wraps around the edges of, if it does.
+    wrap: Option<PixelRect>,
     /// The point it last reached, on the image, in pixels.
     last: (f64, f64),
     changed: bool,
@@ -48,9 +51,9 @@ pub struct BrushStroke {
 
 impl BrushStroke {
     /// Starts a line `size` pixels wide at the point `at` of the image, and draws
-    /// there, changing only the pixels `mask` holds if there is one. A line that
-    /// replaces the colour is never smooth. Returns the area it changed, if any of it
-    /// is on the image.
+    /// there, changing only the pixels `mask` holds if there is one, and wrapping
+    /// around the edges if `wrap` is set. A line that replaces the colour is never
+    /// smooth. Returns the area it changed, if any of it is on the image.
     pub fn begin(
         image: &mut RgbaImage,
         at: (f64, f64),
@@ -58,6 +61,7 @@ impl BrushStroke {
         size: u32,
         smooth: bool,
         mask: Option<SelectionMask>,
+        wrap: Option<PixelRect>,
     ) -> (Self, Option<PixelRect>) {
         let size = size.clamp(1, MAX_TIP_SIZE);
         let mut stroke = Self {
@@ -69,6 +73,7 @@ impl BrushStroke {
             before: image.clone(),
             coverage: vec![0; image.width() as usize * image.height() as usize],
             mask,
+            wrap,
             last: at,
             changed: false,
         };
@@ -79,8 +84,12 @@ impl BrushStroke {
     /// Draws on from the point the line last reached to `at`. Returns the area it
     /// changed, if any of it is on the image.
     pub fn draw_to(&mut self, image: &mut RgbaImage, at: (f64, f64)) -> Option<PixelRect> {
-        let from = std::mem::replace(&mut self.last, at);
+        let last = std::mem::replace(&mut self.last, at);
+        let (from, at) = if let Some(area) = self.wrap { wrap::segment(area, last, at) } else { (last, at) };
         let area = if self.smooth { self.draw_smooth(image, from, at) } else { self.draw_hard(image, from, at) };
+        if let Some(wrap) = self.wrap {
+            return wrap::changed_area(wrap, area);
+        }
         let area = PixelRect {
             left: area.left.max(0),
             top: area.top.max(0),
@@ -119,11 +128,13 @@ impl BrushStroke {
         for row in 0..self.tip.len() {
             let (from, to) = self.tip[row];
             let y = top + row as i64;
-            if !(0..height).contains(&y) {
+            if self.wrap.is_none() && !(0..height).contains(&y) {
                 continue;
             }
-            for x in (left + from).max(0)..(left + to).min(width) {
-                self.cover(image, x as u32, y as u32, u8::MAX);
+            let (from, to) = (left + from, left + to);
+            let xs = if self.wrap.is_some() { from..to } else { from.max(0)..to.min(width) };
+            for x in xs {
+                self.cover(image, x, y, u8::MAX);
             }
         }
     }
@@ -139,13 +150,23 @@ impl BrushStroke {
             right: (from.0.max(to.0) + outer).ceil() as i32,
             bottom: (from.1.max(to.1) + outer).ceil() as i32,
         };
-        for y in area.top.max(0)..area.bottom.min(image.height() as i32) {
-            for x in area.left.max(0)..area.right.min(image.width() as i32) {
+        let on = if self.wrap.is_some() {
+            area
+        } else {
+            PixelRect {
+                left: area.left.max(0),
+                top: area.top.max(0),
+                right: area.right.min(image.width() as i32),
+                bottom: area.bottom.min(image.height() as i32),
+            }
+        };
+        for y in on.top..on.bottom {
+            for x in on.left..on.right {
                 let middle = (x as f64 + 0.5, y as f64 + 0.5);
                 let coverage = (outer - distance_to_segment(middle, from, to)).min(1.0);
                 let coverage = (coverage * 255.0).round();
                 if coverage > 0.0 {
-                    self.cover(image, x as u32, y as u32, coverage as u8);
+                    self.cover(image, x as i64, y as i64, coverage as u8);
                 }
             }
         }
@@ -153,8 +174,13 @@ impl BrushStroke {
     }
 
     /// Covers the pixel at `x`, `y` of the image by `coverage` out of 255, unless the
-    /// line already covered it as much, or it is not one the line may change.
-    fn cover(&mut self, image: &mut RgbaImage, x: u32, y: u32, coverage: u8) {
+    /// line already covered it as much, or it is not one the line may change. Off the
+    /// image, only a line that wraps around reaches it, at the other edge.
+    fn cover(&mut self, image: &mut RgbaImage, x: i64, y: i64, coverage: u8) {
+        let (x, y) = match self.wrap {
+            Some(area) => wrap::pixel(area, x, y),
+            None => (x as u32, y as u32),
+        };
         if self.mask.as_ref().is_some_and(|mask| !mask.contains(x, y)) {
             return;
         }
@@ -236,6 +262,7 @@ mod tests {
 
     const BLACK: Rgba<u8> = Rgba([0, 0, 0, 255]);
     const PENCIL: Ink = Ink::Replace(BLACK);
+    const WHOLE: PixelRect = PixelRect { left: 0, top: 0, right: 6, bottom: 4 };
 
     fn drawn(image: &RgbaImage) -> Vec<(u32, u32)> {
         image.enumerate_pixels().filter(|(.., pixel)| **pixel == BLACK).map(|(x, y, _)| (x, y)).collect()
@@ -259,7 +286,7 @@ mod tests {
     #[test]
     fn a_press_draws_the_pixel() {
         let mut image = RgbaImage::new(4, 4);
-        let (stroke, area) = BrushStroke::begin(&mut image, (2.7, 1.2), PENCIL, 1, false, None);
+        let (stroke, area) = BrushStroke::begin(&mut image, (2.7, 1.2), PENCIL, 1, false, None, None);
         assert_eq!(drawn(&image), [(2, 1)]);
         assert_eq!(area, Some(PixelRect { left: 2, top: 1, right: 3, bottom: 2 }));
         assert!(stroke.changed());
@@ -268,7 +295,7 @@ mod tests {
     #[test]
     fn lines_leave_no_gaps() {
         let mut image = RgbaImage::new(8, 8);
-        let (mut stroke, _) = BrushStroke::begin(&mut image, (0.0, 0.0), PENCIL, 1, false, None);
+        let (mut stroke, _) = BrushStroke::begin(&mut image, (0.0, 0.0), PENCIL, 1, false, None, None);
         let area = stroke.draw_to(&mut image, (6.0, 3.0));
         assert_eq!(area, Some(PixelRect { left: 0, top: 0, right: 7, bottom: 4 }));
         let pixels = drawn(&image);
@@ -281,10 +308,10 @@ mod tests {
     #[test]
     fn replaces_the_colour_under_it() {
         let mut image = RgbaImage::from_pixel(2, 1, BLACK);
-        let (stroke, _) = BrushStroke::begin(&mut image, (0.0, 0.0), Ink::Replace(CLEAR), 1, true, None);
+        let (stroke, _) = BrushStroke::begin(&mut image, (0.0, 0.0), Ink::Replace(CLEAR), 1, true, None, None);
         assert_eq!(image[(0, 0)], CLEAR);
         assert!(stroke.changed());
-        let (stroke, _) = BrushStroke::begin(&mut image, (1.0, 0.0), PENCIL, 1, false, None);
+        let (stroke, _) = BrushStroke::begin(&mut image, (1.0, 0.0), PENCIL, 1, false, None, None);
         assert!(!stroke.changed());
     }
 
@@ -293,7 +320,7 @@ mod tests {
         let mut image = RgbaImage::new(6, 6);
         let selection = Selection::rect(PixelRect { left: 2, top: 0, right: 4, bottom: 6 });
         let mask = SelectionMask::of(&selection, 6, 6);
-        let (mut stroke, _) = BrushStroke::begin(&mut image, (0.0, 2.0), PENCIL, 1, false, mask);
+        let (mut stroke, _) = BrushStroke::begin(&mut image, (0.0, 2.0), PENCIL, 1, false, mask, None);
         assert!(!stroke.changed());
         stroke.draw_to(&mut image, (5.0, 2.0));
         assert_eq!(drawn(&image), [(2, 2), (3, 2)]);
@@ -302,7 +329,7 @@ mod tests {
     #[test]
     fn stops_at_the_edges() {
         let mut image = RgbaImage::new(4, 4);
-        let (mut stroke, area) = BrushStroke::begin(&mut image, (-5.0, -5.0), PENCIL, 3, false, None);
+        let (mut stroke, area) = BrushStroke::begin(&mut image, (-5.0, -5.0), PENCIL, 3, false, None, None);
         assert_eq!((area, stroke.changed()), (None, false));
         let area = stroke.draw_to(&mut image, (0.0, 0.0));
         assert_eq!(area, Some(PixelRect { left: 0, top: 0, right: 2, bottom: 2 }));
@@ -314,7 +341,7 @@ mod tests {
         let white = Rgba([255, 255, 255, 255]);
         let mut image = RgbaImage::from_pixel(3, 1, white);
         let half_black = Ink::Paint(Rgba([0, 0, 0, 128]));
-        let (mut stroke, _) = BrushStroke::begin(&mut image, (0.0, 0.0), half_black, 1, false, None);
+        let (mut stroke, _) = BrushStroke::begin(&mut image, (0.0, 0.0), half_black, 1, false, None, None);
         stroke.draw_to(&mut image, (2.0, 0.0));
         stroke.draw_to(&mut image, (0.0, 0.0));
         assert_eq!(image[(0, 0)], Rgba([127, 127, 127, 255]));
@@ -325,14 +352,14 @@ mod tests {
     fn smooth_edges_cover_pixels_in_part() {
         let mut image = RgbaImage::new(4, 1);
         // On the line between two pixels, a tip one pixel wide covers half of each.
-        let (stroke, area) = BrushStroke::begin(&mut image, (2.0, 0.5), Ink::Paint(BLACK), 1, true, None);
+        let (stroke, area) = BrushStroke::begin(&mut image, (2.0, 0.5), Ink::Paint(BLACK), 1, true, None, None);
         assert!(stroke.changed());
         assert_eq!(area, Some(PixelRect { left: 1, top: 0, right: 3, bottom: 1 }));
         assert_eq!([image[(1, 0)][3], image[(2, 0)][3]], [128, 128]);
         assert_eq!([image[(0, 0)][3], image[(3, 0)][3]], [0, 0]);
         // On the middle of a pixel, it covers that one whole.
         let mut image = RgbaImage::new(3, 1);
-        BrushStroke::begin(&mut image, (1.5, 0.5), Ink::Paint(BLACK), 1, true, None);
+        BrushStroke::begin(&mut image, (1.5, 0.5), Ink::Paint(BLACK), 1, true, None, None);
         assert_eq!(drawn(&image), [(1, 0)]);
         assert_eq!([image[(0, 0)][3], image[(2, 0)][3]], [0, 0]);
     }
@@ -340,12 +367,45 @@ mod tests {
     #[test]
     fn erasing_clears_what_it_covers() {
         let mut image = RgbaImage::from_pixel(4, 1, Rgba([10, 20, 30, 255]));
-        let (mut stroke, _) = BrushStroke::begin(&mut image, (0.0, 0.0), Ink::Erase, 1, false, None);
+        let (mut stroke, _) = BrushStroke::begin(&mut image, (0.0, 0.0), Ink::Erase, 1, false, None, None);
         stroke.draw_to(&mut image, (1.0, 0.0));
         assert_eq!([image[(0, 0)], image[(1, 0)]], [CLEAR, CLEAR]);
         assert_eq!(image[(2, 0)], Rgba([10, 20, 30, 255]));
         let mut image = RgbaImage::from_pixel(2, 1, Rgba([10, 20, 30, 200]));
-        BrushStroke::begin(&mut image, (1.0, 0.5), Ink::Erase, 1, true, None);
+        BrushStroke::begin(&mut image, (1.0, 0.5), Ink::Erase, 1, true, None, None);
         assert_eq!(image[(0, 0)], Rgba([10, 20, 30, 100]));
+    }
+
+    #[test]
+    fn a_wrapping_line_comes_back_in_at_the_other_edge() {
+        let mut image = RgbaImage::new(6, 4);
+        let (mut stroke, _) = BrushStroke::begin(&mut image, (5.0, 1.0), PENCIL, 1, false, None, Some(WHOLE));
+        let area = stroke.draw_to(&mut image, (7.0, 1.0));
+        assert_eq!(drawn(&image), [(0, 1), (1, 1), (5, 1)]);
+        assert_eq!(area, Some(PixelRect { left: 0, top: 1, right: 6, bottom: 2 }));
+        // A tip over the top left corner covers the other three too.
+        let mut image = RgbaImage::new(6, 4);
+        BrushStroke::begin(&mut image, (0.0, 0.0), PENCIL, 2, false, None, Some(WHOLE));
+        assert_eq!(drawn(&image), [(0, 0), (5, 0), (0, 3), (5, 3)]);
+    }
+
+    #[test]
+    fn a_line_wrapping_in_a_part_of_the_image_stays_in_it() {
+        let mut image = RgbaImage::new(10, 4);
+        let part = PixelRect { left: 2, top: 0, right: 6, bottom: 4 };
+        let (mut stroke, _) = BrushStroke::begin(&mut image, (4.0, 1.0), PENCIL, 1, false, None, Some(part));
+        let area = stroke.draw_to(&mut image, (7.0, 1.0));
+        assert_eq!(drawn(&image), [(2, 1), (3, 1), (4, 1), (5, 1)]);
+        assert_eq!(area, Some(PixelRect { left: 2, top: 1, right: 6, bottom: 2 }));
+    }
+
+    #[test]
+    fn a_wrapping_line_started_off_the_image_goes_on_from_where_it_was() {
+        let mut image = RgbaImage::new(6, 4);
+        // On the copy to the right, from (7, 1) to (9, 1), then on to (10, 1).
+        let (mut stroke, _) = BrushStroke::begin(&mut image, (7.0, 1.0), PENCIL, 1, false, None, Some(WHOLE));
+        stroke.draw_to(&mut image, (9.0, 1.0));
+        stroke.draw_to(&mut image, (10.0, 1.0));
+        assert_eq!(drawn(&image), [(1, 1), (2, 1), (3, 1), (4, 1)]);
     }
 }

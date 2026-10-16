@@ -19,6 +19,7 @@ mod selection;
 mod shape;
 mod spray;
 mod stroke;
+mod wrap;
 
 pub use adjustment::{Adjustment, Curves, adjust, sample_curve};
 pub use affine::Affine;

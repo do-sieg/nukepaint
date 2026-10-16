@@ -252,6 +252,9 @@ impl Composite {
             let PixelRect { left, top, .. } = tile.rect;
             let size = Vec2::new(tile.rect.width() as f32, tile.rect.height() as f32);
             let tile_rect = Rect::from_min_size(rect.min + Vec2::new(left as f32, top as f32) * scale, size * scale);
+            if !tile_rect.intersects(painter.clip_rect()) {
+                continue;
+            }
             let (_, id) = &tile.levels[level.min(tile.levels.len() - 1)];
             painter.image(*id, tile_rect, uv, Color32::WHITE);
         }

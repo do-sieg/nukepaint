@@ -17,6 +17,11 @@
 //! selection tools and Move Selection, to go from one to the other, and with the other
 //! tools, to deselect. The grid shows over the image; while snapping to it, the
 //! selection tools put their corners on its cells' corners.
+//!
+//! Tiled, copies of the image are drawn all around it, and the image itself outlined.
+//! The drawing tools draw on the copies as on the image, and across its edges, coming
+//! back in at the other side; the Color Picker, the Paint Bucket and the Magic Wand
+//! work on the copies too.
 
 use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Event, Id, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -82,6 +87,10 @@ const MAGIC_WAND_HOTSPOT: Vec2 = Vec2::new(8.0, 8.0);
 /// Longest a frame counts for while spraying, in seconds, so that a stall does not
 /// leave a burst of dots.
 const MAX_SPRAY_FRAME: f64 = 0.1;
+/// Furthest the copies of a tiled image are drawn from it, counted in copies.
+const MAX_COPIES_AWAY: f32 = 24.0;
+/// Around the tile itself, among its copies.
+const TILE_OUTLINE: Color32 = Color32::from_black_alpha(128);
 
 /// What a drawing tool is drawing on the active layer, until the button is let go.
 pub enum Drawing {
@@ -162,6 +171,8 @@ pub fn show(
     let pixels_per_point = ui.ctx().pixels_per_point();
     let viewport = ui.available_rect_before_wrap();
     image.view.place(viewport, pixels_per_point);
+    // A drag works out where it is from the image, which must not jump to another copy.
+    image.view.hold(image.is_dragging() || tools.frame_select.is_dragging() || tools.zoom_drag.is_some());
     // Not while it is over a dialog, a menu or another window in front of the image.
     let in_front = |pos: Pos2| ui.ctx().layer_id_at(pos).is_some_and(|layer| layer != ui.layer_id());
     let pointer = ui.ctx().pointer_hover_pos().filter(|&pos| viewport.contains(pos) && !in_front(pos));
@@ -169,26 +180,46 @@ pub fn show(
         zoom_with_wheel(ui, &mut image.view, pointer);
     }
 
-    let image_size = image.view.image_size_on_screen();
+    let scroll_size = image.view.scroll_size();
+    // Tiled, there is no end to scroll to.
+    let bars = if image.view.tiled() {
+        egui::scroll_area::ScrollBarVisibility::AlwaysHidden
+    } else {
+        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
+    };
     let output = egui::ScrollArea::both()
         .auto_shrink(false)
+        .scroll_bar_visibility(bars)
         // Dragging is left to the tools, and to panning.
         .scroll_source(ScrollSource { scroll_bar: true, mouse_wheel: true, ..ScrollSource::NONE })
         .scroll_offset(image.view.offset)
         .show(ui, |ui| {
-            let (_, response) = ui.allocate_exact_size(image_size.max(ui.available_size()), Sense::drag());
+            let (_, response) = ui.allocate_exact_size(scroll_size.max(ui.available_size()), Sense::drag());
             let rect = image.view.image_rect();
-            let painter = ui.painter();
-            paint_checker(painter, rect, checker_size as f32 / pixels_per_point, checker);
-            let transform = image.transform.as_ref();
-            let previewed = transform.is_some_and(|transform| transform.paint_preview(painter, &image.view, tools.resampling));
-            if !previewed {
-                image.texture.paint(painter, rect);
+            // Tiled, only the tile shows, and its copies.
+            let tile = image.view.tile_rect();
+            let shown = tile.unwrap_or(rect);
+            let checker_cell = checker_size as f32 / pixels_per_point;
+            for copy in copies(shown, viewport, tile.is_some()) {
+                let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(copy));
+                paint_checker(&painter, copy, checker_cell, checker);
+                if copy != shown {
+                    image.texture.paint(&painter, rect.translate(copy.min - shown.min));
+                }
             }
-            grid::paint_lines(painter, &image.view, grid);
+            let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(shown));
+            let transform = image.transform.as_ref();
+            let previewed = transform.is_some_and(|transform| transform.paint_preview(&painter, &image.view, tools.resampling));
+            if !previewed {
+                image.texture.paint(&painter, rect);
+            }
+            grid::paint_lines(&painter, &image.view, grid);
+            if let Some(tile) = tile {
+                ui.painter().rect_stroke(tile, 0.0, Stroke::new(1.0, TILE_OUTLINE), egui::StrokeKind::Outside);
+            }
             response
         });
-    image.view.offset = output.state.offset;
+    image.view.scroll_to(output.state.offset);
 
     let response = output.inner;
     let space = ui.input(|input| input.key_down(Key::Space));
@@ -273,8 +304,27 @@ pub fn show(
     {
         paint_cursor(ui, icons, icons::CURSOR_ROTATE, ROTATE_HOTSPOT, at);
     }
-    let pointer_pixel = pointer.map(|pointer| image.view.pixel_at(pointer));
+    let pointer_pixel = pointer.map(|pointer| image.view.wrap_pixel(image.view.pixel_at(pointer)));
     Output { pointer_pixel, tool_requested, deselect_requested }
+}
+
+/// Where the image, or its tile, is drawn: at `rect`, and tiled, at each copy in `viewport` too.
+fn copies(rect: Rect, viewport: Rect, tiled: bool) -> Vec<Rect> {
+    if !tiled {
+        return vec![rect];
+    }
+    let size = rect.size();
+    // A tiny image zoomed far out would take more copies than are worth drawing.
+    let reach = Vec2::splat(MAX_COPIES_AWAY);
+    let first = ((viewport.min - rect.min) / size).floor().max(-reach);
+    let last = ((viewport.max - rect.min) / size).ceil().min(reach + Vec2::splat(1.0));
+    let mut copies = Vec::new();
+    for y in first.y as i32..last.y as i32 {
+        for x in first.x as i32..last.x as i32 {
+            copies.push(rect.translate(Vec2::new(x as f32, y as f32) * size));
+        }
+    }
+    copies
 }
 
 /// The selection's box, if the tool shows one: Move Selection's moves the outline
@@ -965,9 +1015,21 @@ fn use_paint_bucket(
     let Some(press) = ui.input(|input| input.pointer.press_origin()) else {
         return hovered;
     };
-    let (x, y) = image.view.pixel_at(press);
+    let (x, y) = image.view.wrap_pixel(image.view.pixel_at(press));
     let (width, height) = image.document.size();
-    let mask = image.document.selection_mask();
+    // Tiled, the rest of the image is not shown, nor filled.
+    let mask = match image.view.tile().map(Selection::rect) {
+        Some(tile) if image.document.selection.is_empty() => SelectionMask::of(&tile, width, height),
+        Some(tile) => {
+            let selected = image.document.selection.combine(&tile, SelectionMode::Intersect);
+            // Nothing selected on the tile leaves nothing to fill, rather than all of it.
+            if selected.is_empty() {
+                return hovered;
+            }
+            SelectionMask::of(&selected, width, height)
+        }
+        None => image.document.selection_mask(),
+    };
     let on_image = (0..width as i64).contains(&x) && (0..height as i64).contains(&y);
     if !on_image || mask.as_ref().is_some_and(|mask| !mask.contains(x as u32, y as u32)) {
         return hovered;
@@ -1085,7 +1147,7 @@ fn use_magic_wand(
     let Some(press) = ui.input(|input| input.pointer.press_origin()) else {
         return response.hovered();
     };
-    let (x, y) = image.view.pixel_at(press);
+    let (x, y) = image.view.wrap_pixel(image.view.pixel_at(press));
     let (width, height) = image.document.size();
     if !(0..width as i64).contains(&x) || !(0..height as i64).contains(&y) {
         return response.hovered();
@@ -1126,7 +1188,7 @@ fn flood_at(
 
 /// The colour of the active layer at a point of the screen, if it is over the image.
 fn color_at(image: &OpenImage, point: Pos2) -> Option<Rgba<u8>> {
-    let (x, y) = image.view.pixel_at(point);
+    let (x, y) = image.view.wrap_pixel(image.view.pixel_at(point));
     let pixels = &image.document.active().pixels;
     let on_image = (0..pixels.width() as i64).contains(&x) && (0..pixels.height() as i64).contains(&y);
     on_image.then(|| *pixels.get_pixel(x as u32, y as u32))
@@ -1165,21 +1227,22 @@ fn use_drawing_tool(
             image.transform = None;
             let mask = image.document.selection_mask();
             let at = image.view.point_at(press);
+            let wrap = image.view.tile();
             let layer = &mut image.document.active_mut().pixels;
             let color = if primary { tools.colors.primary } else { tools.colors.secondary };
             let (drawing, area) = match (tools.tool.retouch(), tools.ink(color)) {
                 (Some(retouch), _) => {
                     let (size, strength) = (tools.tip_size(), tools.strength());
-                    let (stroke, area) = RetouchStroke::begin(layer, at, retouch, size, strength, mask, seed());
+                    let (stroke, area) = RetouchStroke::begin(layer, at, retouch, size, strength, mask, seed(), wrap);
                     (Drawing::Retouch(stroke), area)
                 }
                 (None, Some(ink)) => {
-                    let (stroke, area) = BrushStroke::begin(layer, at, ink, tools.tip_size(), tools.smooth(), mask);
+                    let (stroke, area) = BrushStroke::begin(layer, at, ink, tools.tip_size(), tools.smooth(), mask, wrap);
                     (Drawing::Line(stroke), area)
                 }
                 (None, None) => {
                     let (size, speed, smooth) = (tools.spray_size, tools.spray_speed, tools.smooth());
-                    let (spray, area) = Spray::begin(layer, at, color, size, speed, smooth, mask, seed());
+                    let (spray, area) = Spray::begin(layer, at, color, size, speed, smooth, mask, seed(), wrap);
                     (Drawing::Spray(spray), area)
                 }
             };

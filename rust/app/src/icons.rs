@@ -82,6 +82,7 @@ pub const SAVE_AS: Icon = icon!("save_as");
 pub const COPY: Icon = icon!("copy");
 pub const GRID: Icon = icon!("grid");
 pub const GRID_SNAP: Icon = icon!("grid_snap");
+pub const TILED: Icon = icon!("tiled");
 pub const GRID_SETTINGS: Icon = icon!("grid_settings");
 pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");

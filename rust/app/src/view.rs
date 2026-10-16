@@ -1,4 +1,9 @@
 //! How an image is shown: how far it is zoomed in and where it is scrolled to.
+//!
+//! Tiled, the image, or a rectangle of it, is shown as a tile repeated side by side,
+//! with no end to how far it scrolls: the copies it scrolls past are let go of on one
+//! side as new ones come in on the other, so that the tile itself is always the copy
+//! nearest the middle.
 
 use eframe::egui::{Pos2, Rect, Vec2};
 use power_paint_core::PixelRect;
@@ -21,6 +26,11 @@ pub struct View {
     image_size: Vec2,
     /// Set until the view is first shown, to fit a large image in it.
     first_show: bool,
+    /// The rectangle of the image shown tiled, in pixels, if it is.
+    tile: Option<PixelRect>,
+    /// Set while a tool drags across a tiled image, which must not jump by a copy
+    /// under it: it then scrolls no further than a copy each way.
+    held: bool,
 }
 
 impl View {
@@ -32,7 +42,107 @@ impl View {
             pixels_per_point: 1.0,
             image_size,
             first_show: true,
+            tile: None,
+            held: false,
         }
+    }
+
+    pub fn tiled(&self) -> bool {
+        self.tile.is_some()
+    }
+
+    pub fn tile(&self) -> Option<PixelRect> {
+        self.tile
+    }
+
+    /// All of the image, as a tile.
+    pub fn whole(&self) -> PixelRect {
+        PixelRect { left: 0, top: 0, right: self.image_size.x as i32, bottom: self.image_size.y as i32 }
+    }
+
+    /// Shows `tile`, a rectangle of the image, tiled, or the image as it is. What is in
+    /// the middle of the view stays there, unless it is off the tile: then the tile is.
+    pub fn set_tile(&mut self, tile: Option<PixelRect>) {
+        let (x, y) = self.point_at(self.viewport.center());
+        let mut middle = self.wrap_point(Pos2::new(x as f32, y as f32));
+        self.tile = tile.filter(|tile| !tile.is_empty());
+        if let Some(tile) = self.tile
+            && !to_rect(tile).contains(middle)
+        {
+            middle = to_rect(tile).center();
+        }
+        self.center_on(middle);
+    }
+
+    /// Keeps a tiled image from jumping by a copy while `held`, as while a tool drags across it.
+    pub fn hold(&mut self, held: bool) {
+        self.held = held;
+        if !held {
+            self.pan(Vec2::ZERO);
+        }
+    }
+
+    /// Size of what scrolls, in points: the image, or tiled, a copy more each way than the view.
+    pub fn scroll_size(&self) -> Vec2 {
+        match self.tile_size_on_screen() {
+            Some(size) => self.viewport.size() + size * 2.0,
+            None => self.image_size_on_screen(),
+        }
+    }
+
+    /// Size of the tile on screen, in points, if the image is tiled.
+    fn tile_size_on_screen(&self) -> Option<Vec2> {
+        self.tile.map(|tile| to_rect(tile).size() * self.zoom / self.pixels_per_point)
+    }
+
+    /// Where the tile itself is on screen, if the image is tiled.
+    pub fn tile_rect(&self) -> Option<Rect> {
+        let tile = to_rect(self.tile?);
+        Some(Rect::from_min_max(self.to_screen(tile.min.x, tile.min.y), self.to_screen(tile.max.x, tile.max.y)))
+    }
+
+    /// Scrolls to `offset`, in points, as far as the image goes, or tiled, to the same
+    /// place on the copy nearest the middle.
+    pub fn scroll_to(&mut self, offset: Vec2) {
+        let max = (self.scroll_size() - self.viewport.size()).max(Vec2::ZERO);
+        self.offset = if let Some(size) = self.tile_size_on_screen().filter(|_| !self.held) {
+            // A copy away from the start, the tile is in the middle of the view.
+            let wrap = |offset: f32, size: f32| size + (offset - size + size / 2.0).rem_euclid(size) - size / 2.0;
+            Vec2::new(wrap(offset.x, size.x), wrap(offset.y, size.y))
+        } else {
+            offset.clamp(Vec2::ZERO, max)
+        };
+    }
+
+    /// How far the image's corner is from where the view's would be with no scrolling.
+    fn lead(&self) -> Vec2 {
+        match (self.tile, self.tile_size_on_screen()) {
+            (Some(tile), Some(size)) => {
+                let corner = Vec2::new(tile.left as f32, tile.top as f32) * self.zoom / self.pixels_per_point;
+                (self.viewport.size() + size) / 2.0 - corner
+            }
+            _ => ((self.viewport.size() - self.image_size_on_screen()) / 2.0).max(Vec2::ZERO),
+        }
+    }
+
+    /// The point of the image that `point` shows, on or off it: tiled, the one of the
+    /// tile that a copy shows there.
+    fn wrap_point(&self, point: Pos2) -> Pos2 {
+        let Some(tile) = self.tile.map(to_rect) else {
+            return point;
+        };
+        let along = |at: f32, start: f32, size: f32| start + (at - start).rem_euclid(size);
+        Pos2::new(along(point.x, tile.min.x, tile.width()), along(point.y, tile.min.y, tile.height()))
+    }
+
+    /// The pixel of the image that `pixel` shows, on or off it: tiled, the one of the
+    /// tile that a copy shows there.
+    pub fn wrap_pixel(&self, (x, y): (i64, i64)) -> (i64, i64) {
+        let Some(tile) = self.tile else {
+            return (x, y);
+        };
+        let along = |at: i64, start: i32, size: i32| start as i64 + (at - start as i64).rem_euclid(size as i64);
+        (along(x, tile.left, tile.width()), along(y, tile.top, tile.height()))
     }
 
     /// Takes note of where the view is on screen, before it is drawn. An image too
@@ -52,7 +162,14 @@ impl View {
     /// Takes in another size of the image, keeping the zoom, and scrolled no further
     /// than the image now goes.
     pub fn set_image_size(&mut self, image_size: Vec2) {
+        let whole = self.tile == Some(self.whole());
         self.image_size = image_size;
+        // A tile is cut down to what is left of it, or the image goes untiled if nothing is.
+        self.tile = match self.tile {
+            Some(_) if whole => Some(self.whole()),
+            Some(tile) => Some(intersect(tile, self.whole())).filter(|tile| !tile.is_empty()),
+            None => None,
+        };
         self.pan(Vec2::ZERO);
     }
 
@@ -65,8 +182,7 @@ impl View {
     /// in the middle of the view along a side where it is smaller than the view.
     pub fn image_rect(&self) -> Rect {
         let size = self.image_size_on_screen();
-        let gap = ((self.viewport.size() - size) / 2.0).max(Vec2::ZERO);
-        let corner = self.viewport.min - self.offset + gap;
+        let corner = self.viewport.min - self.offset + self.lead();
         // On whole screen pixels, for enlarged pixels to keep their edges.
         let corner = (corner.to_vec2() * self.pixels_per_point).round() / self.pixels_per_point;
         Rect::from_min_size(corner.to_pos2(), size)
@@ -97,17 +213,21 @@ impl View {
         }
     }
 
-    /// The part of the image in view, in pixels, to a fraction of one.
+    /// The part of the image in view, in pixels, to a fraction of one: tiled, it may
+    /// go past the image's edges, onto the copies.
     pub fn visible_area(&self) -> Rect {
         let (left, top) = self.point_at(self.viewport.min);
         let (right, bottom) = self.point_at(self.viewport.max);
         let area = Rect::from_min_max(Pos2::new(left as f32, top as f32), Pos2::new(right as f32, bottom as f32));
-        area.intersect(Rect::from_min_size(Pos2::ZERO, self.image_size))
+        if self.tiled() { area } else { area.intersect(Rect::from_min_size(Pos2::ZERO, self.image_size)) }
     }
 
     /// The part of the image that [`View::center_on`] would bring into view.
     pub fn area_centered_on(&self, point: Pos2) -> Rect {
         let size = self.viewport.size() * self.pixels_per_point / self.zoom;
+        if self.tiled() {
+            return Rect::from_center_size(point, size);
+        }
         let max = (self.image_size - size).max(Vec2::ZERO);
         let min = (point.to_vec2() - size / 2.0).clamp(Vec2::ZERO, max);
         Rect::from_min_size(min.to_pos2(), size).intersect(Rect::from_min_size(Pos2::ZERO, self.image_size))
@@ -197,16 +317,22 @@ impl View {
         let anchored = (anchor - self.image_rect().min) / self.image_size_on_screen();
         self.zoom = zoom;
         let size = self.image_size_on_screen();
-        let gap = ((self.viewport.size() - size) / 2.0).max(Vec2::ZERO);
-        let offset = self.viewport.min.to_vec2() + gap + anchored * size - anchor.to_vec2();
-        self.offset = offset.clamp(Vec2::ZERO, (size - self.viewport.size()).max(Vec2::ZERO));
+        self.scroll_to(self.viewport.min.to_vec2() + self.lead() + anchored * size - anchor.to_vec2());
     }
 
     /// Scrolls by this much, in points, as far as the image goes.
     pub fn pan(&mut self, delta: Vec2) {
-        let max = (self.image_size_on_screen() - self.viewport.size()).max(Vec2::ZERO);
-        self.offset = (self.offset - delta).clamp(Vec2::ZERO, max);
+        self.scroll_to(self.offset - delta);
     }
+}
+
+/// A rectangle of pixels, as a rectangle of points of the image.
+fn to_rect(rect: PixelRect) -> Rect {
+    Rect::from_min_max(Pos2::new(rect.left as f32, rect.top as f32), Pos2::new(rect.right as f32, rect.bottom as f32))
+}
+
+fn intersect(a: PixelRect, b: PixelRect) -> PixelRect {
+    PixelRect { left: a.left.max(b.left), top: a.top.max(b.top), right: a.right.min(b.right), bottom: a.bottom.min(b.bottom) }
 }
 
 /// The zoom as a percentage.
@@ -314,6 +440,49 @@ mod tests {
         assert_eq!(area, Rect::from_min_size(Pos2::new(600.0, 800.0), Vec2::new(400.0, 200.0)));
         view.center_on(Pos2::new(990.0, 990.0));
         assert_eq!(view.visible_area(), area);
+    }
+
+    #[test]
+    fn tiled_scrolls_on_past_the_edges() {
+        let mut view = placed(Vec2::new(100.0, 100.0), Vec2::new(400.0, 300.0));
+        view.set_tile(Some(view.whole()));
+        // In the middle, as it was.
+        assert_eq!(view.image_rect(), Rect::from_min_size(Pos2::new(160.0, 120.0), Vec2::new(100.0, 100.0)));
+        let pixel = view.pixel_at(Pos2::new(200.0, 150.0));
+        // Scrolled a copy and a half: the image is the copy nearest the middle again,
+        // and the same pixel of it shows half a copy away.
+        view.pan(Vec2::new(-150.0, 0.0));
+        let shown = view.pixel_at(Pos2::new(200.0, 150.0));
+        assert_eq!(view.wrap_pixel(shown), view.wrap_pixel((pixel.0 + 150, pixel.1)));
+        assert!(view.image_rect().center().distance(view.viewport.center()) <= 50.0 * 2f32.sqrt() + 0.01);
+        // Held, it scrolls no further than a copy, and stays put.
+        view.hold(true);
+        let before = view.image_rect();
+        view.pan(Vec2::new(-30.0, 0.0));
+        assert_eq!(view.image_rect(), before.translate(Vec2::new(-30.0, 0.0)));
+        view.hold(false);
+        assert_eq!(view.wrap_pixel((-1, 205)), (99, 5));
+        // Back untiled, the image is whole and in the middle again.
+        view.set_tile(None);
+        assert_eq!(view.image_rect(), Rect::from_min_size(Pos2::new(160.0, 120.0), Vec2::new(100.0, 100.0)));
+    }
+
+    #[test]
+    fn a_tile_of_the_image_goes_in_the_middle() {
+        let mut view = placed(Vec2::new(100.0, 100.0), Vec2::new(400.0, 300.0));
+        let tile = PixelRect { left: 60, top: 20, right: 80, bottom: 50 };
+        view.set_tile(Some(tile));
+        // The middle of the view was off the tile, so the tile's is there now.
+        assert_eq!(view.tile_rect(), Some(Rect::from_min_size(Pos2::new(200.0, 155.0), Vec2::new(20.0, 30.0))));
+        assert_eq!(view.wrap_pixel((59, 50)), (79, 20));
+        view.pan(Vec2::new(-35.0, 0.0));
+        assert_eq!(view.tile_rect().unwrap().size(), Vec2::new(20.0, 30.0));
+        assert!((view.tile_rect().unwrap().center().x - view.viewport.center().x).abs() <= 10.0);
+        // Cut down with the image, and gone once nothing is left of it.
+        view.set_image_size(Vec2::new(70.0, 70.0));
+        assert_eq!(view.tile(), Some(PixelRect { left: 60, top: 20, right: 70, bottom: 50 }));
+        view.set_image_size(Vec2::new(50.0, 50.0));
+        assert_eq!(view.tile(), None);
     }
 
     #[test]

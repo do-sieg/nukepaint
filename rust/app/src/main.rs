@@ -241,6 +241,8 @@ enum ViewCommand {
     SnapToGrid,
     GridSettings,
     SelectionAsGrid,
+    Tiled,
+    TileSelection,
     Checkerboard,
 }
 
@@ -249,7 +251,7 @@ impl ViewCommand {
     const MENU: [&[Self]; 3] = [
         &[Self::ZoomIn, Self::ZoomOut, Self::ZoomToWindow, Self::ActualSize],
         &[Self::ShowGrid, Self::SnapToGrid, Self::GridSettings, Self::SelectionAsGrid],
-        &[Self::Checkerboard],
+        &[Self::Tiled, Self::TileSelection, Self::Checkerboard],
     ];
 
     fn label(self) -> &'static str {
@@ -262,6 +264,8 @@ impl ViewCommand {
             Self::SnapToGrid => "Snap to Grid",
             Self::GridSettings => "Grid Settings…",
             Self::SelectionAsGrid => "Selection as Grid",
+            Self::Tiled => "Tiled",
+            Self::TileSelection => "Tile Selection",
             Self::Checkerboard => "Checkerboard…",
         }
     }
@@ -274,7 +278,7 @@ impl ViewCommand {
             Self::ActualSize => Some(ACTUAL_SIZE),
             Self::ShowGrid => Some(SHOW_GRID),
             Self::SnapToGrid => Some(SNAP_TO_GRID),
-            Self::GridSettings | Self::SelectionAsGrid | Self::Checkerboard => None,
+            Self::GridSettings | Self::SelectionAsGrid | Self::Tiled | Self::TileSelection | Self::Checkerboard => None,
         }
     }
 
@@ -283,6 +287,7 @@ impl ViewCommand {
             Self::ShowGrid => Some(icons::GRID),
             Self::SnapToGrid => Some(icons::GRID_SNAP),
             Self::GridSettings => Some(icons::GRID_SETTINGS),
+            Self::Tiled => Some(icons::TILED),
             _ => None,
         }
     }
@@ -383,7 +388,7 @@ enum ToolbarButton {
 }
 
 /// The toolbar's buttons, in groups that separators keep apart.
-const TOOLBAR: [&[ToolbarButton]; 6] = {
+const TOOLBAR: [&[ToolbarButton]; 7] = {
     use ToolbarButton::*;
     [
         &[Open, Save, SaveAs],
@@ -396,6 +401,7 @@ const TOOLBAR: [&[ToolbarButton]; 6] = {
             View(ViewCommand::SnapToGrid),
             View(ViewCommand::GridSettings),
         ],
+        &[View(ViewCommand::Tiled)],
     ]
 };
 
@@ -709,6 +715,9 @@ impl App {
             ViewCommand::ShowGrid | ViewCommand::SnapToGrid => true,
             ViewCommand::GridSettings | ViewCommand::Checkerboard => !self.has_dialog(),
             ViewCommand::SelectionAsGrid => self.selection_rect().is_some(),
+            ViewCommand::Tiled => self.current.is_some(),
+            // Or to turn it off again, once the selection is gone.
+            ViewCommand::TileSelection => self.selection_rect().is_some() || self.is_on(command) == Some(true),
             ViewCommand::ZoomIn | ViewCommand::ZoomOut | ViewCommand::ZoomToWindow | ViewCommand::ActualSize => {
                 let Some(current) = self.current else {
                     return false;
@@ -721,6 +730,19 @@ impl App {
                 }
             }
         }
+    }
+
+    /// What a View button of the toolbar runs, and whether it shows as on. Tiled
+    /// tiles the selection if there is one, and stands for either way of tiling, which
+    /// it turns off.
+    fn toolbar_view_command(&self, command: ViewCommand) -> (ViewCommand, Option<bool>) {
+        if command != ViewCommand::Tiled {
+            return (command, self.is_on(command));
+        }
+        let selection_tiled = self.is_on(ViewCommand::TileSelection) == Some(true);
+        let tiled = self.current.is_some_and(|current| self.images[current].view.tiled());
+        let tile_selection = selection_tiled || (!tiled && self.selection_rect().is_some());
+        (if tile_selection { ViewCommand::TileSelection } else { command }, Some(tiled))
     }
 
     fn run(&mut self, command: ViewCommand) {
@@ -744,6 +766,18 @@ impl App {
                 let cells = Cells::around(self.selection_rect().unwrap());
                 (grid.origin, grid.cell, grid.visible) = (cells.origin, cells.size, true);
             }
+            ViewCommand::Tiled | ViewCommand::TileSelection => {
+                let on = self.is_on(command) == Some(true);
+                let tile = self.selection_rect().filter(|_| command == ViewCommand::TileSelection);
+                let view = self.current_view().unwrap();
+                let tile = if on { None } else { Some(tile.unwrap_or(view.whole())) };
+                view.set_tile(tile);
+                // The selection that made the tile would only get in the way on it.
+                if command == ViewCommand::TileSelection && !on {
+                    self.change_selection(EditCommand::Deselect);
+                }
+                return;
+            }
             ViewCommand::ZoomIn | ViewCommand::ZoomOut | ViewCommand::ZoomToWindow | ViewCommand::ActualSize => {
                 let view = self.current_view().unwrap();
                 match command {
@@ -764,6 +798,11 @@ impl App {
         match command {
             ViewCommand::ShowGrid => Some(grid.visible),
             ViewCommand::SnapToGrid => Some(grid.snap),
+            ViewCommand::Tiled | ViewCommand::TileSelection => {
+                let view = &self.images[self.current?].view;
+                let whole = view.tile() == Some(view.whole());
+                Some(view.tiled() && whole == (command == ViewCommand::Tiled))
+            }
             _ => None,
         }
     }
@@ -838,7 +877,8 @@ impl App {
                             (command.icon(), command.label(), command.shortcut(), self.can_run_layer(command), None)
                         }
                         ToolbarButton::View(command) => {
-                            (command.icon(), command.label(), command.shortcut(), self.can_run(command), self.is_on(command))
+                            let (run, on) = self.toolbar_view_command(command);
+                            (command.icon(), command.label(), command.shortcut(), self.can_run(run), on)
                         }
                     };
                     let texture = self.icons.get(&ctx, icon.expect("the toolbar's commands have an icon"));
@@ -867,7 +907,7 @@ impl App {
             }
             Some(ToolbarButton::Edit(command)) => self.edit(&ctx, command),
             Some(ToolbarButton::Layer(command)) => self.run_layer(&ctx, command),
-            Some(ToolbarButton::View(command)) => self.run(command),
+            Some(ToolbarButton::View(command)) => self.run(self.toolbar_view_command(command).0),
             _ => {}
         }
     }

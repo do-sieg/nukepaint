@@ -1,7 +1,9 @@
 //! The whole of the current image, small, with a frame around the part in view and
 //! the rest dimmed. A click on it scrolls the view to have that point in the middle,
 //! and dragging keeps it there. While the pointer is over it, a fainter frame shows
-//! the part that a click would bring into view.
+//! the part that a click would bring into view. Tiled, the frames wrap around the
+//! edges of the tile, as the view goes from it onto its copies, and what is dimmed is
+//! the rest of the image, which is not shown.
 //!
 //! Under it, a slider sets the zoom, with buttons that go a level in and out on
 //! either side. The wheel over any of it, or a pinch, zooms too, about the middle
@@ -102,26 +104,45 @@ fn picture(ui: &mut egui::Ui, image: &OpenImage, checker: &TextureHandle) -> Opt
     image.texture.paint(&painter, picture);
     painter.rect_stroke(picture, 0.0, Stroke::new(1.0, Color32::from_black_alpha(128)), StrokeKind::Outside);
 
+    let tile = image.view.tile().map(|tile| {
+        let corners = |x: i32, y: i32| Pos2::new(x as f32, y as f32);
+        to_picture(Rect::from_min_max(corners(tile.left, tile.top), corners(tile.right, tile.bottom)))
+    });
+    // Tiled, a frame off one edge of the tile comes back in at the other.
+    let frame = |rect: Rect, alpha: f32| {
+        let Some(tile) = tile else {
+            paint_frame(&painter, rect, alpha);
+            return;
+        };
+        let painter = painter.with_clip_rect(tile);
+        for y in -1..=1 {
+            for x in -1..=1 {
+                paint_frame(&painter, rect.translate(Vec2::new(x as f32, y as f32) * tile.size()), alpha);
+            }
+        }
+    };
+    // Dimmed around the part in view, or tiled, around the tile.
     let visible = to_picture(image.view.visible_area());
-    // The rest of the image dimmed, around the part in view.
-    for dimmed in [
-        Rect::from_min_max(picture.min, Pos2::new(picture.max.x, visible.min.y)),
-        Rect::from_min_max(Pos2::new(picture.min.x, visible.max.y), picture.max),
-        Rect::from_min_max(Pos2::new(picture.min.x, visible.min.y), Pos2::new(visible.min.x, visible.max.y)),
-        Rect::from_min_max(Pos2::new(visible.max.x, visible.min.y), Pos2::new(picture.max.x, visible.max.y)),
-    ] {
+    let lit = tile.unwrap_or(visible);
+    let dims = [
+        Rect::from_min_max(picture.min, Pos2::new(picture.max.x, lit.min.y)),
+        Rect::from_min_max(Pos2::new(picture.min.x, lit.max.y), picture.max),
+        Rect::from_min_max(Pos2::new(picture.min.x, lit.min.y), Pos2::new(lit.min.x, lit.max.y)),
+        Rect::from_min_max(Pos2::new(lit.max.x, lit.min.y), Pos2::new(picture.max.x, lit.max.y)),
+    ];
+    for dimmed in dims {
         if dimmed.is_positive() {
             painter.rect_filled(dimmed, 0.0, DIM);
         }
     }
-    paint_frame(&painter, visible, 1.0);
+    frame(visible, 1.0);
 
     let pressed = response.is_pointer_button_down_on();
     if pressed {
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
     } else if let Some(pointer) = response.hover_pos() {
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
-        paint_frame(&painter, to_picture(image.view.area_centered_on(to_image(pointer))), HOVER_ALPHA);
+        frame(to_picture(image.view.area_centered_on(to_image(pointer))), HOVER_ALPHA);
     }
     response.on_hover_text("Click or drag to show that part of the image");
 
