@@ -1,20 +1,26 @@
 //! What the Filters menu does: each effect, its name and the settings its dialog asks for.
 
-use power_paint_core::{Effect, OffsetEdges};
+use std::sync::Arc;
 
-use crate::adjustment_dialog::{Setting, check, slider};
+use power_paint_core::{Effect, FocusShape, Layer, OffsetEdges};
+
+use crate::adjustment_dialog::{Setting, check, choice, layer, slider};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EffectKind {
     BokehBlur,
+    FocusBlur,
     FragmentBlur,
     GaussianBlur,
+    MeanCurvatureBlur,
     MedianBlur,
     MotionBlur,
     RadialBlur,
     SketchBlur,
     SquareBlur,
     SurfaceBlur,
+    TileableBlur,
+    VariableBlur,
     ZoomBlur,
     Sharpen,
     Offset,
@@ -23,12 +29,23 @@ pub enum EffectKind {
 use EffectKind::*;
 
 const BOKEH: [Setting; 2] = [slider("Radius:", 1.0, 100.0, 1.0, 10.0, " px"), slider("Highlights:", 0.0, 100.0, 1.0, 30.0, "")];
+/// The names of [`FocusShape::ALL`].
+const FOCUS_SHAPES: [&str; 5] = ["Circle", "Square", "Diamond", "Horizontal", "Vertical"];
+const FOCUS: [Setting; 6] = [
+    slider("Radius:", 1.0, 100.0, 1.0, 10.0, " px"),
+    choice("Shape:", &FOCUS_SHAPES, 0),
+    slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Focus:", 0.0, 100.0, 1.0, 25.0, " %"),
+    slider("Transition:", 0.0, 100.0, 1.0, 50.0, " %"),
+];
 const FRAGMENT: [Setting; 3] = [
     slider("Fragments:", 2.0, 50.0, 1.0, 4.0, ""),
     slider("Distance:", 0.0, 100.0, 1.0, 8.0, " px"),
     slider("Rotation:", 0.0, 360.0, 1.0, 0.0, "°"),
 ];
 const GAUSSIAN: [Setting; 1] = [slider("Radius:", 0.0, 200.0, 1.0, 2.0, " px")];
+const MEAN_CURVATURE: [Setting; 1] = [slider("Iterations:", 1.0, 100.0, 1.0, 20.0, "")];
 const MEDIAN: [Setting; 2] = [slider("Radius:", 1.0, 20.0, 1.0, 10.0, " px"), slider("Percentile:", 0.0, 100.0, 1.0, 50.0, " %")];
 const MOTION: [Setting; 3] = [
     slider("Angle:", -180.0, 180.0, 1.0, 25.0, "°"),
@@ -43,6 +60,8 @@ const RADIAL: [Setting; 3] = [
 const SKETCH: [Setting; 1] = [slider("Radius:", 1.0, 100.0, 1.0, 10.0, " px")];
 const SQUARE: [Setting; 2] = [slider("Radius:", 1.0, 100.0, 1.0, 10.0, " px"), slider("Highlights:", 0.0, 100.0, 1.0, 30.0, "")];
 const SURFACE: [Setting; 2] = [slider("Radius:", 1.0, 100.0, 1.0, 6.0, " px"), slider("Threshold:", 1.0, 100.0, 1.0, 15.0, " %")];
+const TILEABLE: [Setting; 1] = [slider("Radius:", 0.0, 200.0, 1.0, 2.0, " px")];
+const VARIABLE: [Setting; 3] = [slider("Radius:", 1.0, 100.0, 1.0, 10.0, " px"), layer("Map:"), check("Invert", false)];
 const ZOOM: [Setting; 3] = [
     slider("Amount:", 0.0, 100.0, 1.0, 10.0, " %"),
     slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
@@ -64,7 +83,25 @@ const SHARPEN: [Setting; 3] = [
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects.
     pub const MENUS: [(&str, &[Self]); 3] = [
-        ("Blurs", &[BokehBlur, FragmentBlur, GaussianBlur, MedianBlur, MotionBlur, RadialBlur, SketchBlur, SquareBlur, SurfaceBlur, ZoomBlur]),
+        (
+            "Blurs",
+            &[
+                BokehBlur,
+                FocusBlur,
+                FragmentBlur,
+                GaussianBlur,
+                MeanCurvatureBlur,
+                MedianBlur,
+                MotionBlur,
+                RadialBlur,
+                SketchBlur,
+                SquareBlur,
+                SurfaceBlur,
+                TileableBlur,
+                VariableBlur,
+                ZoomBlur,
+            ],
+        ),
         ("Map", &[Offset]),
         ("Photo", &[Sharpen]),
     ];
@@ -73,14 +110,18 @@ impl EffectKind {
     pub fn name(self) -> &'static str {
         match self {
             BokehBlur => "Bokeh Blur",
+            FocusBlur => "Focus Blur",
             FragmentBlur => "Fragment Blur",
             GaussianBlur => "Gaussian Blur",
+            MeanCurvatureBlur => "Mean Curvature Blur",
             MedianBlur => "Median Blur",
             MotionBlur => "Motion Blur",
             RadialBlur => "Radial Blur",
             SketchBlur => "Sketch Blur",
             SquareBlur => "Square Blur",
             SurfaceBlur => "Surface Blur",
+            TileableBlur => "Tileable Blur",
+            VariableBlur => "Variable Blur",
             ZoomBlur => "Zoom Blur",
             Sharpen => "Sharpen",
             Offset => "Offset",
@@ -91,33 +132,52 @@ impl EffectKind {
     pub fn settings(self) -> &'static [Setting] {
         match self {
             BokehBlur => &BOKEH,
+            FocusBlur => &FOCUS,
             FragmentBlur => &FRAGMENT,
             GaussianBlur => &GAUSSIAN,
+            MeanCurvatureBlur => &MEAN_CURVATURE,
             MedianBlur => &MEDIAN,
             MotionBlur => &MOTION,
             RadialBlur => &RADIAL,
             SketchBlur => &SKETCH,
             SquareBlur => &SQUARE,
             SurfaceBlur => &SURFACE,
+            TileableBlur => &TILEABLE,
+            VariableBlur => &VARIABLE,
             ZoomBlur => &ZOOM,
             Sharpen => &SHARPEN,
             Offset => &OFFSET,
         }
     }
 
-    /// The effect with these settings, in the order [`EffectKind::settings`] lists them.
-    pub fn effect(self, values: &[f64]) -> Effect {
+    /// The effect with these settings, in the order [`EffectKind::settings`] lists them,
+    /// on an image with these layers.
+    pub fn effect(self, values: &[f64], layers: &[Layer]) -> Effect {
         let value = |index: usize| values[index] as f32;
         match self {
             BokehBlur => Effect::BokehBlur { radius: value(0), highlights: value(1) },
+            FocusBlur => Effect::FocusBlur {
+                radius: value(0),
+                shape: FocusShape::ALL[(values[1] as usize).min(FocusShape::ALL.len() - 1)],
+                center: [value(2), value(3)],
+                size: value(4),
+                transition: value(5),
+            },
             FragmentBlur => Effect::FragmentBlur { count: value(0) as u32, distance: value(1), rotation: value(2) },
             GaussianBlur => Effect::GaussianBlur { radius: value(0) },
+            MeanCurvatureBlur => Effect::MeanCurvatureBlur { iterations: value(0) as u32 },
             MedianBlur => Effect::MedianBlur { radius: value(0), percentile: value(1) },
             MotionBlur => Effect::MotionBlur { angle: value(0), distance: value(1), centered: values[2] != 0.0 },
             RadialBlur => Effect::RadialBlur { angle: value(0), center: [value(1), value(2)] },
             SketchBlur => Effect::SketchBlur { radius: value(0) },
             SquareBlur => Effect::SquareBlur { radius: value(0), highlights: value(1) },
             SurfaceBlur => Effect::SurfaceBlur { radius: value(0), threshold: value(1) },
+            TileableBlur => Effect::TileableBlur { radius: value(0) },
+            VariableBlur => Effect::VariableBlur {
+                radius: value(0),
+                map: Arc::new(layers[(values[1] as usize).min(layers.len() - 1)].pixels.clone()),
+                invert: values[2] != 0.0,
+            },
             ZoomBlur => Effect::ZoomBlur { amount: value(0), center: [value(1), value(2)] },
             Sharpen => Effect::Sharpen { radius: value(0), amount: value(1), threshold: value(2) },
             Offset => Effect::Offset {

@@ -25,7 +25,7 @@ pub use adjustment::{Adjustment, Curves, adjust, sample_curve};
 pub use affine::Affine;
 pub use blend::{blend_layer, composite, composite_area};
 pub use document::Document;
-pub use effect::{Effect, OffsetEdges, apply_effect};
+pub use effect::{Effect, FocusShape, OffsetEdges, apply_effect};
 pub use files::{OPEN_EXTENSIONS, OpenError, SAVE_EXTENSIONS, is_savable, load_image, render_svg, render_svg_to_width, save_image};
 pub use floating::FloatingPixels;
 pub use flood_fill::FloodFill;

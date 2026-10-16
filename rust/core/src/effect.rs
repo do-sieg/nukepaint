@@ -9,7 +9,10 @@
 use std::{
     f32::consts::TAU,
     num::NonZero,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
@@ -25,6 +28,11 @@ const MAX_HIGHLIGHTS: f32 = 3.0;
 const MAX_SAMPLES: usize = 256;
 /// Least opacity a pixel keeps its colour with: those under it are stored as see-through.
 const MIN_ALPHA: f32 = 0.5 / 255.0;
+/// How much of red, green and blue makes up how light a colour looks.
+const LUMA: [f32; 3] = [0.299, 0.587, 0.114];
+/// How many box blurs, one after the other, the blurs whose radius changes from pixel
+/// to pixel take along each side: three are much like a Gaussian Blur.
+const BOX_PASSES: usize = 3;
 
 /// An effect, with its settings: lengths in pixels, angles in degrees anticlockwise from
 /// the right, and shares in percent. A centre is from -100, the left or top edge, to
@@ -34,10 +42,18 @@ pub enum Effect {
     /// Averages a disc of pixels, as an out-of-focus lens does. The highlights, from 0
     /// to 100, make bright colours stand out.
     BokehBlur { radius: f32, highlights: f32 },
+    /// Blurs more the further from the centre, as a camera focused on it does: not at
+    /// all within `size` of it, a share of half the image's longer side, measured as
+    /// the shape says, then more and more over `transition` further, up to `radius`.
+    FocusBlur { radius: f32, shape: FocusShape, center: [f32; 2], size: f32, transition: f32 },
     /// Averages copies of the image moved the same distance in directions evenly
     /// around a circle.
     FragmentBlur { count: u32, distance: f32, rotation: f32 },
     GaussianBlur { radius: f32 },
+    /// Smooths the colours along the edges between them rather than across them, a
+    /// little more with each step, which takes out noise and specks but keeps the
+    /// edges sharp.
+    MeanCurvatureBlur { iterations: u32 },
     /// Each channel's value that this share of the pixels within the radius are no
     /// lighter than.
     MedianBlur { radius: f32, percentile: f32 },
@@ -53,6 +69,14 @@ pub enum Effect {
     /// A Gaussian Blur that leaves out colours more different than the threshold from
     /// the pixel's, which keeps edges sharp.
     SurfaceBlur { radius: f32, threshold: f32 },
+    /// A Gaussian Blur within the rectangle around the selected pixels, or the whole
+    /// image, that goes on past each of its edges with the pixels of the other, as on a
+    /// tile repeated side by side, so they still tile once blurred.
+    TileableBlur { radius: f32 },
+    /// Blurs each pixel by up to `radius`, as a Gaussian Blur does, as much as the map
+    /// is light there and can be seen: not at all where it is black or see-through, or
+    /// the other way round if inverted. The map is as large as the pixels.
+    VariableBlur { radius: f32, map: Arc<RgbaImage>, invert: bool },
     /// Averages a line of pixels towards the centre, this much of the way, as a camera
     /// that zooms while the picture is taken does.
     ZoomBlur { amount: f32, center: [f32; 2] },
@@ -64,6 +88,34 @@ pub enum Effect {
     /// within the rectangle around the selected ones, or the whole image, filling where
     /// they move away from as `edges` says.
     Offset { x: i32, y: i32, edges: OffsetEdges },
+}
+
+/// How the Focus Blur measures how far a pixel is from the centre, which gives the
+/// shape of the area it leaves sharp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusShape {
+    Circle,
+    Square,
+    Diamond,
+    /// A band across the image, as a tilt-shift lens leaves sharp.
+    Horizontal,
+    /// A band down the image.
+    Vertical,
+}
+
+impl FocusShape {
+    pub const ALL: [Self; 5] = [Self::Circle, Self::Square, Self::Diamond, Self::Horizontal, Self::Vertical];
+
+    /// How far a point is from the centre, `x` across and `y` down.
+    fn distance(self, x: f32, y: f32) -> f32 {
+        match self {
+            Self::Circle => x.hypot(y),
+            Self::Square => x.abs().max(y.abs()),
+            Self::Diamond => x.abs() + y.abs(),
+            Self::Horizontal => y.abs(),
+            Self::Vertical => x.abs(),
+        }
+    }
 }
 
 /// What the Offset fills where the pixels move away from.
@@ -98,6 +150,8 @@ pub fn apply_effect(pixels: &RgbaImage, effect: &Effect, mask: Option<&Selection
     let mut result = match *effect {
         Effect::MedianBlur { radius, percentile } => median(pixels, radius, percentile / 100.0, stop)?,
         Effect::Offset { x, y, edges } => offset(pixels, x, y, edges, mask),
+        Effect::TileableBlur { radius } if radius < 1.0 => return Some(pixels.clone()),
+        Effect::TileableBlur { radius } => tileable(pixels, radius, mask, stop)?,
         _ => match render(&Buffer::premultiplied(pixels), effect, stop)? {
             Some(buffer) => buffer.to_image(),
             None => return Some(pixels.clone()),
@@ -138,6 +192,39 @@ fn offset(pixels: &RgbaImage, x: i32, y: i32, edges: OffsetEdges, mask: Option<&
     result
 }
 
+/// The pixels Gaussian blurred within the rectangle around those `mask` holds, or the
+/// whole image, which goes on past each of its edges with the pixels of the other.
+/// Gives up once `stop` is set.
+fn tileable(pixels: &RgbaImage, radius: f32, mask: Option<&SelectionMask>, stop: &AtomicBool) -> Option<RgbaImage> {
+    let whole = PixelRect { left: 0, top: 0, right: pixels.width() as i32, bottom: pixels.height() as i32 };
+    let area = mask.and_then(SelectionMask::bounds).unwrap_or(whole);
+    let (width, height) = (area.width() as usize, area.height() as usize);
+    // The area, with as far around it as the blur reaches, from the other side.
+    let margin = radius.max(0.0) as usize;
+    let (tile_width, tile_height) = (width + 2 * margin, height + 2 * margin);
+    let wrapped = |at: usize, size: usize| (at as isize - margin as isize).rem_euclid(size as isize) as u32;
+    let tile = Buffer {
+        width: tile_width,
+        height: tile_height,
+        pixels: (0..tile_height)
+            .flat_map(|y| {
+                (0..tile_width).map(move |x| {
+                    premultiply(*pixels.get_pixel(area.left as u32 + wrapped(x, width), area.top as u32 + wrapped(y, height)))
+                })
+            })
+            .collect(),
+    };
+    let blurred = blur(&tile, Weighing::Gaussian, radius, 1.0, stop)?.to_image();
+    let mut result = pixels.clone();
+    for y in 0..height as u32 {
+        for x in 0..width as u32 {
+            let pixel = *blurred.get_pixel(x + margin as u32, y + margin as u32);
+            result.put_pixel(area.left as u32 + x, area.top as u32 + y, pixel);
+        }
+    }
+    Some(result)
+}
+
 /// The colours, multiplied by how opaque they are, as the effect makes them, or
 /// nothing for settings that change nothing. Gives up once `stop` is set.
 fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<Buffer>> {
@@ -146,6 +233,23 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
     let highlights = |highlights: f32| 1.0 + highlights / 100.0 * (MAX_HIGHLIGHTS - 1.0);
     let rendered = match *effect {
         Effect::BokehBlur { radius, highlights: h } => bokeh(source, radius, highlights(h), stop),
+        Effect::FocusBlur { radius, .. } | Effect::VariableBlur { radius, .. } if radius <= 0.0 => return Some(None),
+        Effect::FocusBlur { radius, shape, center: c, size: sharp, transition } => {
+            let [cx, cy] = center(c);
+            let unit = size[0].max(size[1]) / 2.0;
+            let (sharp, transition) = (sharp / 100.0, transition / 100.0);
+            let radii = (0..source.height)
+                .flat_map(|y| {
+                    (0..source.width).map(move |x| {
+                        let distance = shape.distance((x as f32 + 0.5 - cx) / unit, (y as f32 + 0.5 - cy) / unit);
+                        let past = distance - sharp;
+                        let amount = if transition > 0.0 { smoothstep((past / transition).clamp(0.0, 1.0)) } else { (past > 0.0) as u8 as f32 };
+                        radius * amount
+                    })
+                })
+                .collect();
+            variable_blur(source, radii, stop)
+        }
         Effect::FragmentBlur { count, distance, rotation } => {
             let count = count.max(1);
             let rotation = rotation.to_radians();
@@ -160,6 +264,8 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         }
         Effect::GaussianBlur { radius } if radius < 1.0 => return Some(None),
         Effect::GaussianBlur { radius } => blur(source, Weighing::Gaussian, radius, 1.0, stop),
+        Effect::MeanCurvatureBlur { iterations: 0 } => return Some(None),
+        Effect::MeanCurvatureBlur { iterations } => mean_curvature(source, iterations, stop),
         Effect::MedianBlur { .. } => unreachable!("worked out on the bytes"),
         Effect::MotionBlur { angle, distance, centered } => {
             let angle = angle.to_radians();
@@ -197,6 +303,21 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         Effect::SquareBlur { radius, highlights: h } => blur(source, Weighing::Square, radius, highlights(h), stop),
         Effect::SurfaceBlur { radius, threshold } => {
             blur(source, Weighing::Surface { threshold: (threshold / 100.0).max(f32::EPSILON) }, radius, 1.0, stop)
+        }
+        Effect::TileableBlur { .. } => unreachable!("worked out within the selection"),
+        Effect::VariableBlur { radius, ref map, invert } => {
+            let radii = (0..source.height as u32)
+                .flat_map(|y| {
+                    (0..source.width as u32).map(move |x| {
+                        let light = map.get_pixel_checked(x, y).map_or(0.0, |&Rgba([r, g, b, a])| {
+                            let luma = LUMA[0] * r as f32 + LUMA[1] * g as f32 + LUMA[2] * b as f32;
+                            luma / 255.0 * a as f32 / 255.0
+                        });
+                        radius * if invert { 1.0 - light } else { light }
+                    })
+                })
+                .collect();
+            variable_blur(source, radii, stop)
         }
         Effect::ZoomBlur { amount, .. } if amount.abs() < f32::EPSILON => return Some(None),
         Effect::ZoomBlur { amount, center: c } => {
@@ -300,6 +421,112 @@ fn blur_rows(source: &Buffer, weighing: Weighing, radius: f32, raise: f32, lower
         }
     });
     done.then(|| source.with_pixels(pixels))
+}
+
+/// Blurs each pixel by its own radius, from `radii`, row after row, much as a Gaussian
+/// Blur of it would: a few box blurs along each row, one after the other, then as many
+/// along each column.
+fn variable_blur(source: &Buffer, radii: Vec<f32>, stop: &AtomicBool) -> Option<Buffer> {
+    // How far either side each box goes for the boxes to spread the colours as far as
+    // the Gaussian Blur does, whose spread is half its radius: a box as wide as `w`
+    // spreads them by the root of (w² - 1) / 12.
+    let passes = BOX_PASSES as f32;
+    let halves: Vec<f32> = radii.iter().map(|&radius| ((3.0 * radius * radius / passes + 1.0).sqrt() - 1.0) / 2.0).collect();
+    let mut buffer = box_rows(source, &halves, stop)?;
+    for _ in 1..BOX_PASSES {
+        buffer = box_rows(&buffer, &halves, stop)?;
+    }
+    let halves = Buffer::transposed_items(&halves, source.width, source.height);
+    let mut buffer = buffer.transposed();
+    for _ in 0..BOX_PASSES {
+        buffer = box_rows(&buffer, &halves, stop)?;
+    }
+    Some(buffer.transposed())
+}
+
+/// Averages the pixels along each row, as far either side of each as `halves` says
+/// for it, a share of a pixel past the last whole one counting for as much of it,
+/// worked out from the sums of the row up to each pixel.
+fn box_rows(source: &Buffer, halves: &[f32], stop: &AtomicBool) -> Option<Buffer> {
+    let width = source.width;
+    let mut pixels = vec![[0.0; 4]; source.pixels.len()];
+    let done = fill_rows(&mut pixels, width, stop, |y, row| {
+        let line = &source.pixels[y * width..(y + 1) * width];
+        let halves = &halves[y * width..(y + 1) * width];
+        // The row goes on as its edge pixels as far as the widest box reaches, and a pixel more.
+        let reach = halves.iter().copied().fold(0.0, f32::max) as usize + 1;
+        let at = |i: usize| line[i.saturating_sub(reach).min(width - 1)];
+        let mut sums = Vec::with_capacity(width + 2 * reach + 1);
+        let mut total = [0.0f64; 4];
+        sums.push(total);
+        for i in 0..width + 2 * reach {
+            for (total, channel) in total.iter_mut().zip(at(i)) {
+                *total += channel as f64;
+            }
+            sums.push(total);
+        }
+        for (x, out) in row.iter_mut().enumerate() {
+            let half = halves[x];
+            if half <= 0.0 {
+                *out = line[x];
+                continue;
+            }
+            let whole = half as usize;
+            let part = half - whole as f32;
+            let (first, last) = (x + reach - whole, x + reach + whole);
+            let mut sum: [f32; 4] = std::array::from_fn(|channel| (sums[last + 1][channel] - sums[first][channel]) as f32);
+            if part > 0.0 {
+                add(&mut sum, at(first - 1), part);
+                add(&mut sum, at(last + 1), part);
+            }
+            *out = scale(sum, 1.0 / ((2 * whole + 1) as f32 + 2.0 * part));
+        }
+    });
+    done.then(|| source.with_pixels(pixels))
+}
+
+/// Moves each colour along the curve of the edge it is on, `iterations` times, which
+/// smooths it along the edge but not across: the change at each step is a quarter of
+/// how steep the colour is times how much its edge bends, as GIMP's does.
+fn mean_curvature(source: &Buffer, iterations: u32, stop: &AtomicBool) -> Option<Buffer> {
+    let (width, height) = (source.width as isize, source.height as isize);
+    let mut current = source.pixels.clone();
+    for _ in 0..iterations {
+        let mut next = vec![[0.0; 4]; current.len()];
+        let previous = &current;
+        let at = |x: isize, y: isize| previous[(y.clamp(0, height - 1) * width + x.clamp(0, width - 1)) as usize];
+        let done = fill_rows(&mut next, source.width, stop, |y, row| {
+            let y = y as isize;
+            for (x, out) in row.iter_mut().enumerate() {
+                let x = x as isize;
+                let [top_left, top, top_right] = [-1, 0, 1].map(|dx| at(x + dx, y - 1));
+                let [left, middle, right] = [-1, 0, 1].map(|dx| at(x + dx, y));
+                let [bottom_left, bottom, bottom_right] = [-1, 0, 1].map(|dx| at(x + dx, y + 1));
+                let mut color: [f32; 4] = std::array::from_fn(|c| {
+                    let (dx, dy) = (right[c] - left[c], bottom[c] - top[c]);
+                    let steepness = dx * dx + dy * dy;
+                    if steepness < f32::EPSILON {
+                        return middle[c];
+                    }
+                    let dxx = right[c] + left[c] - 2.0 * middle[c];
+                    let dyy = bottom[c] + top[c] - 2.0 * middle[c];
+                    let dxy = 0.25 * (bottom_right[c] - top_right[c] - bottom_left[c] + top_left[c]);
+                    middle[c] + 0.25 * (dx * dx * dyy + dy * dy * dxx - 2.0 * dx * dy * dxy) / steepness
+                });
+                let alpha = color[3].clamp(0.0, 1.0);
+                color[3] = alpha;
+                for channel in &mut color[..3] {
+                    *channel = channel.clamp(0.0, alpha);
+                }
+                *out = color;
+            }
+        });
+        if !done {
+            return None;
+        }
+        current = next;
+    }
+    Some(source.with_pixels(current))
 }
 
 /// Averages a disc of pixels, each row of it worked out from the sums of the row it
@@ -550,13 +777,7 @@ struct Buffer {
 
 impl Buffer {
     fn premultiplied(image: &RgbaImage) -> Self {
-        let pixels = image
-            .pixels()
-            .map(|pixel| {
-                let [r, g, b, a] = pixel.0.map(|channel| channel as f32 / 255.0);
-                [r * a, g * a, b * a, a]
-            })
-            .collect();
+        let pixels = image.pixels().map(|&pixel| premultiply(pixel)).collect();
         Self { width: image.width() as usize, height: image.height() as usize, pixels }
     }
 
@@ -584,11 +805,16 @@ impl Buffer {
 
     /// Its columns as rows.
     fn transposed(&self) -> Self {
-        let mut pixels = Vec::with_capacity(self.pixels.len());
-        for x in 0..self.width {
-            pixels.extend((0..self.height).map(|y| self.pixels[y * self.width + x]));
+        Self { width: self.height, height: self.width, pixels: Self::transposed_items(&self.pixels, self.width, self.height) }
+    }
+
+    /// The columns of `items`, rows of `width` of them one after the other, as rows.
+    fn transposed_items<T: Copy>(items: &[T], width: usize, height: usize) -> Vec<T> {
+        let mut transposed = Vec::with_capacity(items.len());
+        for x in 0..width {
+            transposed.extend((0..height).map(|y| items[y * width + x]));
         }
-        Self { width: self.height, height: self.width, pixels }
+        transposed
     }
 
     /// The pixels, their colours divided by how opaque they are again. Those that
@@ -604,6 +830,12 @@ impl Buffer {
             .collect();
         RgbaImage::from_raw(self.width as u32, self.height as u32, bytes).unwrap()
     }
+}
+
+/// The colour from 0 to 1, multiplied by how opaque it is.
+fn premultiply(pixel: Rgba<u8>) -> [f32; 4] {
+    let [r, g, b, a] = pixel.0.map(|channel| channel as f32 / 255.0);
+    [r * a, g * a, b * a, a]
 }
 
 fn add(sum: &mut [f32; 4], color: [f32; 4], weight: f32) {
@@ -639,19 +871,30 @@ mod tests {
     use super::*;
     use crate::{PixelRect, Selection};
 
-    const ALL: [Effect; 11] = [
-        Effect::BokehBlur { radius: 4.0, highlights: 50.0 },
-        Effect::FragmentBlur { count: 4, distance: 3.0, rotation: 10.0 },
-        Effect::GaussianBlur { radius: 3.0 },
-        Effect::MedianBlur { radius: 3.0, percentile: 50.0 },
-        Effect::MotionBlur { angle: 25.0, distance: 6.0, centered: true },
-        Effect::RadialBlur { angle: 10.0, center: [0.0, 0.0] },
-        Effect::SketchBlur { radius: 4.0 },
-        Effect::SquareBlur { radius: 3.0, highlights: 30.0 },
-        Effect::SurfaceBlur { radius: 3.0, threshold: 15.0 },
-        Effect::ZoomBlur { amount: 20.0, center: [10.0, -20.0] },
-        Effect::Sharpen { radius: 3.0, amount: 100.0, threshold: 0.0 },
-    ];
+    /// One of each effect, with settings that change something.
+    fn all() -> Vec<Effect> {
+        vec![
+            Effect::BokehBlur { radius: 4.0, highlights: 50.0 },
+            Effect::FocusBlur { radius: 6.0, shape: FocusShape::Circle, center: [10.0, 0.0], size: 10.0, transition: 40.0 },
+            Effect::FragmentBlur { count: 4, distance: 3.0, rotation: 10.0 },
+            Effect::GaussianBlur { radius: 3.0 },
+            Effect::MeanCurvatureBlur { iterations: 5 },
+            Effect::MedianBlur { radius: 3.0, percentile: 50.0 },
+            Effect::MotionBlur { angle: 25.0, distance: 6.0, centered: true },
+            Effect::RadialBlur { angle: 10.0, center: [0.0, 0.0] },
+            Effect::SketchBlur { radius: 4.0 },
+            Effect::SquareBlur { radius: 3.0, highlights: 30.0 },
+            Effect::SurfaceBlur { radius: 3.0, threshold: 15.0 },
+            Effect::TileableBlur { radius: 3.0 },
+            Effect::VariableBlur { radius: 4.0, map: white_map(300, 300), invert: false },
+            Effect::ZoomBlur { amount: 20.0, center: [10.0, -20.0] },
+            Effect::Sharpen { radius: 3.0, amount: 100.0, threshold: 0.0 },
+        ]
+    }
+
+    fn white_map(width: u32, height: u32) -> Arc<RgbaImage> {
+        Arc::new(RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255])))
+    }
 
     fn apply(pixels: &RgbaImage, effect: &Effect) -> RgbaImage {
         apply_effect(pixels, effect, None, &AtomicBool::new(false)).unwrap()
@@ -667,7 +910,7 @@ mod tests {
     #[test]
     fn an_even_colour_stays_as_it_is() {
         for pixels in [RgbaImage::from_pixel(40, 30, Rgba([200, 100, 50, 180])), RgbaImage::new(40, 30)] {
-            for effect in &ALL {
+            for effect in &all() {
                 assert_eq!(apply(&pixels, effect), pixels, "{effect:?}");
             }
         }
@@ -683,6 +926,11 @@ mod tests {
             Effect::Sharpen { radius: 3.0, amount: 0.0, threshold: 0.0 },
             Effect::FragmentBlur { count: 4, distance: 0.0, rotation: 0.0 },
             Effect::MotionBlur { angle: 0.0, distance: 0.0, centered: true },
+            Effect::MeanCurvatureBlur { iterations: 0 },
+            Effect::TileableBlur { radius: 0.0 },
+            Effect::VariableBlur { radius: 5.0, map: Arc::new(RgbaImage::new(21, 21)), invert: false },
+            Effect::VariableBlur { radius: 5.0, map: white_map(21, 21), invert: true },
+            Effect::FocusBlur { radius: 5.0, shape: FocusShape::Square, center: [0.0, 0.0], size: 100.0, transition: 0.0 },
         ];
         for effect in unchanged {
             assert_eq!(apply(&pixels, &effect), pixels, "{effect:?}");
@@ -760,7 +1008,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &ALL {
+        for effect in &all() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -770,7 +1018,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &ALL {
+        for effect in &all() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -790,5 +1038,75 @@ mod tests {
         assert_eq!(reds(Effect::Offset { x: 2, y: 0, edges: OffsetEdges::Repeat }), [10, 20, 20, 20, 30, 60]);
         // A whole turn leaves it as it was.
         assert_eq!(reds(Effect::Offset { x: 4, y: 0, edges: OffsetEdges::Wrap }), [10, 20, 30, 40, 50, 60]);
+    }
+
+    #[test]
+    fn a_variable_blur_with_an_even_map_is_much_as_a_gaussian_blur() {
+        let gaussian = apply(&dot(), &Effect::GaussianBlur { radius: 6.0 });
+        let variable = apply(&dot(), &Effect::VariableBlur { radius: 6.0, map: white_map(21, 21), invert: false });
+        for (a, b) in gaussian.pixels().zip(variable.pixels()) {
+            assert!(a[0].abs_diff(b[0]) <= 3, "{a:?} {b:?}");
+        }
+        assert_eq!(variable[(12, 10)], variable[(10, 12)]);
+    }
+
+    #[test]
+    fn a_variable_blur_blurs_only_where_the_map_is_light() {
+        let mut pixels = RgbaImage::from_pixel(41, 21, Rgba([0, 0, 0, 255]));
+        pixels.put_pixel(5, 10, Rgba([255, 255, 255, 255]));
+        pixels.put_pixel(35, 10, Rgba([255, 255, 255, 255]));
+        // Light on the right half only.
+        let map = Arc::new(RgbaImage::from_fn(41, 21, |x, _| if x > 20 { Rgba([255; 4]) } else { Rgba([0, 0, 0, 255]) }));
+        let blurred = apply(&pixels, &Effect::VariableBlur { radius: 4.0, map: Arc::clone(&map), invert: false });
+        assert_eq!(blurred[(5, 10)], pixels[(5, 10)]);
+        assert!(blurred[(35, 10)][0] < 255 && blurred[(36, 10)][0] > 0);
+        let inverted = apply(&pixels, &Effect::VariableBlur { radius: 4.0, map, invert: true });
+        assert_eq!(inverted[(35, 10)], pixels[(35, 10)]);
+        assert!(inverted[(5, 10)][0] < 255 && inverted[(6, 10)][0] > 0);
+    }
+
+    #[test]
+    fn a_focus_blur_leaves_its_centre_sharp() {
+        let pixels = RgbaImage::from_fn(60, 60, |x, y| Rgba([((x + y) % 2 * 255) as u8, 0, 0, 255]));
+        for shape in FocusShape::ALL {
+            let effect = Effect::FocusBlur { radius: 5.0, shape, center: [0.0, 0.0], size: 20.0, transition: 30.0 };
+            let blurred = apply(&pixels, &effect);
+            assert_eq!(blurred[(30, 30)], pixels[(30, 30)], "{shape:?}");
+            let corner = blurred[(1, 1)][0];
+            assert!(corner > 80 && corner < 180, "{shape:?}: {corner}");
+        }
+        // A band across leaves the whole of its middle row sharp.
+        let band = apply(&pixels, &Effect::FocusBlur { radius: 5.0, shape: FocusShape::Horizontal, center: [0.0, 0.0], size: 20.0, transition: 30.0 });
+        assert_eq!(band[(1, 30)], pixels[(1, 30)]);
+    }
+
+    #[test]
+    fn a_mean_curvature_blur_rounds_off_specks_but_keeps_straight_edges() {
+        let speck = RgbaImage::from_fn(21, 21, |x, y| {
+            if (9..12).contains(&x) && (9..12).contains(&y) { Rgba([255, 255, 255, 255]) } else { Rgba([0, 0, 0, 255]) }
+        });
+        let smoothed = apply(&speck, &Effect::MeanCurvatureBlur { iterations: 10 });
+        assert!(smoothed[(9, 9)][0] < 128, "the corners go: {:?}", smoothed[(9, 9)]);
+        let light = |pixels: &RgbaImage| pixels.pixels().map(|pixel| pixel[0] as u32).sum::<u32>();
+        assert!(light(&smoothed) < light(&speck));
+        let edge = RgbaImage::from_fn(20, 20, |x, _| if x < 10 { Rgba([0, 0, 0, 255]) } else { Rgba([255, 255, 255, 255]) });
+        assert_eq!(apply(&edge, &Effect::MeanCurvatureBlur { iterations: 10 }), edge);
+    }
+
+    #[test]
+    fn a_tileable_blur_goes_on_past_each_edge_with_the_other() {
+        let mut pixels = RgbaImage::from_pixel(21, 21, Rgba([0, 0, 0, 255]));
+        for y in 0..21 {
+            pixels.put_pixel(0, y, Rgba([255, 255, 255, 255]));
+        }
+        let blurred = apply(&pixels, &Effect::TileableBlur { radius: 3.0 });
+        assert!(blurred[(20, 5)][0] > 0);
+        assert_eq!(blurred[(20, 5)], blurred[(1, 5)]);
+        // Within the selection, the far edge of the selection is what goes on past it.
+        let selection = Selection::rect(PixelRect { left: 0, top: 0, right: 11, bottom: 21 });
+        let mask = SelectionMask::of(&selection, 21, 21).unwrap();
+        let within = apply_effect(&pixels, &Effect::TileableBlur { radius: 3.0 }, Some(&mask), &AtomicBool::new(false)).unwrap();
+        assert_eq!(within[(10, 5)], blurred[(20, 5)]);
+        assert_eq!(within[(20, 5)], pixels[(20, 5)]);
     }
 }

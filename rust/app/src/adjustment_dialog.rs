@@ -1,5 +1,6 @@
-//! Asks for the settings of an adjustment or an effect: each a number on a slider, or
-//! a box to check, as its kind lists them, or the curves of Curves. The image shows
+//! Asks for the settings of an adjustment or an effect: each a number on a slider, a
+//! box to check, a choice from a list or one of the image's layers, as its kind lists
+//! them, or the curves of Curves. The image shows
 //! each change as it is made; Cancel, or Escape, puts the layer back as it was.
 
 use std::{
@@ -25,9 +26,8 @@ const CHANNEL_NAMES: [&str; 3] = ["Red", "Green", "Blue"];
 const CHANNEL_COLORS: [Color32; 3] =
     [Color32::from_rgb(255, 77, 77), Color32::from_rgb(77, 255, 77), Color32::from_rgb(102, 128, 255)];
 
-/// A number a dialog asks for on a slider, from `min` to `max`, going up and down by
-/// `step`, with `suffix` shown after it, or a box to check, which is 1 when checked
-/// and 0 when not.
+/// A number a dialog asks for, as `input` says, on a slider from `min` to `max`,
+/// going up and down by `step`, with `suffix` shown after it.
 pub struct Setting {
     pub label: &'static str,
     pub min: f64,
@@ -35,15 +35,38 @@ pub struct Setting {
     pub step: f64,
     pub default: f64,
     pub suffix: &'static str,
-    pub check: bool,
+    pub input: Input,
+}
+
+/// How a dialog asks for a setting.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Input {
+    Slider,
+    /// A box to check, which is 1 when checked and 0 when not.
+    Check,
+    /// One of these, by its index.
+    Choice(&'static [&'static str]),
+    /// One of the image's layers, by its index, bottom first. Below zero, it is the one
+    /// above the layer being changed, or that one if it is the top one.
+    Layer,
 }
 
 pub const fn slider(label: &'static str, min: f64, max: f64, step: f64, default: f64, suffix: &'static str) -> Setting {
-    Setting { label, min, max, step, default, suffix, check: false }
+    Setting { label, min, max, step, default, suffix, input: Input::Slider }
 }
 
 pub const fn check(label: &'static str, default: bool) -> Setting {
-    Setting { label, min: 0.0, max: 1.0, step: 1.0, default: if default { 1.0 } else { 0.0 }, suffix: "", check: true }
+    let default = if default { 1.0 } else { 0.0 };
+    Setting { label, min: 0.0, max: 1.0, step: 1.0, default, suffix: "", input: Input::Check }
+}
+
+pub const fn choice(label: &'static str, choices: &'static [&'static str], default: usize) -> Setting {
+    let max = choices.len() as f64 - 1.0;
+    Setting { label, min: 0.0, max, step: 1.0, default: default as f64, suffix: "", input: Input::Choice(choices) }
+}
+
+pub const fn layer(label: &'static str) -> Setting {
+    Setting { label, min: 0.0, max: 0.0, step: 1.0, default: -1.0, suffix: "", input: Input::Layer }
 }
 
 /// What a dialog asks the settings of: an adjustment of the Colors menu or an effect
@@ -134,12 +157,16 @@ pub struct Dialog {
     pub job: Option<Job>,
     /// Size of what the Offset moves the pixels within, in pixels.
     offset_area: (u32, u32),
+    /// The names of the image's layers, bottom first, to pick one from.
+    layer_names: Vec<String>,
 }
 
 impl Dialog {
-    /// The dialog for `kind` on a layer of an image `size` pixels across and down,
-    /// starting from `values`, or for the Offset, from half of what it moves the pixels
-    /// within: the rectangle around those `mask` holds, if there is one, or the image.
+    /// The dialog for `kind` on a layer of an image `size` pixels across and down, with
+    /// layers named as `layer_names` says, bottom first, starting from `values`, or for
+    /// the Offset, from half of what it moves the pixels within: the rectangle around
+    /// those `mask` holds, if there is one, or the image.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         image: usize,
         layer: usize,
@@ -148,17 +175,42 @@ impl Dialog {
         curves: Curves,
         mask: Option<SelectionMask>,
         size: (u32, u32),
+        layer_names: Vec<String>,
     ) -> Self {
         let offset_area = mask.as_ref().and_then(SelectionMask::bounds).map_or(size, |area| {
             (area.width() as u32, area.height() as u32)
         });
         let editor = CurveEditor::default();
-        let mut dialog =
-            Self { image, layer, kind, values, curves, channel: 0, editor, mask, preview: None, job: None, offset_area };
+        let mut dialog = Self {
+            image,
+            layer,
+            kind,
+            values,
+            curves,
+            channel: 0,
+            editor,
+            mask,
+            preview: None,
+            job: None,
+            offset_area,
+            layer_names,
+        };
         if dialog.is_offset() {
             dialog.offset_by_half();
         }
+        dialog.pick_layers();
         dialog
+    }
+
+    /// Picks the layer above the one being changed, or that one if it is the top one,
+    /// for each layer setting that has none, or one the image does not have.
+    fn pick_layers(&mut self) {
+        let above = (self.layer + 1).min(self.layer_names.len() - 1) as f64;
+        for (setting, value) in self.kind.settings().iter().zip(&mut self.values) {
+            if setting.input == Input::Layer && (*value < 0.0 || *value as usize >= self.layer_names.len()) {
+                *value = above;
+            }
+        }
     }
 
     fn is_offset(&self) -> bool {
@@ -213,15 +265,31 @@ impl Dialog {
         let mut edited = false;
         egui::Grid::new("adjustment_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
             for (setting, value) in self.kind.settings().iter().zip(&mut self.values) {
-                if setting.check {
-                    ui.label("");
-                    let mut checked = *value != 0.0;
-                    if ui.checkbox(&mut checked, setting.label).changed() {
-                        *value = if checked { 1.0 } else { 0.0 };
-                        edited = true;
+                match setting.input {
+                    Input::Slider => {}
+                    Input::Check => {
+                        ui.label("");
+                        let mut checked = *value != 0.0;
+                        if ui.checkbox(&mut checked, setting.label).changed() {
+                            *value = if checked { 1.0 } else { 0.0 };
+                            edited = true;
+                        }
+                        ui.end_row();
+                        continue;
                     }
-                    ui.end_row();
-                    continue;
+                    Input::Choice(choices) => {
+                        ui.label(setting.label);
+                        edited |= pick(ui, setting.label, value, choices);
+                        ui.end_row();
+                        continue;
+                    }
+                    Input::Layer => {
+                        ui.label(setting.label);
+                        let names: Vec<&str> = self.layer_names.iter().map(String::as_str).collect();
+                        edited |= pick(ui, setting.label, value, &names);
+                        ui.end_row();
+                        continue;
+                    }
                 }
                 ui.label(setting.label);
                 ui.horizontal(|ui| {
@@ -326,5 +394,19 @@ impl Dialog {
         if self.is_offset() {
             self.offset_by_half();
         }
+        self.pick_layers();
     }
+}
+
+/// A list to pick one of `choices` from, `value` being the index of the one picked.
+/// Returns whether it changed.
+fn pick(ui: &mut egui::Ui, id: &str, value: &mut f64, choices: &[&str]) -> bool {
+    let mut edited = false;
+    let current = choices.get(*value as usize).copied().unwrap_or_default();
+    egui::ComboBox::from_id_salt(id).selected_text(current).truncate().show_ui(ui, |ui| {
+        for (index, choice) in choices.iter().enumerate() {
+            edited |= ui.selectable_value(value, index as f64, *choice).changed();
+        }
+    });
+    edited
 }
