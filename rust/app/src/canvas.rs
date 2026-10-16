@@ -12,7 +12,8 @@
 //! Unless their selection controls are off, they and the Paint Bucket resize or move the
 //! selection from a handle
 //! of its box, or the one out from its bottom right corner, or rotate it from around
-//! the box. The shape tools draw their shape, which their handles then change until it
+//! the box. Shear and Perspective slant the selected pixels, or tilt them, from the
+//! handles on the edges or the corners of the selection's box. The shape tools draw their shape, which their handles then change until it
 //! is finished. The selection shows as a tinted area in a dashed outline, with a button by it: with the
 //! selection tools and Move Selection, to go from one to the other, and with the other
 //! tools, to deselect. The grid shows over the image; while snapping to it, the
@@ -39,7 +40,10 @@ use crate::{
     lasso::{Lasso, LassoKind},
     shapes::{self, Handle, ShapeEdit},
     tools::{RightClick, SampleSource, Tool, Tools, ZoomDrag},
-    transform::{BoxState, DragKind, MOVE_HANDLE_SIZE, PIVOT_RADIUS, ROTATE_REACH, Transform},
+    transform::{
+        BoxState, Corners, DragKind, MOVE_HANDLE_SIZE, PIVOT_RADIUS, ROTATE_REACH, Transform, Warp, warp_drag_at,
+        warp_handles, warped_selection,
+    },
     view::View,
 };
 
@@ -254,6 +258,8 @@ pub fn show(
         wand_at = pointer.filter(|_| use_magic_wand(ui, &response, image, tools, space));
     } else if tools.tool.shape().is_some() {
         use_shape_tool(ui, &response, image, tools, pointer, space);
+    } else if let Some(warp) = tools.tool.warp() {
+        use_warp_tool(ui, &response, image, tools, pointer, space, warp);
     } else if tools.tool != Tool::Pan {
         use_tool(ui, &response, image, tools, pointer, space);
     }
@@ -307,6 +313,11 @@ pub fn show(
     let box_shown = box_state(image, tools);
     if let Some(state) = box_shown {
         paint_handles(&painter, &image.view, state, icons);
+    }
+    if let Some(warp) = tools.tool.warp()
+        && let Some(corners) = warp_corners(image)
+    {
+        paint_warp_handles(&painter, &image.view, &corners, warp);
     }
     let (mut tool_requested, mut deselect_requested) = (None, false);
     let idle = !tools.frame_select.is_dragging() && tools.zoom_drag.is_none() && !image.is_dragging();
@@ -535,7 +546,7 @@ fn use_tool(
                 && response.drag_stopped_by(PointerButton::Primary);
             let (moved, placed) = transform.release(tools.resampling);
             if moved {
-                commit_transform(ui.ctx(), image, placed);
+                commit_transform(ui.ctx(), image, tools.tool, placed);
             }
             // A click on the box of a selection tool does what a click with the tool does.
             if !moved
@@ -574,6 +585,83 @@ fn use_tool(
     if let Some(cursor) = cursor {
         ui.ctx().set_cursor_icon(cursor);
     }
+}
+
+/// The corners Shear and Perspective show handles on: where the transform has taken
+/// them, or else those of the selection's box, or of the whole layer if nothing is
+/// selected.
+fn warp_corners(image: &OpenImage) -> Option<Corners> {
+    match &image.transform {
+        Some(transform) => Some(transform.corners()),
+        None => Some(BoxState::of(&warped_selection(&image.document))?.corners()),
+    }
+}
+
+/// Works Shear or Perspective: a press on one of their handles moves the corners of the
+/// selection's box apart, and one inside it moves it, the selected pixels going along,
+/// each drag a step. Escape gives up a drag.
+fn use_warp_tool(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    image: &mut OpenImage,
+    tools: &Tools,
+    pointer: Option<Pos2>,
+    space: bool,
+    warp: Warp,
+) {
+    let reach = image.view.pixels_per_screen_point();
+    let drag_at = |image: &OpenImage, at: Pos2| warp_drag_at(&warp_corners(image)?, warp, image.view.point_at(at), reach);
+    if ui.input(|input| input.key_pressed(Key::Escape))
+        && let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging())
+    {
+        image.document.selection = transform.cancel();
+    }
+    if response.drag_started_by(PointerButton::Primary)
+        && !space
+        && let Some(press) = ui.input(|input| input.pointer.press_origin())
+        && let Some(kind) = drag_at(image, press)
+    {
+        if image.transform.is_none() {
+            image.transform = Transform::begin_warp(ui.ctx(), &image.document);
+        }
+        if let Some(transform) = &mut image.transform {
+            transform.press(kind, image.view.point_at(press), reach);
+        }
+    }
+    if response.dragged()
+        && response.drag_delta() != Vec2::ZERO
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging())
+    {
+        let (shift, command) = ui.input(|input| (input.modifiers.shift, input.modifiers.command));
+        if let Some(selection) = transform.drag_to(image.view.point_at(at), shift, command, tools.snap) {
+            image.document.selection = selection;
+        }
+    }
+    if response.drag_stopped()
+        && let Some(transform) = image.transform.as_mut()
+    {
+        let (moved, placed) = transform.release(tools.resampling);
+        if moved {
+            commit_transform(ui.ctx(), image, tools.tool, placed);
+        }
+    }
+
+    // The pointer shows what a press would do.
+    let dragging = image.transform.as_ref().and_then(Transform::drag_kind);
+    let hovered = pointer.filter(|_| !image.is_dragging()).and_then(|at| drag_at(image, at));
+    let Some(kind) = dragging.or(hovered) else {
+        return;
+    };
+    // An edge slides the way it runs on screen.
+    let angle = match (kind, warp_corners(image)) {
+        (DragKind::Edge(edge), Some(corners)) => {
+            let (a, b) = (corners[edge], corners[(edge + 1) % 4]);
+            (b.1 - a.1).atan2(b.0 - a.0)
+        }
+        _ => 0.0,
+    };
+    ui.ctx().set_cursor_icon(kind.cursor(angle));
 }
 
 /// What of Polygon Select's corners and edges a press is on.
@@ -914,21 +1002,27 @@ fn finish_shape(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools) {
     image.refresh(ctx);
 }
 
-/// The selection's box moved, as a step: with `placed`, the active layer with the
-/// selected pixels drawn where they now are.
-fn commit_transform(ctx: &egui::Context, image: &mut OpenImage, placed: Option<RgbaImage>) {
+/// The selection's box moved, as a step named after Shear or Perspective if `tool` is
+/// one of them: with `placed`, the active layer with the selected pixels drawn where
+/// they now are.
+fn commit_transform(ctx: &egui::Context, image: &mut OpenImage, tool: Tool, placed: Option<RgbaImage>) {
     let document = &mut image.document;
     // Tiled, what was carried off the tile comes back in at the other edge, as the pixels do.
     if let Some(tile) = image.view.tile() {
         document.selection = document.selection.wrapped(tile);
     }
-    match placed {
-        Some(pixels) => {
-            document.active_mut().pixels = pixels;
-            document.commit("Move Selected Pixels", Some(icons::MOVE_PIXELS.name()));
-            image.refresh(ctx);
-        }
-        None => document.commit(Tool::MoveSelection.name(), Some(Tool::MoveSelection.icon().name())),
+    let (name, icon) = match (tool.warp(), &placed) {
+        (Some(_), _) => (tool.name(), tool.icon()),
+        (None, Some(_)) => ("Move Selected Pixels", icons::MOVE_PIXELS),
+        (None, None) => (Tool::MoveSelection.name(), Tool::MoveSelection.icon()),
+    };
+    let changes_pixels = placed.is_some();
+    if let Some(pixels) = placed {
+        document.active_mut().pixels = pixels;
+    }
+    document.commit(name, Some(icon.name()));
+    if changes_pixels {
+        image.refresh(ctx);
     }
     let step = image.document.current_step();
     if let Some(transform) = &mut image.transform {
@@ -937,8 +1031,8 @@ fn commit_transform(ctx: &egui::Context, image: &mut OpenImage, placed: Option<R
 }
 
 /// Nudges the selection's box by `offset`, in pixels, with the selected pixels with the
-/// selection tools, as a step, or the shape a shape tool can change. Nothing happens
-/// while the tool shows no box, or drags it.
+/// selection tools, Shear and Perspective, as a step, or the shape a shape tool can
+/// change. Nothing happens while the tool shows no box, or drags it.
 pub fn nudge(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools, offset: (i32, i32)) {
     if image.is_dragging() || tools.frame_select.is_dragging() {
         return;
@@ -949,18 +1043,22 @@ pub fn nudge(ctx: &egui::Context, image: &mut OpenImage, tools: &Tools, offset: 
         }
         return;
     }
-    if box_state(image, tools).is_none() {
+    let warp = tools.tool.warp();
+    if box_state(image, tools).is_none() && warp.is_none() {
         return;
     }
     if image.transform.is_none() {
-        image.transform = Transform::begin(ctx, &image.document, tools.tool.has_box());
+        image.transform = match warp {
+            Some(_) => Transform::begin_warp(ctx, &image.document),
+            None => Transform::begin(ctx, &image.document, tools.tool.has_box()),
+        };
     }
     let Some(transform) = &mut image.transform else {
         return;
     };
     let (selection, placed) = transform.nudge(offset, tools.resampling);
     image.document.selection = selection;
-    commit_transform(ctx, image, placed);
+    commit_transform(ctx, image, tools.tool, placed);
 }
 
 /// Works the Zoom tool: a click zooms a level in on the pointer, or out with the right
@@ -1501,7 +1599,7 @@ fn use_selection_controls(
         && let Some(transform) = image.transform.as_mut()
         && transform.release(tools.resampling).0
     {
-        commit_transform(ui.ctx(), image, None);
+        commit_transform(ui.ctx(), image, tools.tool, None);
     }
     let angle = box_state(image, tools).map_or(0.0, |state| state.angle);
     let dragging = image.transform.as_ref().and_then(Transform::drag_kind);
@@ -1805,6 +1903,19 @@ fn paint_handles(painter: &Painter, view: &View, state: BoxState, icons: &mut Ic
             painter.line_segment([center - Vec2::X * radius, center + Vec2::X * radius], stroke);
             painter.line_segment([center - Vec2::Y * radius, center + Vec2::Y * radius], stroke);
         }
+    }
+}
+
+/// The outline of the corners Shear or Perspective move, with a handle on each corner
+/// with Perspective, or in the middle of each edge with Shear.
+fn paint_warp_handles(painter: &Painter, view: &View, corners: &Corners, warp: Warp) {
+    let pixel = 1.0 / painter.pixels_per_point();
+    let on_screen = |(x, y): (f64, f64)| view.to_screen(x as f32, y as f32).round_to_pixels(painter.pixels_per_point());
+    paint_outline(painter, &corners.map(on_screen));
+    for point in warp_handles(corners, warp) {
+        let handle = Rect::from_center_size(on_screen(point), Vec2::splat(HANDLE_SIZE));
+        painter.rect_filled(handle, 0.0, Color32::WHITE);
+        painter.rect_stroke(handle, 0.0, Stroke::new(pixel, Color32::BLACK), egui::StrokeKind::Inside);
     }
 }
 

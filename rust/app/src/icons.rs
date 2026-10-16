@@ -28,6 +28,8 @@ pub const ELLIPSE_SELECT: Icon = icon!("ellipse_select");
 pub const POLYGON_SELECT: Icon = icon!("polygon_lasso");
 pub const MAGIC_WAND: Icon = icon!("magic_wand");
 pub const MOVE_SELECTION: Icon = icon!("move_selection");
+pub const SHEAR: Icon = icon!("shear");
+pub const PERSPECTIVE: Icon = icon!("perspective");
 pub const ZOOM: Icon = icon!("zoom");
 pub const PAN: Icon = icon!("pan");
 pub const PAINTBRUSH: Icon = icon!("paintbrush");
@@ -88,13 +90,15 @@ pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
 /// Those the history can list steps with, which it keeps by name.
-const STEP_ICONS: [Icon; 37] = [
+const STEP_ICONS: [Icon; 39] = [
     RECT_SELECT,
     LASSO_SELECT,
     ELLIPSE_SELECT,
     POLYGON_SELECT,
     MAGIC_WAND,
     MOVE_SELECTION,
+    SHEAR,
+    PERSPECTIVE,
     SELECT_ALL,
     DESELECT,
     INVERT_SELECTION,

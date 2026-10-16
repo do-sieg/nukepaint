@@ -12,6 +12,7 @@ use crate::{
     grid::Cells,
     icons::{self, Icon},
     lasso::LassoKind,
+    transform::Warp,
 };
 
 /// What the shape tools' help ends with, after how to draw the shape.
@@ -30,6 +31,8 @@ macro_rules! shape_help {
 /// Goes from one selection tool to the next.
 pub const SELECT_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::S);
 pub const MOVE_SELECTION_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::M);
+/// Goes from the Shear to the Perspective and back.
+pub const TRANSFORM_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::T);
 pub const ZOOM_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Z);
 pub const PAN_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::H);
 pub const PAINTBRUSH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::B);
@@ -57,6 +60,8 @@ pub enum Tool {
     PolygonSelect,
     MagicWand,
     MoveSelection,
+    Shear,
+    Perspective,
     Zoom,
     Pan,
     Paintbrush,
@@ -80,13 +85,15 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 28] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::LassoSelect,
         Self::PolygonSelect,
         Self::MagicWand,
         Self::MoveSelection,
+        Self::Shear,
+        Self::Perspective,
         Self::Zoom,
         Self::Pan,
         Self::Paintbrush,
@@ -117,6 +124,8 @@ impl Tool {
             Self::PolygonSelect => "Polygon Select",
             Self::MagicWand => "Magic Wand",
             Self::MoveSelection => "Move Selection",
+            Self::Shear => "Shear",
+            Self::Perspective => "Perspective",
             Self::Zoom => "Zoom",
             Self::Pan => "Pan",
             Self::Paintbrush => "Paintbrush",
@@ -148,6 +157,8 @@ impl Tool {
             Self::PolygonSelect => icons::POLYGON_SELECT,
             Self::MagicWand => icons::MAGIC_WAND,
             Self::MoveSelection => icons::MOVE_SELECTION,
+            Self::Shear => icons::SHEAR,
+            Self::Perspective => icons::PERSPECTIVE,
             Self::Zoom => icons::ZOOM,
             Self::Pan => icons::PAN,
             Self::Paintbrush => icons::PAINTBRUSH,
@@ -177,6 +188,7 @@ impl Tool {
                 SELECT_KEY
             }
             Self::MoveSelection => MOVE_SELECTION_KEY,
+            Self::Shear | Self::Perspective => TRANSFORM_KEY,
             Self::Zoom => ZOOM_KEY,
             Self::Pan => PAN_KEY,
             Self::Paintbrush => PAINTBRUSH_KEY,
@@ -228,6 +240,17 @@ impl Tool {
                  of rotation to turn it about another point, or the arrow keys to nudge it, by ten pixels with \
                  Shift. Shift keeps its proportions, or turns it in steps of 15°, and Ctrl resizes it about its \
                  middle."
+            }
+            Self::Shear => {
+                "Drag the handle in the middle of an edge of the selection's box, or the edge itself, to slide it \
+                 along, slanting the selected pixels, or all the layer's if nothing is selected. The opposite edge \
+                 stays put, or slides the other way with Ctrl. Drag inside the box to move it, or the arrow keys \
+                 to nudge it."
+            }
+            Self::Perspective => {
+                "Drag a corner of the selection's box to move it alone, which tilts the selected pixels, or all \
+                 the layer's if nothing is selected, as if seen at an angle. The corners cannot fold over each \
+                 other. Drag inside the box to move it, or the arrow keys to nudge it."
             }
             Self::Zoom => "Click to zoom in, right click to zoom out, or drag to frame what to zoom in on.",
             Self::Pan => {
@@ -317,6 +340,8 @@ impl Tool {
             | Self::PolygonSelect
             | Self::MagicWand
             | Self::MoveSelection
+            | Self::Shear
+            | Self::Perspective
             | Self::Zoom
             | Self::Pan
             | Self::Paintbrush
@@ -360,6 +385,15 @@ impl Tool {
         match self {
             Self::LassoSelect => Some(LassoKind::Freehand),
             Self::PolygonSelect => Some(LassoKind::Polygon),
+            _ => None,
+        }
+    }
+
+    /// How the tool moves the corners of the selection's box apart, for Shear and Perspective.
+    pub fn warp(self) -> Option<Warp> {
+        match self {
+            Self::Shear => Some(Warp::Shear),
+            Self::Perspective => Some(Warp::Perspective),
             _ => None,
         }
     }
@@ -507,8 +541,8 @@ pub struct Tools {
     pub shape_size: u32,
     /// The tools used last, the latest last, one of each of those that share a key.
     pub last_tools: Vec<Tool>,
-    /// How the selection tools redraw the pixels they move, once they are not just
-    /// moved by whole pixels.
+    /// How the selection tools, Shear and Perspective redraw the pixels they move, once
+    /// they are not just moved by whole pixels.
     pub resampling: Interpolation,
     /// The grid's cells, while the selection tools and the selection's box snap to them.
     pub snap: Option<Cells>,
@@ -703,5 +737,8 @@ mod tests {
         assert_eq!(tools.next_tool(RETOUCH_KEY), Tool::Sharpen);
         tools.set_tool(Tool::Sharpen);
         assert_eq!(tools.next_tool(RETOUCH_KEY), Tool::Jumble);
+        assert_eq!(tools.next_tool(TRANSFORM_KEY), Tool::Shear);
+        tools.set_tool(Tool::Shear);
+        assert_eq!(tools.next_tool(TRANSFORM_KEY), Tool::Perspective);
     }
 }

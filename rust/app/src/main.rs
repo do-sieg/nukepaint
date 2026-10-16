@@ -1086,7 +1086,7 @@ impl App {
         let at = bounds.map_or((0, 0), |bounds| (bounds.left.floor() as i32, bounds.top.floor() as i32));
         let layer = &mut document.active_mut().pixels;
         let floating = FloatingPixels::pasted(layer, self.clipboard.image().unwrap().clone(), at);
-        *layer = floating.place(&Affine::IDENTITY, Interpolation::Nearest);
+        *layer = floating.place(Affine::IDENTITY, Interpolation::Nearest);
         let transform = Transform::begin_pasted(ctx, floating, document);
         document.selection = transform.selection();
         let name = if new_layer { "Paste in to New Layer" } else { "Paste" };
@@ -1478,6 +1478,9 @@ impl App {
             if self.tools.tool.selects() {
                 self.selection_options(ui);
             }
+            if self.tools.tool.warp().is_some() {
+                self.resampling_option(ui);
+            }
         });
     }
 
@@ -1512,9 +1515,13 @@ impl App {
             );
         }
         // The Magic Wand moves no pixels.
-        if !self.tools.tool.has_box() {
-            return;
+        if self.tools.tool.has_box() {
+            self.resampling_option(ui);
         }
+    }
+
+    /// How the pixels the selection tools, Shear and Perspective move are redrawn.
+    fn resampling_option(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.label("Resampling:");
         let before = self.tools.resampling;
@@ -1527,9 +1534,9 @@ impl App {
             })
             .response
             .on_hover_text(
-                "How the selected pixels are redrawn once they are resized, rotated or moved by part of a pixel. \
-                 Nearest Neighbor keeps their edges hard; Bicubic and Lanczos keep them sharper than Bilinear. \
-                 Moving them by whole pixels always copies them as they are.",
+                "How the selected pixels are redrawn once they are resized, rotated, sheared, put in perspective \
+                 or moved by part of a pixel. Nearest Neighbor keeps their edges hard; Bicubic and Lanczos keep \
+                 them sharper than Bilinear. Moving them by whole pixels always copies them as they are.",
             );
         if self.tools.resampling != before {
             self.resample_transforms(ui.ctx());

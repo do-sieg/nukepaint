@@ -4,7 +4,7 @@
 use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
 use i_overlay::float::{simplify::SimplifyShape, single::SingleFloatOverlay};
 
-use crate::Affine;
+use crate::{Affine, Projective};
 
 /// What a selection tool does to the selection there already is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -332,7 +332,8 @@ impl Selection {
     }
 
     /// The selection carried somewhere else by `map`, out of any box it was in.
-    pub fn transformed(&self, map: &Affine) -> Selection {
+    pub fn transformed(&self, map: impl Into<Projective>) -> Selection {
+        let map = map.into();
         let outlines = self.outlines.iter();
         let outlines = outlines.map(|outline| outline.iter().map(|&point| map.apply(point)).collect()).collect();
         Self { outlines, frame: None }
@@ -361,9 +362,9 @@ impl Selection {
         for y in copies(bounds.top, bounds.bottom, area.top, height) {
             for x in copies(bounds.left, bounds.right, area.left, width) {
                 let (dx, dy) = (x as f64 * width, y as f64 * height);
-                let copy = Selection::rect(area).transformed(&Affine::translation(dx, dy));
+                let copy = Selection::rect(area).transformed(Affine::translation(dx, dy));
                 let piece = self.combine(&copy, SelectionMode::Intersect);
-                let piece = piece.transformed(&Affine::translation(-dx, -dy));
+                let piece = piece.transformed(Affine::translation(-dx, -dy));
                 wrapped = wrapped.combine(&piece, SelectionMode::Add);
             }
         }
@@ -621,7 +622,7 @@ mod tests {
 
     #[test]
     fn transformed_moves_the_outlines() {
-        let moved = rect(0, 0, 4, 2).transformed(&Affine::translation(3.0, 1.0));
+        let moved = rect(0, 0, 4, 2).transformed(Affine::translation(3.0, 1.0));
         assert_eq!(moved, rect(3, 1, 7, 3));
         assert_eq!(moved.bounds(), Some(Bounds { left: 3.0, top: 1.0, right: 7.0, bottom: 3.0 }));
     }
@@ -631,7 +632,7 @@ mod tests {
         let turn = Affine::translation(-10.0, -10.0)
             .then(Affine::rotation(0.5))
             .then(Affine::translation(10.0, 10.0));
-        let turned = rect(4, 6, 16, 14).transformed(&turn);
+        let turned = rect(4, 6, 16, 14).transformed(turn);
         let inside = (0..20).flat_map(|y| (0..20).map(move |x| (x, y)));
         let count = inside.filter(|&(x, y)| turned.contains(x, y)).count() as i32;
         assert_eq!(area(&turned), count);

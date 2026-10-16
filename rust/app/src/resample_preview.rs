@@ -1,6 +1,7 @@
-//! Shows pixels being moved, stretched and turned exactly as they will be put down,
-//! however they are resampled: `resample.wgsl` works out each pixel on the GPU as
-//! `FloatingPixels::place` does, which would be too slow for the CPU at every frame.
+//! Shows pixels being moved, stretched, turned, sheared or put in perspective exactly
+//! as they will be put down, however they are resampled: `resample.wgsl` works out each
+//! pixel on the GPU as `FloatingPixels::place` does, which would be too slow for the
+//! CPU at every frame.
 
 use std::{
     num::NonZeroU64,
@@ -11,7 +12,7 @@ use eframe::{
     egui::{Painter, Rect, Vec2},
     egui_wgpu::{self, wgpu, wgpu::util::DeviceExt},
 };
-use power_paint_core::{Affine, FloatingPixels, Interpolation, PixelRect, RgbaImage};
+use power_paint_core::{Affine, FloatingPixels, Interpolation, PixelRect, Projective, RgbaImage};
 
 use crate::{grid::uniform_bind_group, view::View};
 
@@ -20,7 +21,7 @@ use crate::{grid::uniform_bind_group, view::View};
 const TILE_SIZE: u32 = 2048;
 const TILE_MARGIN: u32 = 3;
 /// Size of what `resample.wgsl` is given, in bytes.
-const PARAMS_SIZE: u64 = 96;
+const PARAMS_SIZE: u64 = 112;
 /// Stands for no end, for the tiles on the edges of the pixels.
 const UNBOUNDED: i32 = 1 << 30;
 
@@ -138,12 +139,17 @@ impl ResamplePreview {
         &self,
         painter: &Painter,
         view: &View,
-        map: &Affine,
+        map: &Projective,
         interpolation: Interpolation,
         opacity: f32,
         shift: Vec2,
     ) {
-        let Some(back) = map.inverse() else {
+        let PixelRect { left, top, right, bottom } = self.area;
+        let corners = [(left, top), (right, top), (right, bottom), (left, bottom)].map(|(x, y)| (x as f64, y as f64));
+        // Nothing is put down if part of the pixels is tilted behind the eye.
+        let sides = corners.map(|corner| map.w(corner));
+        let in_front = sides.iter().all(|&w| w > 1e-9) || sides.iter().all(|&w| w < -1e-9);
+        let Some(back) = map.inverse().filter(|_| in_front) else {
             return;
         };
         let radius = match interpolation {
@@ -154,20 +160,20 @@ impl ResamplePreview {
             Interpolation::Lanczos => 3,
         };
         // Only over where the pixels land, a little wider for the blended edges, in view.
-        let PixelRect { left, top, right, bottom } = self.area;
-        let corners = [(left, top), (right, top), (right, bottom), (left, bottom)]
-            .map(|(x, y)| map.apply((x as f64, y as f64)))
-            .map(|(x, y)| view.to_screen(x as f32, y as f32) + shift);
+        let corners = corners.map(|corner| map.apply(corner)).map(|(x, y)| view.to_screen(x as f32, y as f32) + shift);
         let margin = (radius + 1) as f32 * view.zoom / painter.pixels_per_point();
         let rect = Rect::from_points(&corners).expand(margin).intersect(painter.clip_rect());
         if !rect.is_positive() {
             return;
         }
         let corner = ((view.image_rect().min.to_vec2() + shift) * painter.pixels_per_point()).round();
+        // In pixels of the area, from the middle of its first one.
+        let back = back.then(Affine::translation(-left as f64 - 0.5, -top as f64 - 0.5).into());
         let params = Params {
             view: [corner.x, corner.y, view.zoom, opacity],
-            map_x: [back.xx as f32, back.xy as f32, (back.dx - left as f64 - 0.5) as f32, 0.0],
-            map_y: [back.yx as f32, back.yy as f32, (back.dy - top as f64 - 0.5) as f32, 0.0],
+            map_x: [back.xx as f32, back.xy as f32, back.dx as f32, 0.0],
+            map_y: [back.yx as f32, back.yy as f32, back.dy as f32, 0.0],
+            map_w: [back.wx as f32, back.wy as f32, back.ww as f32, 0.0],
             size: [self.pixels.width() as i32, self.pixels.height() as i32],
             // Enlarged, each pixel of the image shows as it will be put down.
             mode: [radius, (view.zoom >= 1.0) as u32],
@@ -188,6 +194,7 @@ struct Params {
     view: [f32; 4],
     map_x: [f32; 4],
     map_y: [f32; 4],
+    map_w: [f32; 4],
     size: [i32; 2],
     mode: [u32; 2],
 }
@@ -196,7 +203,7 @@ impl Params {
     /// What `resample.wgsl` is given for a tile, laid out as it reads it.
     fn bytes(&self, core: [i32; 4], texture_origin: [i32; 2]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(PARAMS_SIZE as usize);
-        for value in self.view.into_iter().chain(self.map_x).chain(self.map_y) {
+        for value in self.view.into_iter().chain(self.map_x).chain(self.map_y).chain(self.map_w) {
             bytes.extend(value.to_ne_bytes());
         }
         for value in core.into_iter().chain(texture_origin).chain(self.size) {
@@ -320,7 +327,8 @@ mod tests {
 
     #[test]
     fn params_are_laid_out_as_the_shader_reads_them() {
-        let params = Params { view: [0.0; 4], map_x: [0.0; 4], map_y: [0.0; 4], size: [1, 1], mode: [1, 0] };
+        let params =
+            Params { view: [0.0; 4], map_x: [0.0; 4], map_y: [0.0; 4], map_w: [0.0; 4], size: [1, 1], mode: [1, 0] };
         assert_eq!(params.bytes([0; 4], [0; 2]).len() as u64, PARAMS_SIZE);
     }
 }

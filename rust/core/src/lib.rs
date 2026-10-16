@@ -22,7 +22,7 @@ mod stroke;
 mod wrap;
 
 pub use adjustment::{Adjustment, Curves, adjust, sample_curve};
-pub use affine::Affine;
+pub use affine::{Affine, Projective};
 pub use blend::{blend_layer, composite, composite_area};
 pub use document::Document;
 pub use effect::{Effect, FocusShape, OffsetEdges, apply_effect};

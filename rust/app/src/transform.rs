@@ -11,6 +11,11 @@
 //! the top left corner of the rectangle around it on a corner of a cell, and resizing
 //! an upright box puts its edges on the grid's lines. Between drags, the arrow keys
 //! nudge the box by a pixel, or by ten with Shift.
+//! Shear and Perspective move the box's corners apart instead: Shear slides an edge
+//! along itself from the handle in its middle, the opposite edge staying put, or going
+//! the other way with Ctrl; Perspective moves a corner alone. Either moves the box from
+//! inside it, and works the whole layer when nothing is selected. Corners must go
+//! around an area without folding over: a drag that would fold them stops short.
 //! A transform lasts from its first drag until the tool or the selection changes some
 //! other way: until then every drag starts again from what the box held at first, so
 //! nothing degrades.
@@ -19,8 +24,8 @@ use std::f64::consts::PI;
 
 use eframe::egui::{self, CursorIcon, Vec2};
 use power_paint_core::{
-    Affine, Bounds, Document, FloatingPixels, Frame, Interpolation, Layer, MAX_OPACITY, PixelRect, RgbaImage, Selection,
-    composite,
+    Affine, Bounds, Document, FloatingPixels, Frame, Interpolation, Layer, MAX_OPACITY, PixelRect, Projective, RgbaImage,
+    Selection, composite,
 };
 
 use crate::{grid::Cells, resample_preview::ResamplePreview, tiled_texture::TiledTexture, view::View};
@@ -98,6 +103,14 @@ impl BoxState {
             }
         }
         handles
+    }
+
+    /// Its corners: those that are its top left, top right, bottom right and bottom left
+    /// before it turns or is mirrored.
+    pub fn corners(&self) -> Corners {
+        let half = (self.size.0 / 2.0, self.size.1 / 2.0);
+        [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .map(|(x, y)| add(self.center, rotate((x * half.0, y * half.1), self.angle)))
     }
 
     /// The bottom right corner, as the box is turned, which the handle that moves it
@@ -313,6 +326,160 @@ fn edge_at(value: f64, half: f64, reach: f64) -> i32 {
     }
 }
 
+/// The corners of a box, wherever Shear and Perspective have taken them: those that
+/// were its top left, top right, bottom right and bottom left before it turned.
+pub type Corners = [(f64, f64); 4];
+
+/// The tools that move the corners of the selection's box apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Warp {
+    /// Slides an edge along itself, the opposite one staying put.
+    Shear,
+    /// Moves a corner alone.
+    Perspective,
+}
+
+/// What Shear and Perspective work on: the selection, or the whole layer if nothing
+/// is selected.
+pub fn warped_selection(document: &Document) -> Selection {
+    if document.selection.bounds().is_some() {
+        return document.selection.clone();
+    }
+    let (width, height) = document.active().pixels.dimensions();
+    Selection::rect(PixelRect { left: 0, top: 0, right: width as i32, bottom: height as i32 })
+}
+
+/// The handles `warp` moves the corners by: in the middle of each edge from a corner to
+/// the next with Shear, and on each corner with Perspective.
+pub fn warp_handles(corners: &Corners, warp: Warp) -> Corners {
+    match warp {
+        Warp::Shear => std::array::from_fn(|index| {
+            let (a, b) = (corners[index], corners[(index + 1) % 4]);
+            ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)
+        }),
+        Warp::Perspective => *corners,
+    }
+}
+
+/// What a press at a point of the image does with `warp`: on one of its handles, or with
+/// Shear anywhere along an edge, it moves that; inside the corners, it moves them all.
+/// `reach` is how many pixels of the image a point of the screen takes.
+pub fn warp_drag_at(corners: &Corners, warp: Warp, point: (f64, f64), reach: f64) -> Option<DragKind> {
+    let away = |to: (f64, f64)| {
+        let (dx, dy) = sub(point, to);
+        dx.abs().max(dy.abs())
+    };
+    let handles = warp_handles(corners, warp);
+    let on_handle = (0..4).filter(|&index| away(handles[index]) <= HANDLE_REACH * reach);
+    if let Some(index) = on_handle.min_by(|&a, &b| away(handles[a]).total_cmp(&away(handles[b]))) {
+        return Some(if warp == Warp::Shear { DragKind::Edge(index) } else { DragKind::Corner(index) });
+    }
+    let to_edge = |index: usize| distance_to_segment(point, corners[index], corners[(index + 1) % 4]);
+    let on_edge = (0..4).filter(|&index| to_edge(index) <= GRIP_REACH * reach);
+    if warp == Warp::Shear
+        && let Some(edge) = on_edge.min_by(|&a, &b| to_edge(a).total_cmp(&to_edge(b)))
+    {
+        return Some(DragKind::Edge(edge));
+    }
+    encloses(corners, point).then_some(DragKind::Move)
+}
+
+/// Moved by how far the pointer went, in whole pixels, then for the top left corner of
+/// the rectangle around them to be on the nearest corner of a cell of `snap`.
+fn corners_moved(corners: &Corners, press: (f64, f64), point: (f64, f64), snap: Option<Cells>) -> Corners {
+    let offset = sub(point, press);
+    let moved = corners.map(|corner| add(corner, (offset.0.round(), offset.1.round())));
+    let Some(cells) = snap else {
+        return moved;
+    };
+    let left = moved.iter().map(|corner| corner.0).fold(f64::INFINITY, f64::min);
+    let top = moved.iter().map(|corner| corner.1).fold(f64::INFINITY, f64::min);
+    let shift = sub(cells.snap((left, top)), (left, top));
+    moved.map(|corner| add(corner, shift))
+}
+
+/// With the corner at `index` moved by how far the pointer went, onto the nearest
+/// corner of a pixel, or of a cell of `snap`. Nothing comes of corners that would fold over.
+fn corner_moved(
+    corners: &Corners,
+    index: usize,
+    press: (f64, f64),
+    point: (f64, f64),
+    snap: Option<Cells>,
+) -> Option<Corners> {
+    let target = add(corners[index], sub(point, press));
+    let mut moved = *corners;
+    moved[index] = match snap {
+        Some(cells) => cells.snap(target),
+        None => (target.0.round(), target.1.round()),
+    };
+    goes_around(&moved).then_some(moved)
+}
+
+/// With the edge from the corner at `edge` to the next slid along itself as far as the
+/// pointer went along it, by whole pixels, the opposite edge staying put, or with
+/// `both`, sliding as far the other way. Nothing comes of corners that would fold over.
+fn sheared(corners: &Corners, edge: usize, press: (f64, f64), point: (f64, f64), both: bool) -> Option<Corners> {
+    let along = sub(corners[(edge + 1) % 4], corners[edge]);
+    let length = along.0.hypot(along.1);
+    if length < 1e-9 {
+        return None;
+    }
+    let unit = (along.0 / length, along.1 / length);
+    let offset = sub(point, press);
+    let distance = (offset.0 * unit.0 + offset.1 * unit.1).round();
+    let shift = (unit.0 * distance, unit.1 * distance);
+    let mut sheared = *corners;
+    for index in [edge, (edge + 1) % 4] {
+        sheared[index] = add(corners[index], shift);
+    }
+    if both {
+        for index in [(edge + 2) % 4, (edge + 3) % 4] {
+            sheared[index] = sub(corners[index], shift);
+        }
+    }
+    goes_around(&sheared).then_some(sheared)
+}
+
+/// Whether the corners go around an area of at least a pixel, all turning the same way,
+/// which is what a flat picture seen at an angle can look like.
+fn goes_around(corners: &Corners) -> bool {
+    let turn = |index: usize| {
+        let (a, b, c) = (corners[index], corners[(index + 1) % 4], corners[(index + 2) % 4]);
+        let (ab, bc) = (sub(b, a), sub(c, b));
+        ab.0 * bc.1 - ab.1 * bc.0
+    };
+    let turns = [turn(0), turn(1), turn(2), turn(3)];
+    let same_way = turns.iter().all(|&turn| turn > 1e-9) || turns.iter().all(|&turn| turn < -1e-9);
+    let twice_area: f64 = (0..4)
+        .map(|index| {
+            let (a, b) = (corners[index], corners[(index + 1) % 4]);
+            a.0 * b.1 - b.0 * a.1
+        })
+        .sum();
+    same_way && twice_area.abs() >= 2.0
+}
+
+/// How far a point is from the nearest point of the segment from `a` to `b`.
+fn distance_to_segment(point: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (ab, ap) = (sub(b, a), sub(point, a));
+    let along = ((ap.0 * ab.0 + ap.1 * ab.1) / (ab.0 * ab.0 + ab.1 * ab.1).max(f64::EPSILON)).clamp(0.0, 1.0);
+    let (dx, dy) = sub(point, add(a, (ab.0 * along, ab.1 * along)));
+    dx.hypot(dy)
+}
+
+/// Whether a point is inside the corners.
+fn encloses(corners: &Corners, (x, y): (f64, f64)) -> bool {
+    let mut inside = false;
+    for (index, &a) in corners.iter().enumerate() {
+        let b = corners[(index + 1) % 4];
+        if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) / (b.1 - a.1) * (b.0 - a.0) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DragKind {
     Move,
@@ -321,19 +488,28 @@ pub enum DragKind {
     Rotate,
     /// Moves the centre of rotation.
     Pivot,
+    /// Moves the corner at that index of [`Corners`] alone, with Perspective.
+    Corner(usize),
+    /// Slides the edge from the corner at that index to the next along itself, with Shear.
+    Edge(usize),
 }
 
 impl DragKind {
-    /// The pointer that shows what a drag would do, with the box turned by `angle`.
+    /// The pointer that shows what a drag would do, with the box turned by `angle`, or
+    /// for an edge that Shear slides, with the edge running at `angle`.
     pub fn cursor(self, angle: f64) -> CursorIcon {
         match self {
             Self::Move => CursorIcon::Move,
-            Self::Pivot => CursorIcon::Crosshair,
+            Self::Pivot | Self::Corner(_) => CursorIcon::Crosshair,
             // There is no turning arrow: this stands for one, which the canvas draws.
             Self::Rotate => CursorIcon::Alias,
-            Self::Resize((x, y)) => {
-                // The arrow that best matches the way the grabbed edge faces on screen.
-                let facing = rotate((x as f64, y as f64), angle);
+            Self::Resize(_) | Self::Edge(_) => {
+                // The arrow that best matches the way the grabbed edge faces on screen,
+                // or the way it slides.
+                let facing = match self {
+                    Self::Resize((x, y)) => rotate((x as f64, y as f64), angle),
+                    _ => (angle.cos(), angle.sin()),
+                };
                 let eighth = (facing.1.atan2(facing.0) / (PI / 4.0)).round() as i32;
                 let arrows = [
                     CursorIcon::ResizeHorizontal,
@@ -352,6 +528,7 @@ struct Drag {
     /// Where the press was on the image, and the box then.
     press: (f64, f64),
     from: BoxState,
+    from_corners: Option<Corners>,
     /// How many pixels of the image a point of the screen took then.
     reach: f64,
     /// Whether the selection moved, which moving the centre of rotation alone does not.
@@ -396,6 +573,9 @@ pub struct Transform {
     /// The pixels being moved; none when only the outline is.
     floating: Option<Floating>,
     state: BoxState,
+    /// Where Shear and Perspective have taken the corners of the box as it was at
+    /// first, once they have: the box alone no longer tells.
+    corners: Option<Corners>,
     drag: Option<Drag>,
     /// The step of the document's history that the box was last put down as, if any.
     committed: Option<usize>,
@@ -412,7 +592,26 @@ impl Transform {
         let floating = with_pixels.then(|| FloatingPixels::lift(&document.active().pixels, selection)).flatten();
         let floating = floating.map(|pixels| Floating::new(ctx, pixels, document));
         let selection_start = selection.clone();
-        Some(Self { start, selection_start, floating, state: start, drag: None, committed: None, wrap: None })
+        Some(Self { start, selection_start, floating, state: start, corners: None, drag: None, committed: None, wrap: None })
+    }
+
+    /// Starts shearing or putting in perspective the selected pixels of the active
+    /// layer, or the whole layer if nothing is selected, as [`warped_selection`] says.
+    pub fn begin_warp(ctx: &egui::Context, document: &Document) -> Option<Self> {
+        let selection = warped_selection(document);
+        let start = BoxState::of(&selection)?;
+        let floating = FloatingPixels::lift(&document.active().pixels, &selection);
+        let floating = floating.map(|pixels| Floating::new(ctx, pixels, document));
+        Some(Self {
+            start,
+            selection_start: selection,
+            floating,
+            state: start,
+            corners: Some(start.corners()),
+            drag: None,
+            committed: None,
+            wrap: None,
+        })
     }
 
     /// Starts moving pixels pasted on the document's active layer, selected all around.
@@ -421,16 +620,35 @@ impl Transform {
         // Pasted pixels are never empty, so neither is their selection.
         let start = BoxState::of(&selection).expect("pasted pixels are selected");
         let floating = Some(Floating::new(ctx, pixels, document));
-        Self { start, selection_start: selection, floating, state: start, drag: None, committed: None, wrap: None }
+        Self {
+            start,
+            selection_start: selection,
+            floating,
+            state: start,
+            corners: None,
+            drag: None,
+            committed: None,
+            wrap: None,
+        }
     }
 
-    /// The selection the box holds, which keeps the box if it is turned.
+    /// The selection the box holds, which keeps the box if it is turned, and its
+    /// corners have not been moved apart.
     pub fn selection(&self) -> Selection {
-        self.selection_start.transformed(&self.affine()).with_frame(self.state.into())
+        let selection = self.selection_start.transformed(self.map());
+        match self.corners {
+            Some(_) => selection,
+            None => selection.with_frame(self.state.into()),
+        }
     }
 
     pub fn state(&self) -> BoxState {
         self.state
+    }
+
+    /// Where the corners of the box as it was at first now are.
+    pub fn corners(&self) -> Corners {
+        self.corners.unwrap_or_else(|| self.state.corners())
     }
 
     pub fn moves_pixels(&self) -> bool {
@@ -448,22 +666,37 @@ impl Transform {
     /// A press at a point of the image. `reach` is how many pixels of the image a point
     /// of the screen takes.
     pub fn press(&mut self, kind: DragKind, point: (f64, f64), reach: f64) {
-        self.drag = Some(Drag { kind, press: point, from: self.state, reach, moved: false });
+        // Once a corner or an edge goes its own way, the box alone no longer tells.
+        if matches!(kind, DragKind::Corner(_) | DragKind::Edge(_)) && self.corners.is_none() {
+            self.corners = Some(self.state.corners());
+        }
+        let from_corners = self.corners;
+        self.drag = Some(Drag { kind, press: point, from: self.state, from_corners, reach, moved: false });
     }
 
     /// The drag reaches a point of the image. Returns the selection where the box now
     /// is. `shift` keeps the proportions or turns in steps, and `ctrl` resizes about the
-    /// middle. Moving, resizing and the centre of rotation snap to the cells of `snap`,
-    /// if given.
+    /// middle, or shears both edges. Moving, resizing, the centre of rotation and the
+    /// corners snap to the cells of `snap`, if given.
     pub fn drag_to(&mut self, point: (f64, f64), shift: bool, ctrl: bool, snap: Option<Cells>) -> Option<Selection> {
         let drag = self.drag.as_mut()?;
         drag.moved |= drag.kind != DragKind::Pivot;
-        self.state = match drag.kind {
-            DragKind::Move => drag.from.moved(drag.press, point, snap),
-            DragKind::Rotate => drag.from.rotated(drag.press, point, shift),
-            DragKind::Resize(grip) => drag.from.resized(grip, point, shift, ctrl, snap).unwrap_or(self.state),
-            DragKind::Pivot => drag.from.pivot_moved(drag.press, point, drag.reach, snap),
-        };
+        let (press, from) = (drag.press, drag.from);
+        match (drag.kind, drag.from_corners) {
+            (DragKind::Move, Some(corners)) => self.corners = Some(corners_moved(&corners, press, point, snap)),
+            (DragKind::Corner(index), Some(corners)) => {
+                self.corners = corner_moved(&corners, index, press, point, snap).or(self.corners);
+            }
+            (DragKind::Edge(edge), Some(corners)) => {
+                self.corners = sheared(&corners, edge, press, point, ctrl).or(self.corners);
+            }
+            (DragKind::Move, None) => self.state = from.moved(press, point, snap),
+            (DragKind::Rotate, _) => self.state = from.rotated(press, point, shift),
+            (DragKind::Resize(grip), _) => self.state = from.resized(grip, point, shift, ctrl, snap).unwrap_or(self.state),
+            (DragKind::Pivot, _) => self.state = from.pivot_moved(press, point, drag.reach, snap),
+            // A press on them sets the corners going their own way.
+            (DragKind::Corner(_) | DragKind::Edge(_), None) => {}
+        }
         Some(self.selection())
     }
 
@@ -482,7 +715,11 @@ impl Transform {
     /// Moves the box by `offset`, in whole pixels, between drags. Returns the selection
     /// where it now is, and the layer with the pixels drawn there, if it moves pixels.
     pub fn nudge(&mut self, offset: (i32, i32), interpolation: Interpolation) -> (Selection, Option<RgbaImage>) {
-        self.state.center = add(self.state.center, (offset.0 as f64, offset.1 as f64));
+        let offset = (offset.0 as f64, offset.1 as f64);
+        self.state.center = add(self.state.center, offset);
+        if let Some(corners) = &mut self.corners {
+            *corners = corners.map(|corner| add(corner, offset));
+        }
         (self.selection(), self.placed(interpolation))
     }
 
@@ -501,15 +738,22 @@ impl Transform {
 
     fn placed(&self, interpolation: Interpolation) -> Option<RgbaImage> {
         let floating = self.floating.as_ref()?;
-        Some(floating.pixels.place_wrapped(&self.affine(), interpolation, self.wrap))
+        Some(floating.pixels.place_wrapped(self.map(), interpolation, self.wrap))
     }
 
     /// Puts the box back where it was before the drag. Returns the selection there.
     pub fn cancel(&mut self) -> Selection {
         if let Some(drag) = self.drag.take() {
             self.state = drag.from;
+            self.corners = drag.from_corners;
         }
         self.selection()
+    }
+
+    /// Maps the box as it was at first onto the box, or the corners, as they are now.
+    fn map(&self) -> Projective {
+        let between = self.corners.and_then(|corners| Projective::between(self.start.corners(), corners));
+        between.unwrap_or_else(|| self.affine().into())
     }
 
     /// Maps the box as it was at first onto the box as it is now.
@@ -546,7 +790,7 @@ impl Transform {
         if let Some(opacity) = floating.opacity {
             floating.base_texture.paint(painter, rect, opacity);
             for &wrap in wraps {
-                floating.preview.paint(painter, view, &self.affine(), interpolation, opacity, shift + wrap);
+                floating.preview.paint(painter, view, &self.map(), interpolation, opacity, shift + wrap);
             }
         }
         if let Some(above) = &floating.above {
@@ -715,6 +959,88 @@ mod tests {
         assert_eq!(DragKind::Resize((1, 0)).cursor(PI / 2.0), CursorIcon::ResizeVertical);
     }
 
+    fn close_bounds(selection: &Selection, expected: Bounds) -> bool {
+        let bounds = selection.bounds().unwrap();
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        near(bounds.left, expected.left)
+            && near(bounds.top, expected.top)
+            && near(bounds.right, expected.right)
+            && near(bounds.bottom, expected.bottom)
+    }
+
+    #[test]
+    fn warp_handles_and_what_they_do() {
+        let corners = upright(0.0, 0.0, 100.0, 50.0).corners();
+        assert_eq!(corners, [(0.0, 0.0), (100.0, 0.0), (100.0, 50.0), (0.0, 50.0)]);
+        assert_eq!(warp_handles(&corners, Warp::Shear)[0], (50.0, 0.0));
+        assert_eq!(warp_drag_at(&corners, Warp::Shear, (52.0, 2.0), 1.0), Some(DragKind::Edge(0)));
+        // Along the edge, away from its handle, it still slides it.
+        assert_eq!(warp_drag_at(&corners, Warp::Shear, (100.0, 10.0), 1.0), Some(DragKind::Edge(1)));
+        assert_eq!(warp_drag_at(&corners, Warp::Perspective, (99.0, 49.0), 1.0), Some(DragKind::Corner(2)));
+        assert_eq!(warp_drag_at(&corners, Warp::Perspective, (90.0, 25.0), 1.0), Some(DragKind::Move));
+        assert_eq!(warp_drag_at(&corners, Warp::Perspective, (130.0, 25.0), 1.0), None);
+    }
+
+    #[test]
+    fn shear_slides_an_edge_along_itself() {
+        let corners = upright(0.0, 0.0, 10.0, 10.0).corners();
+        // Across the edge, the pointer moves nothing; along it, by whole pixels.
+        let one = sheared(&corners, 0, (5.0, 0.0), (8.4, 6.0), false).unwrap();
+        assert_eq!(one, [(3.0, 0.0), (13.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let both = sheared(&corners, 0, (5.0, 0.0), (8.0, 0.0), true).unwrap();
+        assert_eq!(both, [(3.0, 0.0), (13.0, 0.0), (7.0, 10.0), (-3.0, 10.0)]);
+    }
+
+    #[test]
+    fn perspective_corners_never_fold_over() {
+        let corners = upright(0.0, 0.0, 10.0, 10.0).corners();
+        let moved = corner_moved(&corners, 0, (0.0, 0.0), (2.4, 1.6), None).unwrap();
+        assert_eq!(moved[0], (2.0, 2.0));
+        // Past the opposite corner, or onto the next one, they would fold over.
+        assert!(corner_moved(&corners, 0, (0.0, 0.0), (12.0, 12.0), None).is_none());
+        assert!(corner_moved(&corners, 0, (0.0, 0.0), (10.0, 0.0), None).is_none());
+    }
+
+    #[test]
+    fn warp_works_the_whole_layer_without_a_selection() {
+        let red = power_paint_core::Rgba([255, 0, 0, 255]);
+        let document = Document::new(RgbaImage::from_pixel(20, 10, red));
+        let ctx = egui::Context::default();
+        let mut transform = Transform::begin_warp(&ctx, &document).unwrap();
+        assert_eq!(transform.corners(), [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)]);
+        transform.press(DragKind::Corner(0), (0.0, 0.0), 1.0);
+        let selection = transform.drag_to((6.0, 0.0), false, false, None).unwrap();
+        assert!(close_bounds(&selection, Bounds { left: 0.0, top: 0.0, right: 20.0, bottom: 10.0 }));
+        let (moved, placed) = transform.release(Interpolation::Nearest);
+        let placed = placed.unwrap();
+        assert!(moved);
+        // The top left corner is left empty, the rest of the layer still red.
+        assert_eq!(placed.get_pixel(1, 0)[3], 0);
+        assert_eq!(*placed.get_pixel(10, 5), red);
+        // Escape puts the corner back where the drag began.
+        transform.press(DragKind::Corner(2), (20.0, 10.0), 1.0);
+        transform.drag_to((15.0, 10.0), false, false, None);
+        transform.cancel();
+        assert_eq!(transform.corners()[2], (20.0, 10.0));
+    }
+
+    #[test]
+    fn a_box_once_warped_carries_on_from_its_corners() {
+        let mut document = Document::new(RgbaImage::new(40, 40));
+        document.selection = Selection::rect(PixelRect { left: 0, top: 0, right: 10, bottom: 10 });
+        let ctx = egui::Context::default();
+        let mut transform = Transform::begin(&ctx, &document, false).unwrap();
+        transform.press(DragKind::Move, (5.0, 5.0), 1.0);
+        transform.drag_to((10.0, 5.0), false, false, None);
+        transform.release(Interpolation::Nearest);
+        transform.press(DragKind::Edge(2), (10.0, 10.0), 1.0);
+        let sheared = transform.drag_to((6.0, 10.0), false, false, None).unwrap();
+        assert!(close_bounds(&sheared, Bounds { left: 1.0, top: 0.0, right: 15.0, bottom: 10.0 }));
+        assert!(sheared.frame().is_none());
+        let (nudged, _) = transform.nudge((1, 1), Interpolation::Nearest);
+        assert!(close_bounds(&nudged, Bounds { left: 2.0, top: 1.0, right: 16.0, bottom: 11.0 }));
+    }
+
     #[test]
     fn transform_moves_the_selection() {
         let mut document = Document::new(RgbaImage::new(20, 20));
@@ -774,7 +1100,7 @@ mod tests {
         assert_eq!(again.state(), state);
         again.press(DragKind::Move, (20.0, 15.0), 1.0);
         let moved = again.drag_to((22.0, 15.0), false, false, None).unwrap();
-        let expected = turned.transformed(&Affine::translation(2.0, 0.0));
+        let expected = turned.transformed(Affine::translation(2.0, 0.0));
         for (outline, expected) in moved.outlines().iter().zip(expected.outlines()) {
             for (point, expected) in outline.iter().zip(expected) {
                 assert!((point.0 - expected.0).abs() < 1e-9 && (point.1 - expected.1).abs() < 1e-9);

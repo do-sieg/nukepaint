@@ -345,7 +345,7 @@ impl Document {
         let (width, height) = self.size();
         let mirror = |flip: bool, length: u32| if flip { (-1.0, length as f64) } else { (1.0, 0.0) };
         let ((xx, dx), (yy, dy)) = (mirror(horizontally, width), mirror(vertically, height));
-        self.selection = self.selection.transformed(&Affine { xx, yy, dx, dy, ..Affine::IDENTITY });
+        self.selection = self.selection.transformed(Affine { xx, yy, dx, dy, ..Affine::IDENTITY });
     }
 
     /// Cuts the image down to the rectangle around the selection, as far as it is on
@@ -361,7 +361,7 @@ impl Document {
         for (layer, (_, pixels)) in self.layers.iter_mut().zip(cropped) {
             layer.pixels = pixels;
         }
-        self.selection = self.selection.transformed(&Affine::translation(-area.left as f64, -area.top as f64));
+        self.selection = self.selection.transformed(Affine::translation(-area.left as f64, -area.top as f64));
         true
     }
 
@@ -376,7 +376,7 @@ impl Document {
             layer.pixels = resize(&layer.pixels, width, height, interpolation);
         }
         let scale = Affine::scale(width as f64 / old_width as f64, height as f64 / old_height as f64);
-        self.selection = self.selection.transformed(&scale);
+        self.selection = self.selection.transformed(scale);
         true
     }
 
@@ -397,7 +397,7 @@ impl Document {
             imageops::replace(&mut placed, &layer.pixels, x, y);
             layer.pixels = placed;
         }
-        self.selection = self.selection.transformed(&Affine::translation(x as f64, y as f64));
+        self.selection = self.selection.transformed(Affine::translation(x as f64, y as f64));
         true
     }
 

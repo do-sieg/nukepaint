@@ -4,7 +4,7 @@
 
 use image::{Rgba, RgbaImage};
 
-use crate::{Affine, Interpolation, PixelRect, Selection, copy_selected, erase_selected};
+use crate::{Affine, Interpolation, PixelRect, Projective, Selection, copy_selected, erase_selected};
 
 pub struct FloatingPixels {
     /// Where on the layer the pixels were lifted from.
@@ -47,8 +47,9 @@ impl FloatingPixels {
 
     /// The layer with the pixels drawn over it where `map` carries them. Pixels that
     /// only move by whole pixels, or are mirrored, are copied as they are; others are
-    /// redrawn from those around as `interpolation` says.
-    pub fn place(&self, map: &Affine, interpolation: Interpolation) -> RgbaImage {
+    /// redrawn from those around as `interpolation` says. Nothing is drawn if `map` tilts
+    /// part of them behind the eye.
+    pub fn place(&self, map: impl Into<Projective>, interpolation: Interpolation) -> RgbaImage {
         self.place_wrapped(map, interpolation, None)
     }
 
@@ -56,7 +57,13 @@ impl FloatingPixels {
     /// wrapped around the edges of `wrap` if there is one, as on a tile repeated side by
     /// side: those carried off one edge come back in at the other, and none land
     /// outside it.
-    pub fn place_wrapped(&self, map: &Affine, interpolation: Interpolation, wrap: Option<PixelRect>) -> RgbaImage {
+    pub fn place_wrapped(
+        &self,
+        map: impl Into<Projective>,
+        interpolation: Interpolation,
+        wrap: Option<PixelRect>,
+    ) -> RgbaImage {
+        let map = &map.into();
         let mut layer = self.base.clone();
         let Some(area) = wrap.filter(|area| !area.is_empty()) else {
             let (width, height) = layer.dimensions();
@@ -65,7 +72,9 @@ impl FloatingPixels {
             return layer;
         };
         let (width, height) = (area.width() as f64, area.height() as f64);
-        let (min_x, min_y, max_x, max_y) = self.landing(map);
+        let Some((min_x, min_y, max_x, max_y)) = self.landing(map) else {
+            return layer;
+        };
         // The copies of the area they land on, counted from the area itself, with room
         // for the blended edges of any interpolation.
         let (min_x, min_y, max_x, max_y) = (min_x - 3.0, min_y - 3.0, max_x + 3.0, max_y + 3.0);
@@ -75,27 +84,33 @@ impl FloatingPixels {
         for y in copies(min_y, max_y, area.top, height) {
             for x in copies(min_x, max_x, area.left, width) {
                 let back_on = Affine::translation(-x as f64 * width, -y as f64 * height);
-                self.draw_onto(&mut layer, &map.then(back_on), interpolation, area);
+                self.draw_onto(&mut layer, &map.then(back_on.into()), interpolation, area);
             }
         }
         layer
     }
 
-    /// The smallest rectangle around where `map` carries the area: left, top, right, bottom.
-    fn landing(&self, map: &Affine) -> (f64, f64, f64, f64) {
+    /// The smallest rectangle around where `map` carries the area: left, top, right,
+    /// bottom. Nothing if it tilts part of it behind the eye, or as far as it.
+    fn landing(&self, map: &Projective) -> Option<(f64, f64, f64, f64)> {
         let PixelRect { left, top, right, bottom } = self.area;
-        let corners = [(left, top), (right, top), (right, bottom), (left, bottom)];
-        let corners = corners.map(|(x, y)| map.apply((x as f64, y as f64)));
+        let corners = [(left, top), (right, top), (right, bottom), (left, bottom)].map(|(x, y)| (x as f64, y as f64));
+        // Of one sign all over the area, as it changes evenly across it.
+        let sides = corners.map(|corner| map.w(corner));
+        if !(sides.iter().all(|&w| w > 1e-9) || sides.iter().all(|&w| w < -1e-9)) {
+            return None;
+        }
+        let corners = corners.map(|corner| map.apply(corner));
         let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
         let max_x = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
         let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
         let max_y = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
-        (min_x, min_y, max_x, max_y)
+        Some((min_x, min_y, max_x, max_y))
     }
 
     /// Draws the pixels over `layer` where `map` carries them, on its pixels in `within` alone.
-    fn draw_onto(&self, layer: &mut RgbaImage, map: &Affine, interpolation: Interpolation, within: PixelRect) {
-        let Some(back) = map.inverse() else {
+    fn draw_onto(&self, layer: &mut RgbaImage, map: &Projective, interpolation: Interpolation, within: PixelRect) {
+        let (Some(back), Some((min_x, min_y, max_x, max_y))) = (map.inverse(), self.landing(map)) else {
             return;
         };
         // Where the area lands, wider for the blended edges, within the layer.
@@ -104,7 +119,6 @@ impl FloatingPixels {
             Interpolation::Bicubic => 2.0,
             Interpolation::Lanczos => 3.0,
         };
-        let (min_x, min_y, max_x, max_y) = self.landing(map);
         let (from_x, to_x) = (
             (min_x.floor() - margin).max(within.left as f64) as u32,
             (max_x.ceil() + margin).min(within.right as f64).max(within.left as f64) as u32,
@@ -138,7 +152,10 @@ impl FloatingPixels {
 
     /// Whether `map` only moves pixels by whole pixels, or mirrors them, which copies
     /// them as they are, however they would be resampled.
-    pub fn copies_exactly(map: &Affine) -> bool {
+    pub fn copies_exactly(map: &Projective) -> bool {
+        let Some(map) = map.affine() else {
+            return false;
+        };
         let unit = |value: f64| (value.abs() - 1.0).abs() < 1e-9;
         let none = |value: f64| value.abs() < 1e-9;
         unit(map.xx) && unit(map.yy) && none(map.xy) && none(map.yx) && is_whole(map.dx) && is_whole(map.dy)
@@ -266,12 +283,12 @@ mod tests {
     fn pasting_keeps_what_is_under() {
         let pasted = FloatingPixels::pasted(&layer(), RgbaImage::from_pixel(2, 2, RED), (6, 6));
         assert_eq!(pasted.base(), &layer());
-        let placed = pasted.place(&Affine::IDENTITY, Interpolation::Bilinear);
+        let placed = pasted.place(Affine::IDENTITY, Interpolation::Bilinear);
         assert_eq!(*placed.get_pixel(7, 7), RED);
         // Moved away, the layer is as it was.
-        assert_eq!(pasted.place(&Affine::translation(-6.0, 0.0), Interpolation::Bilinear).get_pixel(7, 7), &BLUE);
+        assert_eq!(pasted.place(Affine::translation(-6.0, 0.0), Interpolation::Bilinear).get_pixel(7, 7), &BLUE);
         // Off the layer, nothing is placed.
-        assert_eq!(pasted.place(&Affine::translation(10.0, 10.0), Interpolation::Bilinear), layer());
+        assert_eq!(pasted.place(Affine::translation(10.0, 10.0), Interpolation::Bilinear), layer());
     }
 
     #[test]
@@ -283,14 +300,14 @@ mod tests {
     #[test]
     fn moving_by_whole_pixels_copies_them() {
         let floating = FloatingPixels::lift(&layer(), &square()).unwrap();
-        let placed = floating.place(&Affine::translation(3.0, 1.0), Interpolation::Bilinear);
+        let placed = floating.place(Affine::translation(3.0, 1.0), Interpolation::Bilinear);
         assert_eq!(*placed.get_pixel(5, 3), RED);
         assert_eq!(*placed.get_pixel(6, 4), RED);
         assert_eq!(*placed.get_pixel(3, 2), CLEAR);
         assert_eq!(*placed.get_pixel(4, 2), BLUE);
         assert_eq!(*placed.get_pixel(0, 0), BLUE);
         // Nothing changes until placed.
-        assert_eq!(floating.place(&Affine::IDENTITY, Interpolation::Bilinear), layer());
+        assert_eq!(floating.place(Affine::IDENTITY, Interpolation::Bilinear), layer());
     }
 
     #[test]
@@ -298,13 +315,13 @@ mod tests {
         let floating = FloatingPixels::lift(&layer(), &square()).unwrap();
         let double = Affine::translation(-2.0, -2.0).then(Affine::scale(2.0, 2.0)).then(Affine::translation(2.0, 2.0));
         for interpolation in Interpolation::ALL {
-            let placed = floating.place(&double, interpolation);
+            let placed = floating.place(double, interpolation);
             // Inside, away from the blended edge, all red.
             assert_eq!(*placed.get_pixel(3, 3), RED, "{interpolation:?}");
             assert_eq!(*placed.get_pixel(4, 4), RED, "{interpolation:?}");
         }
         // Bicubic and Lanczos reach a little further around the edge than the others.
-        assert_eq!(*floating.place(&double, Interpolation::Bilinear).get_pixel(7, 7), BLUE);
+        assert_eq!(*floating.place(double, Interpolation::Bilinear).get_pixel(7, 7), BLUE);
     }
 
     #[test]
@@ -312,10 +329,26 @@ mod tests {
         let floating = FloatingPixels::lift(&layer(), &square()).unwrap();
         // Half a pixel along, which the others blend.
         let half = Affine::translation(0.5, 0.0);
-        let placed = floating.place(&half, Interpolation::Nearest);
+        let placed = floating.place(half, Interpolation::Nearest);
         assert!(placed.pixels().all(|&pixel| [RED, BLUE, CLEAR].contains(&pixel)));
-        let blended = floating.place(&half, Interpolation::Bilinear);
+        let blended = floating.place(half, Interpolation::Bilinear);
         assert!(blended.pixels().any(|&pixel| ![RED, BLUE, CLEAR].contains(&pixel)));
+    }
+
+    #[test]
+    fn perspective_narrows_the_top() {
+        let all = Selection::rect(PixelRect { left: 0, top: 0, right: 8, bottom: 8 });
+        let floating = FloatingPixels::lift(&RgbaImage::from_pixel(8, 8, RED), &all).unwrap();
+        let from = [(0.0, 0.0), (8.0, 0.0), (8.0, 8.0), (0.0, 8.0)];
+        let map = Projective::between(from, [(2.0, 0.0), (6.0, 0.0), (8.0, 8.0), (0.0, 8.0)]).unwrap();
+        assert!(!FloatingPixels::copies_exactly(&map));
+        let placed = floating.place(map, Interpolation::Nearest);
+        assert_eq!(*placed.get_pixel(0, 0), CLEAR);
+        assert_eq!(*placed.get_pixel(4, 0), RED);
+        assert_eq!(*placed.get_pixel(0, 7), RED);
+        // Tilted behind the eye, nothing is put down.
+        let behind = Projective { wx: -1.0, ..Projective::IDENTITY };
+        assert!(floating.place(behind, Interpolation::Nearest).pixels().all(|&pixel| pixel == CLEAR));
     }
 
     #[test]
@@ -335,7 +368,7 @@ mod tests {
         // Two to the right, in an area from 2 to 8 across: the first lands on 8, past it,
         // so back on 2, and the second on 3.
         let area = PixelRect { left: 2, top: 0, right: 8, bottom: 4 };
-        let placed = floating.place_wrapped(&Affine::translation(2.0, 0.0), Interpolation::Nearest, Some(area));
+        let placed = floating.place_wrapped(Affine::translation(2.0, 0.0), Interpolation::Nearest, Some(area));
         let shown: Vec<u32> = (0..10).filter(|&x| placed.get_pixel(x, 1)[3] > 0).collect();
         assert_eq!(shown, [2, 3]);
         assert_eq!(placed.get_pixel(2, 1), &Rgba([255, 0, 0, 255]));

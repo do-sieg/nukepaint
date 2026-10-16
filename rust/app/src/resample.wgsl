@@ -1,6 +1,7 @@
-// Draws pixels being moved, stretched and turned as they will be put down: each pixel
-// of the image they cover takes the colour `FloatingPixels::place` would give it,
-// from the pixels around the point it comes from, weighed as the resampling says.
+// Draws pixels being moved, stretched, turned, sheared or put in perspective as they
+// will be put down: each pixel of the image they cover takes the colour
+// `FloatingPixels::place` would give it, from the pixels around the point it comes
+// from, weighed as the resampling says.
 // The pixels can be larger than a texture can be: each tile of them draws the points
 // that come from within it, from a texture holding it and the pixels just around it.
 
@@ -9,9 +10,11 @@ struct Params {
     // an image pixel takes, and how opaque the layer is.
     view: vec4<f32>,
     // From a point of the image to where it comes from among the pixels moved, in
-    // their own pixels from the middle of the first: x = dot(map_x.xy, point) + map_x.z.
+    // their own pixels from the middle of the first: x = (dot(map_x.xy, point) +
+    // map_x.z) / w, where w = dot(map_w.xy, point) + map_w.z.
     map_x: vec4<f32>,
     map_y: vec4<f32>,
+    map_w: vec4<f32>,
     // The columns and rows of the pixels moved that this tile draws the points of, from
     // the first to past the last.
     core: vec4<i32>,
@@ -44,7 +47,8 @@ fn source(position: vec4<f32>) -> vec2<f32> {
     if params.mode.y == 1u {
         point = floor(point) + 0.5;
     }
-    return vec2<f32>(dot(params.map_x.xy, point) + params.map_x.z, dot(params.map_y.xy, point) + params.map_y.z);
+    let w = dot(params.map_w.xy, point) + params.map_w.z;
+    return vec2<f32>(dot(params.map_x.xy, point) + params.map_x.z, dot(params.map_y.xy, point) + params.map_y.z) / w;
 }
 
 // The pixel moved at a place, its alpha multiplied in, or nothing off them.
