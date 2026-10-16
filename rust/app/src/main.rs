@@ -1333,9 +1333,15 @@ impl App {
             }
             return;
         }
+        // Tiled, only the tile is shown, and changed.
+        let Some(mask) = canvas::tile_mask(image) else {
+            return;
+        };
+        let document = &image.document;
         let values = self.last_adjustments.values(kind);
         let curves = self.last_adjustments.curves.clone();
-        let dialog = adjustment_dialog::Dialog::new(current, document.active_layer, kind, values, curves, document.selection_mask());
+        let (layer, size) = (document.active_layer, document.size());
+        let dialog = adjustment_dialog::Dialog::new(current, layer, kind, values, curves, mask, size);
         self.adjustment_dialog = Some(dialog);
         self.preview_adjustment();
     }

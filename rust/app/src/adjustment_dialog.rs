@@ -12,7 +12,7 @@ use std::{
 };
 
 use eframe::egui::{self, Color32, Key};
-use power_paint_core::{Curves, Effect, RgbaImage, SelectionMask, apply_effect};
+use power_paint_core::{Curves, Effect, OffsetEdges, RgbaImage, SelectionMask, apply_effect};
 
 use crate::{adjustments::AdjustmentKind, curve_editor::CurveEditor, dialog, effects::EffectKind};
 
@@ -132,11 +132,44 @@ pub struct Dialog {
     pub preview: Option<RgbaImage>,
     /// The effect being worked out with the latest settings, if it is not yet.
     pub job: Option<Job>,
+    /// Size of what the Offset moves the pixels within, in pixels.
+    offset_area: (u32, u32),
 }
 
 impl Dialog {
-    pub fn new(image: usize, layer: usize, kind: FilterKind, values: Vec<f64>, curves: Curves, mask: Option<SelectionMask>) -> Self {
-        Self { image, layer, kind, values, curves, channel: 0, editor: CurveEditor::default(), mask, preview: None, job: None }
+    /// The dialog for `kind` on a layer of an image `size` pixels across and down,
+    /// starting from `values`, or for the Offset, from half of what it moves the pixels
+    /// within: the rectangle around those `mask` holds, if there is one, or the image.
+    pub fn new(
+        image: usize,
+        layer: usize,
+        kind: FilterKind,
+        values: Vec<f64>,
+        curves: Curves,
+        mask: Option<SelectionMask>,
+        size: (u32, u32),
+    ) -> Self {
+        let offset_area = mask.as_ref().and_then(SelectionMask::bounds).map_or(size, |area| {
+            (area.width() as u32, area.height() as u32)
+        });
+        let editor = CurveEditor::default();
+        let mut dialog =
+            Self { image, layer, kind, values, curves, channel: 0, editor, mask, preview: None, job: None, offset_area };
+        if dialog.is_offset() {
+            dialog.offset_by_half();
+        }
+        dialog
+    }
+
+    fn is_offset(&self) -> bool {
+        self.kind == FilterKind::Effect(EffectKind::Offset)
+    }
+
+    /// Moves by half the area each way, which brings its edges to the middle.
+    fn offset_by_half(&mut self) {
+        let (width, height) = self.offset_area;
+        self.values[0] = (width / 2) as f64;
+        self.values[1] = (height / 2) as f64;
     }
 
     /// Shows the dialog. Returns what the user did, if anything.
@@ -146,6 +179,8 @@ impl Dialog {
         let response = dialog::show(ctx, "adjustment", self.kind.name(), Color32::TRANSPARENT, |ui| {
             if self.kind == FilterKind::Adjustment(AdjustmentKind::Curves) {
                 edited |= self.curves_ui(ui);
+            } else if self.is_offset() {
+                edited |= self.offset_ui(ui);
             } else {
                 edited |= self.settings_ui(ui);
             }
@@ -209,6 +244,44 @@ impl Dialog {
         edited
     }
 
+    /// The moves across and down, each as far as the area either way, a button to move
+    /// by half of it, and what fills the edges. Returns whether a setting changed.
+    fn offset_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut edited = false;
+        let (width, height) = self.offset_area;
+        egui::Grid::new("offset_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+            for (index, (label, size)) in [("Horizontal:", width), ("Vertical:", height)].into_iter().enumerate() {
+                ui.label(label);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().slider_width = SLIDER_WIDTH;
+                    let value = &mut self.values[index];
+                    let range = -(size as f64)..=size as f64;
+                    edited |= ui.add(egui::Slider::new(value, range.clone()).step_by(1.0).show_value(false)).changed();
+                    let field = egui::DragValue::new(value).range(range).speed(1.0).fixed_decimals(0).suffix(" px");
+                    let height = ui.spacing().interact_size.y;
+                    edited |= ui.add_sized([VALUE_WIDTH, height], field).changed();
+                });
+                ui.end_row();
+            }
+            ui.label("");
+            if ui.button("Half").on_hover_text("Moves by half the width and height, bringing the edges to the middle").clicked() {
+                self.offset_by_half();
+                edited = true;
+            }
+            ui.end_row();
+            ui.label("Edges:");
+            let edges = &mut self.values[2];
+            let current = OffsetEdges::ALL[(*edges as usize).min(OffsetEdges::ALL.len() - 1)];
+            egui::ComboBox::from_id_salt("offset_edges").selected_text(current.name()).show_ui(ui, |ui| {
+                for (index, choice) in OffsetEdges::ALL.into_iter().enumerate() {
+                    edited |= ui.selectable_value(edges, index as f64, choice.name()).changed();
+                }
+            });
+            ui.end_row();
+        });
+        edited
+    }
+
     /// Returns whether the curves changed.
     fn curves_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut edited = false;
@@ -250,5 +323,8 @@ impl Dialog {
     fn reset(&mut self) {
         self.values = self.kind.settings().iter().map(|setting| setting.default).collect();
         self.curves = Curves { luminosity: self.curves.luminosity, ..Curves::default() };
+        if self.is_offset() {
+            self.offset_by_half();
+        }
     }
 }

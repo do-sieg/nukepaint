@@ -1,6 +1,6 @@
 //! What the Filters menu does: each effect, its name and the settings its dialog asks for.
 
-use power_paint_core::Effect;
+use power_paint_core::{Effect, OffsetEdges};
 
 use crate::adjustment_dialog::{Setting, check, slider};
 
@@ -17,6 +17,7 @@ pub enum EffectKind {
     SurfaceBlur,
     ZoomBlur,
     Sharpen,
+    Offset,
 }
 
 use EffectKind::*;
@@ -47,6 +48,13 @@ const ZOOM: [Setting; 3] = [
     slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
     slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
 ];
+/// The dialog shows these its own way: the moves are as long as the area they are in,
+/// which starts them at half of it, and the edges are picked by name.
+const OFFSET: [Setting; 3] = [
+    slider("Horizontal:", -100_000.0, 100_000.0, 1.0, 0.0, " px"),
+    slider("Vertical:", -100_000.0, 100_000.0, 1.0, 0.0, " px"),
+    slider("Edges:", 0.0, 2.0, 1.0, 0.0, ""),
+];
 const SHARPEN: [Setting; 3] = [
     slider("Radius:", 1.0, 50.0, 1.0, 3.0, " px"),
     slider("Amount:", 0.0, 300.0, 1.0, 50.0, " %"),
@@ -55,8 +63,9 @@ const SHARPEN: [Setting; 3] = [
 
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects.
-    pub const MENUS: [(&str, &[Self]); 2] = [
+    pub const MENUS: [(&str, &[Self]); 3] = [
         ("Blurs", &[BokehBlur, FragmentBlur, GaussianBlur, MedianBlur, MotionBlur, RadialBlur, SketchBlur, SquareBlur, SurfaceBlur, ZoomBlur]),
+        ("Map", &[Offset]),
         ("Photo", &[Sharpen]),
     ];
 
@@ -74,6 +83,7 @@ impl EffectKind {
             SurfaceBlur => "Surface Blur",
             ZoomBlur => "Zoom Blur",
             Sharpen => "Sharpen",
+            Offset => "Offset",
         }
     }
 
@@ -91,6 +101,7 @@ impl EffectKind {
             SurfaceBlur => &SURFACE,
             ZoomBlur => &ZOOM,
             Sharpen => &SHARPEN,
+            Offset => &OFFSET,
         }
     }
 
@@ -109,6 +120,11 @@ impl EffectKind {
             SurfaceBlur => Effect::SurfaceBlur { radius: value(0), threshold: value(1) },
             ZoomBlur => Effect::ZoomBlur { amount: value(0), center: [value(1), value(2)] },
             Sharpen => Effect::Sharpen { radius: value(0), amount: value(1), threshold: value(2) },
+            Offset => Effect::Offset {
+                x: values[0] as i32,
+                y: values[1] as i32,
+                edges: OffsetEdges::ALL[(values[2] as usize).min(OffsetEdges::ALL.len() - 1)],
+            },
         }
     }
 }

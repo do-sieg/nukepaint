@@ -1,4 +1,4 @@
-//! The blurs and the Sharpen of the Filters menu, which, unlike the adjustments, look at
+//! The blurs, the Sharpen and the Offset of the Filters menu, which, unlike the adjustments, look at
 //! the pixels around each one, as `effect.gdshader` does on the GPU in the Godot
 //! version. The colours are multiplied by how opaque they are while they are mixed, so
 //! see-through pixels add nothing to those around them, and divided out again at the
@@ -13,9 +13,9 @@ use std::{
     thread,
 };
 
-use image::RgbaImage;
+use image::{Rgba, RgbaImage};
 
-use crate::SelectionMask;
+use crate::{PixelRect, SelectionMask};
 
 /// Fewest pixels worth sharing between threads.
 const PARALLEL_PIXELS: usize = 1 << 14;
@@ -60,6 +60,32 @@ pub enum Effect {
     /// out edges and details, as an unsharp mask does, unless it is closer to it than
     /// the threshold. How opaque each pixel is stays the same.
     Sharpen { radius: f32, amount: f32, threshold: f32 },
+    /// Moves the pixels right and down by this many, or left and up if below zero,
+    /// within the rectangle around the selected ones, or the whole image, filling where
+    /// they move away from as `edges` says.
+    Offset { x: i32, y: i32, edges: OffsetEdges },
+}
+
+/// What the Offset fills where the pixels move away from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffsetEdges {
+    /// With those moved off the other side, as on a tile repeated side by side.
+    Wrap,
+    Transparent,
+    /// With the pixels along the edge they move away from, drawn out.
+    Repeat,
+}
+
+impl OffsetEdges {
+    pub const ALL: [Self; 3] = [Self::Wrap, Self::Transparent, Self::Repeat];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Wrap => "Wrap Around",
+            Self::Transparent => "Transparent",
+            Self::Repeat => "Repeat Edge Pixels",
+        }
+    }
 }
 
 /// The pixels as the effect makes them, but for those `mask` leaves out, if there is
@@ -71,6 +97,7 @@ pub fn apply_effect(pixels: &RgbaImage, effect: &Effect, mask: Option<&Selection
     }
     let mut result = match *effect {
         Effect::MedianBlur { radius, percentile } => median(pixels, radius, percentile / 100.0, stop)?,
+        Effect::Offset { x, y, edges } => offset(pixels, x, y, edges, mask),
         _ => match render(&Buffer::premultiplied(pixels), effect, stop)? {
             Some(buffer) => buffer.to_image(),
             None => return Some(pixels.clone()),
@@ -84,6 +111,31 @@ pub fn apply_effect(pixels: &RgbaImage, effect: &Effect, mask: Option<&Selection
         }
     }
     Some(result)
+}
+
+/// The pixels moved by `x` and `y` within the rectangle around those `mask` holds, or
+/// the whole image, the rest filled as `edges` says.
+fn offset(pixels: &RgbaImage, x: i32, y: i32, edges: OffsetEdges, mask: Option<&SelectionMask>) -> RgbaImage {
+    let whole = PixelRect { left: 0, top: 0, right: pixels.width() as i32, bottom: pixels.height() as i32 };
+    let area = mask.and_then(SelectionMask::bounds).unwrap_or(whole);
+    let mut result = pixels.clone();
+    // Where a pixel of the area comes from, along one side: before the move, if it is in the area.
+    let source = |at: i32, by: i32, start: i32, end: i32| {
+        let from = at - by;
+        match edges {
+            OffsetEdges::Wrap => Some(start + (from - start).rem_euclid(end - start)),
+            OffsetEdges::Transparent => (start..end).contains(&from).then_some(from),
+            OffsetEdges::Repeat => Some(from.clamp(start, end - 1)),
+        }
+    };
+    for row in area.top..area.bottom {
+        for column in area.left..area.right {
+            let from = source(column, x, area.left, area.right).zip(source(row, y, area.top, area.bottom));
+            let pixel = from.map_or(Rgba([0, 0, 0, 0]), |(from_x, from_y)| *pixels.get_pixel(from_x as u32, from_y as u32));
+            result.put_pixel(column as u32, row as u32, pixel);
+        }
+    }
+    result
 }
 
 /// The colours, multiplied by how opaque they are, as the effect makes them, or
@@ -162,6 +214,7 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
             })
         }
         Effect::Sharpen { amount, .. } if amount.abs() < f32::EPSILON => return Some(None),
+        Effect::Offset { .. } => return Some(None),
         Effect::Sharpen { radius, amount, threshold } => {
             let blurred = if radius < 1.0 { None } else { Some(blur(source, Weighing::Gaussian, radius, 1.0, stop)?) };
             let blurred = blurred.as_ref().unwrap_or(source);
@@ -720,5 +773,22 @@ mod tests {
         for effect in &ALL {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
+    }
+
+    #[test]
+    fn offset_moves_the_pixels_within_the_selection() {
+        // A row of four colours, with a pixel either side left out of the selection.
+        let colors = [10, 20, 30, 40, 50, 60].map(|value| Rgba([value, 0, 0, 255]));
+        let pixels = RgbaImage::from_fn(6, 1, |x, _| colors[x as usize]);
+        let mask = SelectionMask::of(&Selection::rect(PixelRect { left: 1, top: 0, right: 5, bottom: 1 }), 6, 1);
+        let reds = |effect: Effect| -> Vec<u8> {
+            let result = apply_effect(&pixels, &effect, mask.as_ref(), &AtomicBool::new(false)).unwrap();
+            result.pixels().map(|pixel| if pixel[3] == 0 { 0 } else { pixel[0] }).collect()
+        };
+        assert_eq!(reds(Effect::Offset { x: 1, y: 0, edges: OffsetEdges::Wrap }), [10, 50, 20, 30, 40, 60]);
+        assert_eq!(reds(Effect::Offset { x: -1, y: 0, edges: OffsetEdges::Transparent }), [10, 30, 40, 50, 0, 60]);
+        assert_eq!(reds(Effect::Offset { x: 2, y: 0, edges: OffsetEdges::Repeat }), [10, 20, 20, 20, 30, 60]);
+        // A whole turn leaves it as it was.
+        assert_eq!(reds(Effect::Offset { x: 4, y: 0, edges: OffsetEdges::Wrap }), [10, 20, 30, 40, 50, 60]);
     }
 }

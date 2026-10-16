@@ -37,6 +37,20 @@ impl SelectionMask {
         x < self.width && y < self.height && self.selected[(y * self.width + x) as usize]
     }
 
+    /// The smallest rectangle around the selected pixels, if any are.
+    pub fn bounds(&self) -> Option<PixelRect> {
+        let width = self.width as usize;
+        let mut rows = self.selected.chunks(width.max(1)).enumerate().filter(|(_, row)| row.contains(&true));
+        let (top, _) = rows.next()?;
+        let bottom = rows.next_back().map_or(top, |(y, _)| y) + 1;
+        let columns = (0..width).filter(|&x| (top..bottom).any(|y| self.selected[y * width + x]));
+        let (mut left, mut right) = (usize::MAX, 0);
+        for x in columns {
+            (left, right) = (left.min(x), x + 1);
+        }
+        Some(PixelRect { left: left as i32, top: top as i32, right: right as i32, bottom: bottom as i32 })
+    }
+
     /// Whether each pixel of the image is selected, row after row.
     pub(crate) fn flags(&self) -> &[bool] {
         &self.selected

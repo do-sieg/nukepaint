@@ -1237,7 +1237,7 @@ fn flood_at(
 /// The pixels a tool may change: the selected ones, if any are, and tiled, only those
 /// of the tile, as the rest of the image is not shown. Nothing at all when nothing
 /// selected is on the tile, rather than every pixel as when nothing is selected.
-fn tile_mask(image: &OpenImage) -> Option<Option<SelectionMask>> {
+pub fn tile_mask(image: &OpenImage) -> Option<Option<SelectionMask>> {
     let (width, height) = image.document.size();
     let selection = &image.document.selection;
     let Some(tile) = image.view.tile().map(Selection::rect) else {
