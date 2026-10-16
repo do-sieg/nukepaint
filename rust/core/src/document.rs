@@ -310,6 +310,23 @@ impl Document {
         }
     }
 
+    /// Mirrors the whole image, every layer and the selection, along either axis or
+    /// both, which turns it upside down.
+    pub fn flip_image(&mut self, horizontally: bool, vertically: bool) {
+        for layer in &mut self.layers {
+            if horizontally {
+                imageops::flip_horizontal_in_place(&mut layer.pixels);
+            }
+            if vertically {
+                imageops::flip_vertical_in_place(&mut layer.pixels);
+            }
+        }
+        let (width, height) = self.size();
+        let mirror = |flip: bool, length: u32| if flip { (-1.0, length as f64) } else { (1.0, 0.0) };
+        let ((xx, dx), (yy, dy)) = (mirror(horizontally, width), mirror(vertically, height));
+        self.selection = self.selection.transformed(&Affine { xx, yy, dx, dy, ..Affine::IDENTITY });
+    }
+
     /// Cuts the image down to the rectangle around the selection, as far as it is on
     /// the image. What is in that rectangle but not selected is left transparent. The
     /// selection stays on the same pixels. Returns whether any of it was on the image.
@@ -562,6 +579,22 @@ mod tests {
         assert_eq!(document.active().pixels[(0, 0)], Rgba([0, 0, 255, 255]));
         assert!(!document.selection.is_empty());
         assert!(!document.redo());
+    }
+
+    #[test]
+    fn flipping_the_image_flips_every_layer_and_the_selection() {
+        let mut document = Document::new(RgbaImage::new(4, 2));
+        document.add_layer();
+        for layer in &mut document.layers {
+            layer.pixels.put_pixel(0, 0, Rgba([0, 0, 255, 255]));
+        }
+        document.selection = Selection::rect(PixelRect { left: 0, top: 0, right: 1, bottom: 1 });
+        document.flip_image(true, false);
+        assert!(document.layers.iter().all(|layer| layer.pixels[(3, 0)] == Rgba([0, 0, 255, 255])));
+        assert!(document.selection.contains(3, 0) && !document.selection.contains(0, 0));
+        document.flip_image(false, true);
+        assert!(document.layers.iter().all(|layer| layer.pixels[(3, 1)] == Rgba([0, 0, 255, 255])));
+        assert!(document.selection.contains(3, 1) && !document.selection.contains(3, 0));
     }
 
     #[test]

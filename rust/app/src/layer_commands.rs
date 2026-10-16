@@ -16,6 +16,9 @@ pub enum LayerCommand {
     Resize,
     CanvasSize,
     Flatten,
+    FlipImageHorizontal,
+    FlipImageVertical,
+    RotateImage180,
     FlipHorizontal,
     FlipVertical,
     Rotate180,
@@ -42,7 +45,11 @@ impl LayerCommand {
         &[Properties],
     ];
     /// The Image menu.
-    pub const IMAGE_MENU: [&[Self]; 2] = [&[CropToSelection, Resize, CanvasSize], &[Flatten]];
+    pub const IMAGE_MENU: [&[Self]; 3] = [
+        &[CropToSelection, Resize, CanvasSize],
+        &[FlipImageHorizontal, FlipImageVertical, RotateImage180],
+        &[Flatten],
+    ];
     /// The menu of a layer in the layers list, which acts on it: the Layers menu without
     /// the commands that go to another layer, and Flatten.
     pub const CONTEXT_MENU: [&[Self]; 4] = [
@@ -64,9 +71,9 @@ impl LayerCommand {
             Resize => "Resize…",
             CanvasSize => "Canvas Size…",
             Flatten => "Flatten",
-            FlipHorizontal => "Flip Horizontal",
-            FlipVertical => "Flip Vertical",
-            Rotate180 => "Rotate 180°",
+            FlipImageHorizontal | FlipHorizontal => "Flip Horizontal",
+            FlipImageVertical | FlipVertical => "Flip Vertical",
+            RotateImage180 | Rotate180 => "Rotate 180°",
             GoToTop => "Go to Top Layer",
             GoToAbove => "Go to Layer Above",
             GoToBelow => "Go to Layer Below",
@@ -76,6 +83,20 @@ impl LayerCommand {
             MoveDown => "Move Layer Down",
             MoveToBottom => "Move Layer to Bottom",
             Properties => "Layer Properties…",
+        }
+    }
+
+    /// The name of the step it makes in the history, which tells the image's flips
+    /// from the layer's.
+    pub fn step_name(self) -> &'static str {
+        match self {
+            FlipImageHorizontal => "Flip Image Horizontal",
+            FlipImageVertical => "Flip Image Vertical",
+            RotateImage180 => "Rotate Image 180°",
+            FlipHorizontal => "Flip Layer Horizontal",
+            FlipVertical => "Flip Layer Vertical",
+            Rotate180 => "Rotate Layer 180°",
+            _ => self.label().trim_end_matches('…'),
         }
     }
 
@@ -126,7 +147,8 @@ impl LayerCommand {
             Flatten => !document.is_flat(),
             GoToTop | GoToAbove | MoveToTop | MoveUp => has_above,
             MergeDown | GoToBottom | GoToBelow | MoveToBottom | MoveDown => has_below,
-            Add | Duplicate | Resize | CanvasSize | FlipHorizontal | FlipVertical | Rotate180 | Properties => true,
+            Add | Duplicate | Resize | CanvasSize | Properties => true,
+            FlipImageHorizontal | FlipImageVertical | RotateImage180 | FlipHorizontal | FlipVertical | Rotate180 => true,
         }
     }
 
@@ -143,6 +165,9 @@ impl LayerCommand {
             MergeDown => return document.merge_layer_down(),
             CropToSelection => return document.crop_to_selection(),
             Flatten => document.flatten(),
+            FlipImageHorizontal => document.flip_image(true, false),
+            FlipImageVertical => document.flip_image(false, true),
+            RotateImage180 => document.flip_image(true, true),
             FlipHorizontal => document.flip_layer(true, false),
             FlipVertical => document.flip_layer(false, true),
             Rotate180 => document.flip_layer(true, true),
