@@ -662,6 +662,28 @@ impl App {
         };
     }
 
+    /// Moves the image to another place in the strip. Whatever pointed at an image
+    /// still points at the same one.
+    fn move_image(&mut self, from: usize, to: usize) {
+        let image = self.images.remove(from);
+        self.images.insert(to, image);
+        let moved = |index: usize| match index {
+            _ if index == from => to,
+            _ if from < index && index <= to => index - 1,
+            _ if to <= index && index < from => index + 1,
+            _ => index,
+        };
+        self.current = self.current.map(moved);
+        match &mut self.closing {
+            Some(Closing::Image(index)) => *index = moved(*index),
+            Some(Closing::Quit { discarded }) => discarded.iter_mut().for_each(|index| *index = moved(*index)),
+            None => {}
+        }
+        if let Some(prompt) = &mut self.flatten_prompt {
+            prompt.image = moved(prompt.image);
+        }
+    }
+
     fn file_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.menu_button("File", |ui| {
@@ -2121,6 +2143,7 @@ impl eframe::App for App {
                 match action {
                     Some(image_strip::Action::Select(index)) => self.select(index),
                     Some(image_strip::Action::Close(index)) => self.request_close(index),
+                    Some(image_strip::Action::Move(from, to)) => self.move_image(from, to),
                     None => {}
                 }
             });
