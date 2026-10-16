@@ -525,8 +525,9 @@ fn right_click_option(ui: &mut egui::Ui, right_click: &mut RightClick) {
             })
             .response
             .on_hover_text(
-                "What the right button does with the Paintbrush, the Pencil, the Spray and the Paint Bucket: \
-                 draw in the secondary color, or pick the color of the active layer as the one being edited here.",
+                "What the right button does with the Paintbrush, the Pencil, the Spray, the Paint Bucket, the \
+                 Gradient and the shapes: draw in the secondary color, or pick the color of the active layer as the \
+                 one being edited here.",
             );
     });
 }

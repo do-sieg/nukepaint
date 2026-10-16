@@ -564,7 +564,7 @@ fn pixel_of(point: (f64, f64)) -> (i32, i32) {
 }
 
 /// An angle, to the nearest step of 15° with `constrain`.
-fn snap(angle: f64, constrain: bool) -> f64 {
+pub fn snap(angle: f64, constrain: bool) -> f64 {
     if constrain { (angle / ANGLE_SNAP).round() * ANGLE_SNAP } else { angle }
 }
 

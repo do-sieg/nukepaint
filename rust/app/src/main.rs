@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use adjustment_dialog::FilterKind;
 use adjustments::{AdjustmentKind, LastSettings};
-use canvas::Drawing;
+use canvas::{Drawing, GradientDrag};
 use dock::{DockLayout, DockSide, Section};
 use effects::EffectKind;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
@@ -42,7 +42,7 @@ use clipboard::Clipboard;
 use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
-    Affine, Document, FloatingPixels, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
+    Affine, Document, FloatingPixels, GradientKind, GradientMode, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
     RgbaImage, SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
@@ -129,6 +129,8 @@ pub struct OpenImage {
     pub polygon: Option<PolygonEdit>,
     /// The shape a shape tool is drawing, or drew, to go on changing.
     pub shape: Option<ShapeEdit>,
+    /// The gradient the Gradient is drawing on the active layer, until the button is let go.
+    pub gradient: Option<GradientDrag>,
 }
 
 impl OpenImage {
@@ -145,6 +147,7 @@ impl OpenImage {
             lasso: None,
             polygon: None,
             shape: None,
+            gradient: None,
         };
         image.refresh_layer_thumbnails(ctx);
         image
@@ -189,6 +192,7 @@ impl OpenImage {
     fn is_dragging(&self) -> bool {
         self.transform.as_ref().is_some_and(Transform::is_dragging)
             || self.stroke.is_some()
+            || self.gradient.is_some()
             || self.lasso.as_ref().is_some_and(|lasso| lasso.kind == LassoKind::Freehand)
             || self.polygon.as_ref().is_some_and(PolygonEdit::is_dragging)
             || self.shape.as_ref().is_some_and(ShapeEdit::is_dragging)
@@ -1384,6 +1388,8 @@ impl App {
                 self.flood_options(ui);
             } else if self.tools.tool.shape().is_some() {
                 self.shape_options(ui);
+            } else if self.tools.tool == Tool::Gradient {
+                self.gradient_options(ui);
             }
             if self.tools.tool.selects() {
                 self.selection_options(ui);
@@ -1495,8 +1501,43 @@ impl App {
         }
     }
 
+    /// The Gradient's settings: how its colours spread out, what it does to the pixels,
+    /// and whether the selection's controls show.
+    fn gradient_options(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label("Shape:");
+        egui::ComboBox::from_id_salt("gradient_kind")
+            .selected_text(self.tools.gradient_kind.name())
+            .show_ui(ui, |ui| {
+                for kind in GradientKind::ALL {
+                    ui.selectable_value(&mut self.tools.gradient_kind, kind, kind.name());
+                }
+            })
+            .response
+            .on_hover_text(
+                "How the colours spread out from where the drag starts. Linear goes across the drag, and Reflected \
+                 goes both ways from its start. Radial makes circles, and Diamond squares on a corner, around its \
+                 start, out to its end. Conical goes around its start, from the end's side to the other.",
+            );
+        ui.separator();
+        ui.label("Mode:");
+        egui::ComboBox::from_id_salt("gradient_mode")
+            .selected_text(self.tools.gradient_mode.name())
+            .show_ui(ui, |ui| {
+                for mode in GradientMode::ALL {
+                    ui.selectable_value(&mut self.tools.gradient_mode, mode, mode.name());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Color blends the gradient's colours over the layer. Transparency fades the layer out instead, \
+                 from as it is where the drag starts to clear where it ends.",
+            );
+        self.selection_controls_option(ui);
+    }
+
     /// The drawing tool's width and whether it smooths its edges, as far as it has them,
-    /// and whether the selection's controls show, while there is a selection.
+    /// and whether the selection's controls show.
     fn drawing_options(&mut self, ui: &mut egui::Ui) {
         let tool = self.tools.tool;
         if let Some(size) = self.tools.tip_size_mut() {
@@ -1526,6 +1567,11 @@ impl App {
         if tool.can_smooth() {
             self.antialiasing_option(ui);
         }
+        self.selection_controls_option(ui);
+    }
+
+    /// Whether the selection's controls show, while there is a selection.
+    fn selection_controls_option(&mut self, ui: &mut egui::Ui) {
         // Without a selection, there is nothing for them to control.
         let selected = self.current.is_some_and(|current| !self.images[current].document.selection.is_empty());
         if !selected {
@@ -1533,7 +1579,7 @@ impl App {
         }
         ui.separator();
         let controls = ui.checkbox(&mut self.tools.selection_controls, "Selection controls").on_hover_text(
-            "On, the selection's box shows while drawing, to resize, move and rotate the selection from its \
+            "On, the selection's box shows while drawing or filling, to resize, move and rotate the selection from its \
              handles, with a button by it to deselect. Off, only its outline shows, and drawing by its edges \
              never grabs a handle.",
         );
@@ -1573,6 +1619,7 @@ impl App {
             );
         if self.tools.tool == Tool::PaintBucket {
             self.antialiasing_option(ui);
+            self.selection_controls_option(ui);
         }
     }
 

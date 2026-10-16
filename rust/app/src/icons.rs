@@ -36,6 +36,7 @@ pub const ERASER: Icon = icon!("eraser");
 pub const SPRAY: Icon = icon!("spray");
 pub const COLOR_PICKER: Icon = icon!("color_picker");
 pub const PAINT_BUCKET: Icon = icon!("paint_bucket");
+pub const GRADIENT: Icon = icon!("gradient");
 pub const BLUR: Icon = icon!("blur");
 pub const SHARPEN: Icon = icon!("sharpen");
 pub const JUMBLE: Icon = icon!("jumble");
@@ -86,7 +87,7 @@ pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
 /// Those the history can list steps with, which it keeps by name.
-const STEP_ICONS: [Icon; 36] = [
+const STEP_ICONS: [Icon; 37] = [
     RECT_SELECT,
     LASSO_SELECT,
     ELLIPSE_SELECT,
@@ -115,6 +116,7 @@ const STEP_ICONS: [Icon; 36] = [
     ERASER,
     SPRAY,
     PAINT_BUCKET,
+    GRADIENT,
     LINE,
     CURVE,
     RECTANGLE,

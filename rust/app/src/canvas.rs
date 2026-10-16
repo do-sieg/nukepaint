@@ -7,7 +7,10 @@
 //! tool zooms in on a left click or on the area a left drag frames, and out on a right
 //! click. The Paintbrush, the Pencil and the Eraser draw a line along a left drag, the
 //! Blur, the Sharpen and the Jumble retouch the pixels along it, and the Spray leaves
-//! dots for as long as the left button is held, on the selected pixels alone if any are. Unless their selection controls are off, they resize or move the selection from a handle
+//! dots for as long as the left button is held, on the selected pixels alone if any are. The
+//! Gradient fills the active layer with a gradient along a drag, drawn again as it goes.
+//! Unless their selection controls are off, they and the Paint Bucket resize or move the
+//! selection from a handle
 //! of its box, or the one out from its bottom right corner, or rotate it from around
 //! the box. The shape tools draw their shape, which their handles then change until it
 //! is finished. The selection shows as a tinted area in a dashed outline, with a button by it: with the
@@ -20,8 +23,8 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2, emath::GuiRounding, scroll_area::ScrollSource,
 };
 use power_paint_core::{
-    BrushStroke, FloodFill, PixelRect, RetouchStroke, Rgba, RgbaImage, Selection, SelectionMask, SelectionMode,
-    ShapeKind, Spray, hard_tip,
+    BrushStroke, FloodFill, Gradient, GradientFill, PixelRect, RetouchStroke, Rgba, RgbaImage, Selection,
+    SelectionMask, SelectionMode, ShapeKind, Spray, hard_tip,
 };
 
 use crate::{
@@ -107,6 +110,15 @@ impl Drawing {
         }
     }
 }
+/// A drag of the Gradient, until it is let go.
+pub struct GradientDrag {
+    fill: GradientFill,
+    /// The gradient drawn last.
+    drawn: Gradient,
+    /// Whether it goes from the secondary colour to the primary one, with the right button.
+    secondary: bool,
+}
+
 /// The point of the rotate cursor that is on the pointer, its middle.
 const ROTATE_HOTSPOT: Vec2 = Vec2::new(12.0, 12.0);
 
@@ -150,7 +162,9 @@ pub fn show(
     let pixels_per_point = ui.ctx().pixels_per_point();
     let viewport = ui.available_rect_before_wrap();
     image.view.place(viewport, pixels_per_point);
-    let pointer = ui.ctx().pointer_hover_pos().filter(|pos| viewport.contains(*pos));
+    // Not while it is over a dialog, a menu or another window in front of the image.
+    let in_front = |pos: Pos2| ui.ctx().layer_id_at(pos).is_some_and(|layer| layer != ui.layer_id());
+    let pointer = ui.ctx().pointer_hover_pos().filter(|&pos| viewport.contains(pos) && !in_front(pos));
     if let Some(pointer) = pointer {
         zoom_with_wheel(ui, &mut image.view, pointer);
     }
@@ -197,6 +211,8 @@ pub fn show(
         picking_at = pointer.filter(|_| use_color_picker(&response, image, tools, space));
     } else if tools.tool == Tool::PaintBucket {
         filling_at = pointer.filter(|_| use_paint_bucket(ui, &response, image, tools, space));
+    } else if tools.tool == Tool::Gradient {
+        use_gradient(ui, &response, image, tools, space);
     } else if tools.tool == Tool::MagicWand {
         wand_at = pointer.filter(|_| use_magic_wand(ui, &response, image, tools, space));
     } else if tools.tool.shape().is_some() {
@@ -210,6 +226,9 @@ pub fn show(
     paint_selection(&painter, &image.view, &image.document.selection, tint);
     paint_lasso(&painter, image, tools);
     paint_shape(&painter, image, tools);
+    if let Some(drag) = &image.gradient {
+        paint_gradient_line(&painter, &image.view, &drag.drawn);
+    }
     if let Some(drag) = tools.zoom_drag.as_ref().filter(|drag| drag.framing) {
         paint_zoom_frame(&painter, &image.view, drag);
     }
@@ -241,7 +260,7 @@ pub fn show(
     }
     let (mut tool_requested, mut deselect_requested) = (None, false);
     let idle = !tools.frame_select.is_dragging() && tools.zoom_drag.is_none() && !image.is_dragging();
-    let button_shown = !tools.tool.draws() || tools.selection_controls;
+    let button_shown = !tools.tool.has_selection_controls() || tools.selection_controls;
     if idle && button_shown && let Some(clicked) = selection_button(ui, image, tools, icons, viewport, box_shown) {
         match clicked {
             SelectionButton::Deselect => deselect_requested = true,
@@ -260,11 +279,11 @@ pub fn show(
 
 /// The selection's box, if the tool shows one: Move Selection's moves the outline
 /// alone, and the selection tools' moves the selected pixels, except while they draw
-/// a new selection. The drawing tools' resizes the outline by its handles, moves it by
+/// a new selection. The selection controls' resizes the outline by its handles, moves it by
 /// the one out from its bottom right corner, and rotates it from around it.
 fn box_state(image: &OpenImage, tools: &Tools) -> Option<BoxState> {
     let shown = tools.tool == Tool::MoveSelection
-        || (tools.tool.draws() && tools.selection_controls)
+        || (tools.tool.has_selection_controls() && tools.selection_controls)
         || (tools.tool.has_box() && !tools.frame_select.is_dragging() && image.lasso.is_none());
     if !shown {
         return None;
@@ -916,7 +935,8 @@ fn use_color_picker(response: &egui::Response, image: &OpenImage, tools: &mut To
 /// while Shift is held, with the primary colour. With a selection, only the selected
 /// pixels are filled, from a click on one of them. The right button fills with the
 /// secondary colour, or picks a colour as the Color Picker does, as the right click
-/// option says. Returns whether the pointer is the tool's, over the image.
+/// option says. Its selection controls work the selection's box, as the drawing tools'
+/// do. Returns whether the pointer is the tool's, over the image.
 fn use_paint_bucket(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -924,9 +944,12 @@ fn use_paint_bucket(
     tools: &mut Tools,
     space: bool,
 ) -> bool {
+    let on_box = use_selection_controls(ui, response, image, tools, space);
+    let hovered = !on_box && response.hovered();
     let started = [PointerButton::Primary, PointerButton::Secondary]
         .into_iter()
-        .find(|&button| response.drag_started_by(button));
+        .find(|&button| response.drag_started_by(button))
+        .filter(|_| !box_dragged(image));
     let picking = tools.right_click == RightClick::PickColor;
     if picking
         && !space
@@ -937,17 +960,17 @@ fn use_paint_bucket(
         tools.colors.pick(color, false);
     }
     let Some(button) = started.filter(|&button| !space && (button == PointerButton::Primary || !picking)) else {
-        return response.hovered();
+        return hovered;
     };
     let Some(press) = ui.input(|input| input.pointer.press_origin()) else {
-        return response.hovered();
+        return hovered;
     };
     let (x, y) = image.view.pixel_at(press);
     let (width, height) = image.document.size();
     let mask = image.document.selection_mask();
     let on_image = (0..width as i64).contains(&x) && (0..height as i64).contains(&y);
     if !on_image || mask.as_ref().is_some_and(|mask| !mask.contains(x as u32, y as u32)) {
-        return response.hovered();
+        return hovered;
     }
     let fill = flood_at(ui, image, tools, (x as u32, y as u32), mask.as_ref());
     let color = if button == PointerButton::Primary { tools.colors.primary } else { tools.colors.secondary };
@@ -957,7 +980,92 @@ fn use_paint_bucket(
         image.document.commit(Tool::PaintBucket.name(), Some(Tool::PaintBucket.icon().name()));
         image.refresh(ui.ctx());
     }
-    response.hovered()
+    hovered
+}
+
+/// Works the Gradient: a drag draws a gradient on the active layer from where it was
+/// pressed to where it is, at steps of 15° with Shift, drawn again as it goes, which is
+/// a step once let go if it changed anything. The left button goes from the primary
+/// colour to the secondary one, and the right one the other way, or picks a colour as
+/// the Color Picker does, as the right click option says. Escape gives up the drag. Its
+/// selection controls work the selection's box, as the drawing tools' do.
+fn use_gradient(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, tools: &mut Tools, space: bool) {
+    let on_box = use_selection_controls(ui, response, image, tools, space);
+    let picking = tools.right_click == RightClick::PickColor;
+    if picking
+        && !space
+        && response.dragged_by(PointerButton::Secondary)
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(color) = color_at(image, at)
+    {
+        tools.colors.pick(color, false);
+    }
+    let started = [PointerButton::Primary, PointerButton::Secondary]
+        .into_iter()
+        .find(|&button| response.drag_started_by(button))
+        .filter(|_| !box_dragged(image));
+    if let Some(button) = started.filter(|&button| !space && (button == PointerButton::Primary || !picking))
+        && let Some(press) = ui.input(|input| input.pointer.press_origin())
+    {
+        // A transform would go on from the pixels as they were before.
+        image.transform = None;
+        let from = image.view.point_at(press);
+        let fill = GradientFill::begin(&image.document.active().pixels, image.document.selection_mask());
+        let secondary = button == PointerButton::Secondary;
+        image.gradient = Some(GradientDrag { fill, drawn: gradient(tools, from, from, secondary), secondary });
+    }
+    if ui.input(|input| input.key_pressed(Key::Escape))
+        && let Some(drag) = image.gradient.take()
+    {
+        drag.fill.cancel(&mut image.document.active_mut().pixels);
+        image.refresh(ui.ctx());
+    }
+    if let Some(drag) = &mut image.gradient
+        && let Some(at) = response.interact_pointer_pos()
+    {
+        let shift = ui.input(|input| input.modifiers.shift);
+        let from = drag.drawn.from;
+        let (x, y) = image.view.point_at(at);
+        let (dx, dy) = (x - from.0, y - from.1);
+        let angle = shapes::snap(dy.atan2(dx), shift);
+        let length = dx.hypot(dy);
+        let to = (from.0 + angle.cos() * length, from.1 + angle.sin() * length);
+        let gradient = gradient(tools, from, to, drag.secondary);
+        if gradient != drag.drawn {
+            drag.drawn = gradient;
+            if let Some(area) = drag.fill.draw(&mut image.document.active_mut().pixels, &gradient) {
+                image.refresh_area(area);
+            }
+        }
+    }
+    if response.drag_stopped()
+        && let Some(drag) = image.gradient.take()
+        && drag.fill.changed()
+    {
+        image.document.commit(Tool::Gradient.name(), Some(Tool::Gradient.icon().name()));
+        image.refresh(ui.ctx());
+    }
+    if !on_box && (response.hovered() || image.gradient.is_some()) {
+        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+    }
+}
+
+/// The gradient the Gradient draws from the point `from` of the image to `to`, as the
+/// tools say, from the secondary colour to the primary one if `secondary`.
+fn gradient(tools: &Tools, from: (f64, f64), to: (f64, f64), secondary: bool) -> Gradient {
+    let (primary, other) = (tools.colors.primary, tools.colors.secondary);
+    let colors = if secondary { [other, primary] } else { [primary, other] };
+    Gradient { kind: tools.gradient_kind, mode: tools.gradient_mode, from, to, colors }
+}
+
+/// The line a gradient is drawn along, with a handle at each end.
+fn paint_gradient_line(painter: &Painter, view: &View, gradient: &Gradient) {
+    let pixel = 1.0 / painter.pixels_per_point();
+    let [from, to] = [gradient.from, gradient.to].map(|(x, y)| view.to_screen(x as f32, y as f32));
+    painter.line_segment([from, to], Stroke::new(3.0 * pixel, Color32::WHITE));
+    painter.line_segment([from, to], Stroke::new(pixel, Color32::BLACK));
+    paint_corner_handle(painter, from);
+    paint_corner_handle(painter, to);
 }
 
 /// Works the Magic Wand: a click on the image selects the pixels whose colour is close
@@ -1040,15 +1148,7 @@ fn use_drawing_tool(
     tools: &mut Tools,
     space: bool,
 ) -> bool {
-    let reach = image.view.pixels_per_screen_point();
-    let handle_at = |image: &OpenImage, tools: &Tools, point: Pos2| {
-        box_state(image, tools)?.handle_at(image.view.point_at(point), reach)
-    };
-    if ui.input(|input| input.key_pressed(Key::Escape))
-        && let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging())
-    {
-        image.document.selection = transform.cancel();
-    }
+    let on_box = use_selection_controls(ui, response, image, tools, space);
     let picking = tools.tool.draws_in_color() && tools.right_click == RightClick::PickColor;
     let started = [PointerButton::Primary, PointerButton::Secondary]
         .into_iter()
@@ -1060,14 +1160,7 @@ fn use_drawing_tool(
         let primary = button == PointerButton::Primary;
         // The right button does not draw with the Eraser, nor while it picks colours.
         let draws = primary || (tools.tool.draws_in_color() && !picking);
-        if let Some(kind) = handle_at(image, tools, press).filter(|_| primary) {
-            if image.transform.is_none() {
-                image.transform = Transform::begin(ui.ctx(), &image.document, false);
-            }
-            if let Some(transform) = &mut image.transform {
-                transform.press(kind, image.view.point_at(press), reach);
-            }
-        } else if draws {
+        if draws && !box_dragged(image) {
             // A transform would go on from the selection as it was before.
             image.transform = None;
             let mask = image.document.selection_mask();
@@ -1120,35 +1213,81 @@ fn use_drawing_tool(
         {
             image.refresh_area(area);
         }
+    }
+    if response.drag_stopped()
+        && let Some(stroke) = image.stroke.take()
+        && stroke.changed()
+    {
+        image.document.commit(tools.tool.name(), Some(tools.tool.icon().name()));
+        image.refresh(ui.ctx());
+    }
+    !on_box && (response.hovered() || image.stroke.is_some())
+}
+
+/// Works the selection's box for the tools that show its controls while they work: a
+/// left drag from a handle of the box resizes the selection, one from the handle out
+/// from its bottom right corner moves it, and one from around the box rotates it,
+/// without its pixels, as Move Selection does. Escape gives up the drag. Returns
+/// whether the box has the pointer, dragging it or over a handle while the tool is
+/// not at work, which then shows what dragging it would do in place of the tool.
+fn use_selection_controls(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    image: &mut OpenImage,
+    tools: &Tools,
+    space: bool,
+) -> bool {
+    let reach = image.view.pixels_per_screen_point();
+    let handle_at = |image: &OpenImage, point: Pos2| box_state(image, tools)?.handle_at(image.view.point_at(point), reach);
+    if ui.input(|input| input.key_pressed(Key::Escape))
+        && let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging())
+    {
+        image.document.selection = transform.cancel();
+    }
+    if response.drag_started_by(PointerButton::Primary)
+        && !space
+        && let Some(press) = ui.input(|input| input.pointer.press_origin())
+        && let Some(kind) = handle_at(image, press)
+    {
+        if image.transform.is_none() {
+            image.transform = Transform::begin(ui.ctx(), &image.document, false);
+        }
+        if let Some(transform) = &mut image.transform {
+            transform.press(kind, image.view.point_at(press), reach);
+        }
+    }
+    if response.dragged()
+        && response.drag_delta() != Vec2::ZERO
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(transform) = image.transform.as_mut().filter(|transform| transform.is_dragging())
+    {
         let (shift, command) = ui.input(|input| (input.modifiers.shift, input.modifiers.command));
-        if let Some(transform) = image.transform.as_mut()
-            && let Some(selection) = transform.drag_to(image.view.point_at(at), shift, command, tools.snap)
-        {
+        if let Some(selection) = transform.drag_to(image.view.point_at(at), shift, command, tools.snap) {
             image.document.selection = selection;
         }
     }
-    if response.drag_stopped() {
-        if let Some(stroke) = image.stroke.take()
-            && stroke.changed()
-        {
-            image.document.commit(tools.tool.name(), Some(tools.tool.icon().name()));
-            image.refresh(ui.ctx());
-        }
-        if let Some(transform) = image.transform.as_mut()
-            && transform.release(tools.resampling).0
-        {
-            commit_transform(ui.ctx(), image, None);
-        }
+    if response.drag_stopped()
+        && let Some(transform) = image.transform.as_mut()
+        && transform.release(tools.resampling).0
+    {
+        commit_transform(ui.ctx(), image, None);
     }
-    // A handle shows what dragging it would do, in place of the tool.
     let angle = box_state(image, tools).map_or(0.0, |state| state.angle);
-    let resizing = image.transform.as_ref().and_then(Transform::drag_kind);
-    let on_handle = || ui.ctx().pointer_hover_pos().and_then(|at| handle_at(image, tools, at));
-    if let Some(kind) = resizing.or_else(|| if image.stroke.is_none() { on_handle() } else { None }) {
-        ui.ctx().set_cursor_icon(kind.cursor(angle));
-        return false;
+    let dragging = image.transform.as_ref().and_then(Transform::drag_kind);
+    let on_handle = || response.hover_pos().and_then(|at| handle_at(image, at));
+    let at_work = image.stroke.is_some() || image.gradient.is_some();
+    match dragging.or_else(|| if at_work { None } else { on_handle() }) {
+        Some(kind) => {
+            ui.ctx().set_cursor_icon(kind.cursor(angle));
+            true
+        }
+        None => false,
     }
-    response.hovered() || image.stroke.is_some()
+}
+
+/// Whether the selection's box is being dragged, which a press of the tool went to.
+fn box_dragged(image: &OpenImage) -> bool {
+    image.transform.as_ref().is_some_and(Transform::is_dragging)
 }
 
 /// Shows what the drawing tool would cover with the pointer at `at`, in the colour it

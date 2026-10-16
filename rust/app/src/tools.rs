@@ -1,7 +1,9 @@
 //! The tools that act on the image, and what they are set to.
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, PointerButton};
-use power_paint_core::{Ink, Interpolation, Overlaps, Retouch, Rgba, SelectionMode, ShapeKind, ShapeStyle};
+use power_paint_core::{
+    GradientKind, GradientMode, Ink, Interpolation, Overlaps, Retouch, Rgba, SelectionMode, ShapeKind, ShapeStyle,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -36,6 +38,7 @@ pub const ERASER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, 
 pub const SPRAY_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::A);
 pub const COLOR_PICKER_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::K);
 pub const PAINT_BUCKET_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F);
+pub const GRADIENT_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::G);
 /// Goes from the Blur to the Sharpen and the Jumble.
 pub const RETOUCH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::R);
 /// Goes from the Line to the Curve and back.
@@ -62,6 +65,7 @@ pub enum Tool {
     ColorPicker,
     Spray,
     PaintBucket,
+    Gradient,
     Blur,
     Sharpen,
     Jumble,
@@ -76,7 +80,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::LassoSelect,
@@ -91,6 +95,7 @@ impl Tool {
         Self::ColorPicker,
         Self::Spray,
         Self::PaintBucket,
+        Self::Gradient,
         Self::Blur,
         Self::Sharpen,
         Self::Jumble,
@@ -120,6 +125,7 @@ impl Tool {
             Self::ColorPicker => "Color Picker",
             Self::Spray => "Spray",
             Self::PaintBucket => "Paint Bucket",
+            Self::Gradient => "Gradient",
             Self::Blur => "Blur",
             Self::Sharpen => "Sharpen",
             Self::Jumble => "Jumble",
@@ -150,6 +156,7 @@ impl Tool {
             Self::ColorPicker => icons::COLOR_PICKER,
             Self::Spray => icons::SPRAY,
             Self::PaintBucket => icons::PAINT_BUCKET,
+            Self::Gradient => icons::GRADIENT,
             Self::Blur => icons::BLUR,
             Self::Sharpen => icons::SHARPEN,
             Self::Jumble => icons::JUMBLE,
@@ -178,6 +185,7 @@ impl Tool {
             Self::ColorPicker => COLOR_PICKER_KEY,
             Self::Spray => SPRAY_KEY,
             Self::PaintBucket => PAINT_BUCKET_KEY,
+            Self::Gradient => GRADIENT_KEY,
             Self::Blur | Self::Sharpen | Self::Jumble => RETOUCH_KEY,
             Self::Line | Self::Curve => LINE_KEY,
             Self::Rectangle | Self::FilledRectangle | Self::Ellipse | Self::FilledEllipse => RECTANGLE_KEY,
@@ -256,7 +264,16 @@ impl Tool {
                 "Click to fill the pixels of similar colour around the one clicked with the primary colour, or \
                  all those in the image while Contiguous is off. Shift does the other. Right click to fill with \
                  the secondary colour, or to pick the colour of the active layer, as Right click says. With a \
-                 selection, only the selected pixels change."
+                 selection, only the selected pixels change. With Selection controls on, drag a handle of its box \
+                 to resize it, the arrows by its corner to move it, or around it to rotate it."
+            }
+            Self::Gradient => {
+                "Drag to fill the active layer with a gradient from the primary colour where the drag starts to the \
+                 secondary one where it ends, at steps of 15° with Shift. Right drag to go from the secondary colour \
+                 to the primary one, or to pick the colour of the active layer, as Right click says. In \
+                 Transparency mode, it fades the layer out towards the end instead. Escape gives up the drag. With \
+                 a selection, only the selected pixels change. With Selection controls on, drag a handle of its \
+                 box to resize it, the arrows by its corner to move it, or around it to rotate it."
             }
             Self::Blur => {
                 "Drag over the active layer to soften it. Going over the same place again blurs it more. With a \
@@ -307,6 +324,7 @@ impl Tool {
             | Self::ColorPicker
             | Self::Spray
             | Self::PaintBucket
+            | Self::Gradient
             | Self::Blur
             | Self::Sharpen
             | Self::Jumble
@@ -375,9 +393,16 @@ impl Tool {
         matches!(self, Self::Paintbrush | Self::Pencil | Self::Eraser | Self::Spray) || self.retouch().is_some()
     }
 
+    /// Whether the tool can show the selection's controls while it works: its box, to
+    /// work it from its handles, and the button by it that deselects.
+    pub fn has_selection_controls(self) -> bool {
+        self.draws() || matches!(self, Self::PaintBucket | Self::Gradient)
+    }
+
     /// Whether the tool draws in a colour, which the right button can change.
     pub fn draws_in_color(self) -> bool {
-        matches!(self, Self::Paintbrush | Self::Pencil | Self::Spray | Self::PaintBucket) || self.shape().is_some()
+        matches!(self, Self::Paintbrush | Self::Pencil | Self::Spray | Self::PaintBucket | Self::Gradient)
+            || self.shape().is_some()
     }
 
     /// Whether the tool can draw with smooth edges.
@@ -460,8 +485,8 @@ pub struct Tools {
     /// Whether the tools that can draw with smooth edges do.
     pub antialiasing: bool,
     pub right_click: RightClick,
-    /// Whether the drawing tools show the selection's box, to work it from its handles,
-    /// and the button by the selection that deselects.
+    /// Whether the tools that can show the selection's controls do: its box, to work it
+    /// from its handles, and the button by the selection that deselects.
     pub selection_controls: bool,
     /// Whether the Magic Wand and the Paint Bucket only take in the pixels like the one
     /// clicked that reach it through others like it, rather than all those like it in
@@ -471,6 +496,9 @@ pub struct Tools {
     /// for the Magic Wand and the Paint Bucket to take it in.
     pub tolerance: u32,
     pub sample_source: SampleSource,
+    /// How the Gradient's colours spread out, and what it does to the pixels.
+    pub gradient_kind: GradientKind,
+    pub gradient_mode: GradientMode,
     /// What the lassos' outlines shut in where they cross themselves, and the Contour
     /// and the Polygon fill.
     pub overlaps: Overlaps,
@@ -511,6 +539,8 @@ impl Default for Tools {
             contiguous: true,
             tolerance: 50,
             sample_source: SampleSource::default(),
+            gradient_kind: GradientKind::default(),
+            gradient_mode: GradientMode::default(),
             overlaps: Overlaps::default(),
             shape_size: 2,
             last_tools: Vec::new(),
