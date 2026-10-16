@@ -1,7 +1,8 @@
 //! The docks: panels along the edges of the window that hold the sections, each
 //! under a header that folds it away when clicked. Down the left or right side they
 //! go one above the other; along the top or bottom, one beside the other, each with
-//! its own scroll. Only the edges with sections have a dock.
+//! its own scroll. Only the edges with sections shown have a dock. A section hidden
+//! from the View menu keeps its place for when it is shown again.
 //!
 //! A section is moved by dragging its header: into a dock, among its sections, or
 //! anywhere else, to the edge of the drawing area it is let go nearest to. Each dock
@@ -11,7 +12,9 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, Id, LayerId, Order, PanelState, Pos2, Rect, Sense, Stroke, StrokeKind,
     TextStyle, Vec2, collapsing_header::CollapsingState,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::tools::Group;
 
 const DEFAULT_WIDTH: f32 = 240.0;
 const MIN_WIDTH: f32 = 180.0;
@@ -25,7 +28,7 @@ const GRIP_DOTS: (usize, usize) = (2, 3);
 const GRIP_DOT_SPACING: f32 = 4.0;
 const GRIP_DOT_RADIUS: f32 = 1.0;
 /// How thick the line is that marks where a dragged section would go.
-const INSERT_LINE_WIDTH: f32 = 3.0;
+pub const INSERT_LINE_WIDTH: f32 = 3.0;
 
 /// Which edge of the window a dock is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,15 +43,6 @@ impl DockSide {
     /// Also the order the docks are laid out in: the side ones go the full height
     /// of the window, the top and bottom ones between them.
     pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Left => "Left",
-            Self::Right => "Right",
-            Self::Top => "Top",
-            Self::Bottom => "Bottom",
-        }
-    }
 
     /// Whether the dock goes down a side, rather than along an end.
     fn is_side(self) -> bool {
@@ -79,7 +73,8 @@ impl DockSide {
 /// What the docks can hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Section {
-    Tools,
+    /// The tools of a group.
+    Tools(Group),
     Colors,
     History,
     Layers,
@@ -87,11 +82,22 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Self; 5] = [Self::Tools, Self::Colors, Self::History, Self::Layers, Self::Navigator];
+    pub const ALL: [Self; 10] = [
+        Self::Tools(Group::Select),
+        Self::Tools(Group::Navigate),
+        Self::Tools(Group::Paint),
+        Self::Tools(Group::Shapes),
+        Self::Tools(Group::Retouch),
+        Self::Tools(Group::Transform),
+        Self::Colors,
+        Self::History,
+        Self::Layers,
+        Self::Navigator,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Tools => "Tools",
+            Self::Tools(group) => group.name(),
             Self::Colors => "Colors",
             Self::History => "History",
             Self::Layers => "Layers",
@@ -105,20 +111,52 @@ impl Section {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DockLayout {
+    #[serde(deserialize_with = "saved_sections")]
     left: Vec<Section>,
+    #[serde(deserialize_with = "saved_sections")]
     right: Vec<Section>,
+    #[serde(deserialize_with = "saved_sections")]
     top: Vec<Section>,
+    #[serde(deserialize_with = "saved_sections")]
     bottom: Vec<Section>,
+    /// The sections turned off from the View menu, which keep their place in their dock.
+    #[serde(deserialize_with = "saved_sections")]
+    hidden: Vec<Section>,
     sizes: DockSizes,
+}
+
+/// A section as saved, or the name of one there is no longer.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedSection {
+    Section(Section),
+    Gone(String),
+}
+
+/// The sections saved for a dock. The one Tools section that held every tool is now
+/// a section for each group, in its place, and the other sections no longer made
+/// are left out.
+fn saved_sections<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Section>, D::Error> {
+    let saved = Vec::<SavedSection>::deserialize(deserializer)?;
+    Ok(saved
+        .into_iter()
+        .flat_map(|section| match section {
+            SavedSection::Section(section) => vec![section],
+            SavedSection::Gone(name) if name == "Tools" => Group::ALL.map(Section::Tools).to_vec(),
+            SavedSection::Gone(_) => Vec::new(),
+        })
+        .collect())
 }
 
 impl Default for DockLayout {
     fn default() -> Self {
         Self {
-            left: Section::ALL.to_vec(),
-            right: Vec::new(),
+            // The tools and the colours on the left, what is about the image on the right.
+            left: Group::ALL.into_iter().map(Section::Tools).chain([Section::Colors]).collect(),
+            right: vec![Section::History, Section::Navigator, Section::Layers],
             top: Vec::new(),
             bottom: Vec::new(),
+            hidden: Vec::new(),
             sizes: DockSizes::default(),
         }
     }
@@ -196,6 +234,26 @@ impl DockLayout {
         self.left.extend(missing);
     }
 
+    pub fn is_shown(&self, section: Section) -> bool {
+        !self.hidden.contains(&section)
+    }
+
+    pub fn set_shown(&mut self, section: Section, shown: bool) {
+        self.hidden.retain(|&other| other != section);
+        if !shown {
+            self.hidden.push(section);
+        }
+    }
+
+    pub fn show_all(&mut self) {
+        self.hidden.clear();
+    }
+
+    /// The sections shown in the dock on `side`.
+    fn shown_sections(&self, side: DockSide) -> Vec<Section> {
+        self.sections(side).iter().copied().filter(|&section| self.is_shown(section)).collect()
+    }
+
     /// Takes the section out of its dock and puts it at `index` among the sections of
     /// the dock on `side`, as they are without it.
     pub fn move_section(&mut self, section: Section, side: DockSide, index: usize) {
@@ -204,15 +262,6 @@ impl DockLayout {
         }
         let sections = self.sections_mut(side);
         sections.insert(index.min(sections.len()), section);
-    }
-
-    /// Puts all the sections in the dock on `side`, in the order of the docks they come from.
-    pub fn move_all(&mut self, side: DockSide) {
-        let all: Vec<Section> = DockSide::ALL.into_iter().flat_map(|side| self.sections(side).to_vec()).collect();
-        for side in DockSide::ALL {
-            self.sections_mut(side).clear();
-        }
-        *self.sections_mut(side) = all;
     }
 }
 
@@ -236,7 +285,7 @@ pub fn show(
     let mut placement = Placement::default();
     let mut resized: Option<DockLayout> = None;
     for side in DockSide::ALL {
-        let sections = layout.sections(side);
+        let sections = layout.shown_sections(side);
         if sections.is_empty() {
             continue;
         }
@@ -249,7 +298,7 @@ pub fn show(
         };
         let min_size = if side.is_side() { MIN_WIDTH } else { MIN_HEIGHT };
         let mut add_sections = |ui: &mut egui::Ui| {
-            for &section in sections {
+            for &section in &sections {
                 show_section(ui, side, section, &mut placement, |ui| add_section(ui, section));
             }
         };
@@ -289,23 +338,26 @@ fn drag_section(ui: &egui::Ui, layout: &DockLayout, placement: &Placement) -> Op
         .iter()
         .find(|(_, rect)| rect.contains(pointer))
         .map_or_else(|| nearest_edge(drawing_area, pointer), |&(side, _)| side);
-    // The other sections of that dock, where they are.
-    let others: Vec<Rect> = placement
+    // The other sections shown in that dock, where they are.
+    let (shown, others): (Vec<Section>, Vec<Rect>) = placement
         .sections
         .iter()
         .filter(|&&(other_side, other, _)| other_side == side && other != section)
-        .map(|&(_, _, rect)| rect)
-        .collect();
+        .map(|&(_, other, rect)| (other, rect))
+        .unzip();
     let index = others.iter().filter(|rect| side.along(rect.center()) < side.along(pointer)).count();
 
     if dropped {
+        // Before the shown section it goes before, among the hidden ones as well.
+        let all: Vec<Section> = layout.sections(side).iter().copied().filter(|&other| other != section).collect();
+        let index = shown.get(index).map_or(all.len(), |after| all.iter().position(|other| other == after).unwrap());
         let mut moved = layout.clone();
         moved.move_section(section, side, index);
         return (moved != *layout).then_some(moved);
     }
     let dock = placement.docks.iter().find(|&&(other, _)| other == side).map(|&(_, rect)| rect);
     mark_target(ui, side, dock, layout.size(side), drawing_area, &others, index);
-    show_dragged_title(ui.ctx(), section, pointer);
+    show_dragged_title(ui.ctx(), section.title(), pointer);
     None
 }
 
@@ -431,14 +483,14 @@ fn mark_target(
     }
 }
 
-/// The title of the dragged section, by the pointer.
-fn show_dragged_title(ctx: &egui::Context, section: Section, pointer: Pos2) {
+/// The title of what is being dragged, by the pointer.
+pub fn show_dragged_title(ctx: &egui::Context, title: &str, pointer: Pos2) {
     egui::Area::new(Id::new("dock_dragged_title"))
         .order(Order::Tooltip)
         .fixed_pos(pointer + Vec2::splat(12.0))
         .interactable(false)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(section.title()));
+            egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(title));
         });
 }
 
@@ -458,23 +510,28 @@ mod tests {
     use super::*;
     use Section::*;
 
+    const SELECT: Section = Tools(Group::Select);
+
     #[test]
     fn move_section_within_and_between_docks() {
-        let mut layout = DockLayout::default();
+        let mut layout = DockLayout { left: vec![SELECT, Colors, History, Layers, Navigator], ..DockLayout::default() };
         layout.move_section(Layers, DockSide::Left, 0);
-        assert_eq!(layout.sections(DockSide::Left), [Layers, Tools, Colors, History, Navigator]);
+        assert_eq!(layout.sections(DockSide::Left), [Layers, SELECT, Colors, History, Navigator]);
         layout.move_section(Colors, DockSide::Bottom, 5);
-        assert_eq!(layout.sections(DockSide::Left), [Layers, Tools, History, Navigator]);
+        assert_eq!(layout.sections(DockSide::Left), [Layers, SELECT, History, Navigator]);
         assert_eq!(layout.sections(DockSide::Bottom), [Colors]);
-        layout.move_section(Tools, DockSide::Bottom, 0);
-        assert_eq!(layout.sections(DockSide::Bottom), [Tools, Colors]);
+        layout.move_section(SELECT, DockSide::Bottom, 0);
+        assert_eq!(layout.sections(DockSide::Bottom), [SELECT, Colors]);
     }
 
     #[test]
     fn normalize_has_each_section_once() {
-        let mut layout = DockLayout { left: vec![Colors], right: vec![Colors, Layers], top: vec![], bottom: vec![], ..DockLayout::default() };
+        let mut layout = DockLayout { left: vec![Colors], right: vec![Colors, Layers], ..DockLayout::default() };
         layout.normalize();
-        assert_eq!(layout.sections(DockSide::Left), [Colors, Tools, History, Navigator]);
+        let tools = Group::ALL.map(Tools);
+        assert_eq!(layout.sections(DockSide::Left)[0], Colors);
+        assert_eq!(layout.sections(DockSide::Left)[1..7], tools);
+        assert_eq!(layout.sections(DockSide::Left)[7..], [History, Navigator]);
         assert_eq!(layout.sections(DockSide::Right), [Layers]);
     }
 
@@ -485,5 +542,27 @@ mod tests {
         layout.set_size(DockSide::Right, 300.0);
         let text = toml::to_string(&layout).unwrap();
         assert_eq!(toml::from_str::<DockLayout>(&text).unwrap(), layout);
+    }
+
+    #[test]
+    fn saved_tools_section_becomes_the_groups() {
+        let text = "left = [\"Colors\"]\nright = [\"Tools\", \"Gone\", \"Layers\"]\n";
+        let layout: DockLayout = toml::from_str(text).unwrap();
+        assert_eq!(layout.sections(DockSide::Left), [Colors]);
+        let mut right = Group::ALL.map(Tools).to_vec();
+        right.push(Layers);
+        assert_eq!(layout.sections(DockSide::Right), right);
+    }
+
+    #[test]
+    fn hidden_sections_keep_their_place() {
+        let mut layout = DockLayout { left: vec![Colors, History, Layers], ..DockLayout::default() };
+        layout.set_shown(History, false);
+        assert_eq!(layout.shown_sections(DockSide::Left), [Colors, Layers]);
+        assert_eq!(layout.sections(DockSide::Left), [Colors, History, Layers]);
+        let text = toml::to_string(&layout).unwrap();
+        assert_eq!(toml::from_str::<DockLayout>(&text).unwrap(), layout);
+        layout.set_shown(History, true);
+        assert_eq!(layout.shown_sections(DockSide::Left), [Colors, History, Layers]);
     }
 }

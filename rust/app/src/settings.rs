@@ -4,7 +4,7 @@ use std::{fs, path::{Path, PathBuf}};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{checkerboard::Checkerboard, dock::DockLayout, grid::Grid, tools::RightClick};
+use crate::{checkerboard::Checkerboard, dock::DockLayout, grid::Grid, tools::RightClick, tools_panel::ToolOrder};
 
 const MAX_RECENT_FILES: usize = 10;
 
@@ -24,6 +24,8 @@ pub struct Settings {
     checkerboard: Checkerboard,
     /// Which dock each section is in.
     dock: DockLayout,
+    /// The order of the tools within their group.
+    tool_order: ToolOrder,
 }
 
 impl Default for Settings {
@@ -36,6 +38,7 @@ impl Default for Settings {
             grid: Grid::default(),
             checkerboard: Checkerboard::default(),
             dock: DockLayout::default(),
+            tool_order: ToolOrder::default(),
         }
     }
 }
@@ -48,6 +51,7 @@ impl Settings {
             .and_then(|text| toml::from_str(&text).ok())
             .unwrap_or_default();
         settings.dock.normalize();
+        settings.tool_order.normalize();
         settings
     }
 
@@ -123,6 +127,15 @@ impl Settings {
 
     pub fn set_dock(&mut self, dock: DockLayout) {
         self.dock = dock;
+        self.save();
+    }
+
+    pub fn tool_order(&self) -> &ToolOrder {
+        &self.tool_order
+    }
+
+    pub fn set_tool_order(&mut self, order: ToolOrder) {
+        self.tool_order = order;
         self.save();
     }
 

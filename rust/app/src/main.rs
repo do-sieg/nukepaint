@@ -39,7 +39,7 @@ use std::{
 use adjustment_dialog::FilterKind;
 use adjustments::{AdjustmentKind, LastSettings};
 use canvas::{Drawing, GradientDrag, WandClick};
-use dock::{DockLayout, DockSide, Section};
+use dock::{DockLayout, Section};
 use effects::EffectKind;
 use eframe::egui::{self, ColorImage, Event, Key, KeyboardShortcut, Modifiers, TextureHandle, TextureOptions};
 use checkerboard::Checkerboard;
@@ -966,12 +966,19 @@ impl App {
                 ui.separator();
             }
             ui.menu_button("Dock", |ui| {
-                for side in DockSide::ALL {
-                    if ui.button(format!("All Sections on the {}", side.name())).clicked() {
+                // Each panel, ticked while it is shown.
+                for section in Section::ALL {
+                    let mut shown = self.settings.dock().is_shown(section);
+                    if ui.checkbox(&mut shown, section.title()).changed() {
                         let mut dock = self.settings.dock().clone();
-                        dock.move_all(side);
+                        dock.set_shown(section, shown);
                         self.settings.set_dock(dock);
                     }
+                }
+                if ui.button("Show All").clicked() {
+                    let mut dock = self.settings.dock().clone();
+                    dock.show_all();
+                    self.settings.set_dock(dock);
                 }
                 ui.separator();
                 if ui.button("Reset").clicked() {
@@ -2197,15 +2204,16 @@ impl eframe::App for App {
 
         // There is nothing for the dock to work on without an image.
         if let Some(current) = self.current {
-            let (mut tool_clicked, mut history_action, mut layers_action, mut navigated) = (None, None, None, None);
+            let (mut tools_action, mut history_action, mut layers_action, mut navigated) = (None, None, None, None);
             let tool = self.tools.tool;
             let busy = self.is_dragging() || self.has_dialog();
             let image = &self.images[current];
             let (checker, icons) = (&self.checker, &mut self.icons);
             let (colors, right_click) = (&mut self.tools.colors, &mut self.tools.right_click);
             let right_click_before = *right_click;
+            let tool_order = self.settings.tool_order();
             let moved = dock::show(ui, self.settings.dock(), |ui, section| match section {
-                Section::Tools => tool_clicked = tools_panel::show(ui, icons, tool),
+                Section::Tools(group) => tools_action = tools_panel::show(ui, icons, tool, tool_order, group),
                 Section::Colors => colors.show(ui, right_click),
                 Section::History => {
                     let document = &image.document;
@@ -2223,8 +2231,10 @@ impl eframe::App for App {
             if let Some(dock) = moved {
                 self.settings.set_dock(dock);
             }
-            if let Some(tool) = tool_clicked {
-                self.set_tool(tool);
+            match tools_action {
+                Some(tools_panel::Action::Select(tool)) => self.set_tool(tool),
+                Some(tools_panel::Action::Reorder(order)) => self.settings.set_tool_order(order),
+                None => {}
             }
             if let Some(index) = history_action {
                 self.go_to_step(&ctx, index);

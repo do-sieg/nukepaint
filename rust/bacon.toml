@@ -1,0 +1,18 @@
+# Jobs for bacon (https://dystroy.org/bacon/), run from this folder.
+# `bacon` checks with clippy as files change; `bacon app` runs the app and
+# restarts it on each change.
+
+default_job = "clippy"
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--all-targets"]
+need_stdout = false
+
+# The app keeps running, so it is stopped and built again on each change rather
+# than waited for, as bacon's own run job does.
+[jobs.app]
+command = ["cargo", "run", "-p", "power-paint"]
+need_stdout = true
+allow_warnings = true
+background = false
+on_change_strategy = "kill_then_restart"

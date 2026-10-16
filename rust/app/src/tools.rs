@@ -51,7 +51,34 @@ pub const RECTANGLE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NON
 /// Goes from the Contour to the Polygon and back.
 pub const CONTOUR_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::O);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The kinds of tools, each in a dock section of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Group {
+    Select,
+    Navigate,
+    Paint,
+    Shapes,
+    Retouch,
+    Transform,
+}
+
+impl Group {
+    pub const ALL: [Self; 6] = [Self::Select, Self::Navigate, Self::Paint, Self::Shapes, Self::Retouch, Self::Transform];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Select => "Select Tools",
+            Self::Transform => "Transform Tools",
+            Self::Paint => "Paint Tools",
+            Self::Retouch => "Retouch Tools",
+            Self::Shapes => "Shape Tools",
+            Self::Navigate => "Navigation Tools",
+        }
+    }
+}
+
+/// By group, in the order their sections start with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tool {
     #[default]
     RectangleSelect,
@@ -59,21 +86,15 @@ pub enum Tool {
     LassoSelect,
     PolygonSelect,
     MagicWand,
-    MoveSelection,
-    Shear,
-    Perspective,
     Zoom,
     Pan,
     Paintbrush,
     Pencil,
     Eraser,
-    ColorPicker,
     Spray,
     PaintBucket,
     Gradient,
-    Blur,
-    Sharpen,
-    Jumble,
+    ColorPicker,
     Line,
     Curve,
     Rectangle,
@@ -82,6 +103,12 @@ pub enum Tool {
     FilledEllipse,
     Contour,
     Polygon,
+    Blur,
+    Sharpen,
+    Jumble,
+    MoveSelection,
+    Shear,
+    Perspective,
 }
 
 impl Tool {
@@ -91,21 +118,15 @@ impl Tool {
         Self::LassoSelect,
         Self::PolygonSelect,
         Self::MagicWand,
-        Self::MoveSelection,
-        Self::Shear,
-        Self::Perspective,
         Self::Zoom,
         Self::Pan,
         Self::Paintbrush,
         Self::Pencil,
         Self::Eraser,
-        Self::ColorPicker,
         Self::Spray,
         Self::PaintBucket,
         Self::Gradient,
-        Self::Blur,
-        Self::Sharpen,
-        Self::Jumble,
+        Self::ColorPicker,
         Self::Line,
         Self::Curve,
         Self::Rectangle,
@@ -114,6 +135,12 @@ impl Tool {
         Self::FilledEllipse,
         Self::Contour,
         Self::Polygon,
+        Self::Blur,
+        Self::Sharpen,
+        Self::Jumble,
+        Self::MoveSelection,
+        Self::Shear,
+        Self::Perspective,
     ];
 
     pub fn name(self) -> &'static str {
@@ -146,6 +173,32 @@ impl Tool {
             Self::FilledEllipse => "Filled Ellipse",
             Self::Contour => "Contour",
             Self::Polygon => "Polygon",
+        }
+    }
+
+    pub fn group(self) -> Group {
+        match self {
+            Self::RectangleSelect | Self::EllipseSelect | Self::LassoSelect | Self::PolygonSelect | Self::MagicWand => {
+                Group::Select
+            }
+            Self::MoveSelection | Self::Shear | Self::Perspective => Group::Transform,
+            Self::Paintbrush
+            | Self::Pencil
+            | Self::Eraser
+            | Self::Spray
+            | Self::PaintBucket
+            | Self::Gradient
+            | Self::ColorPicker => Group::Paint,
+            Self::Blur | Self::Sharpen | Self::Jumble => Group::Retouch,
+            Self::Line
+            | Self::Curve
+            | Self::Rectangle
+            | Self::FilledRectangle
+            | Self::Ellipse
+            | Self::FilledEllipse
+            | Self::Contour
+            | Self::Polygon => Group::Shapes,
+            Self::Zoom | Self::Pan => Group::Navigate,
         }
     }
 
