@@ -4,7 +4,7 @@
 
 use image::{Rgba, RgbaImage};
 
-use crate::{Affine, Interpolation, PixelRect, Projective, Selection, copy_selected, erase_selected};
+use crate::{Affine, Interpolation, PixelRect, Projective, Selection, SelectionMask, copy_selected, erase_selected};
 
 pub struct FloatingPixels {
     /// Where on the layer the pixels were lifted from.
@@ -21,6 +21,29 @@ impl FloatingPixels {
         let (area, pixels) = copy_selected(layer, selection)?;
         let mut base = layer.clone();
         erase_selected(&mut base, selection);
+        Some(Self { area, pixels, base })
+    }
+
+    /// Lifts the pixels of the layer that `mask` holds, or all of them without one, if
+    /// any. The mask must be as large as the layer.
+    pub fn lift_masked(layer: &RgbaImage, mask: Option<&SelectionMask>) -> Option<Self> {
+        let (width, height) = layer.dimensions();
+        let whole = PixelRect { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+        let area = match mask {
+            Some(mask) => mask.bounds()?,
+            None if whole.is_empty() => return None,
+            None => whole,
+        };
+        let mut pixels = RgbaImage::new(area.width() as u32, area.height() as u32);
+        let mut base = layer.clone();
+        for y in area.top as u32..area.bottom as u32 {
+            for x in area.left as u32..area.right as u32 {
+                if mask.is_none_or(|mask| mask.contains(x, y)) {
+                    pixels.put_pixel(x - area.left as u32, y - area.top as u32, *layer.get_pixel(x, y));
+                    base.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
         Some(Self { area, pixels, base })
     }
 

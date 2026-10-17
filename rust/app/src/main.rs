@@ -47,8 +47,8 @@ use clipboard::Clipboard;
 use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
-    Affine, Document, FloatingPixels, GradientKind, GradientMode, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
-    RgbaImage, SAVE_EXTENSIONS, SelectionMode, is_savable, thumbnail,
+    Affine, Document, Effect, FloatingPixels, GradientKind, GradientMode, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
+    RgbaImage, SAVE_EXTENSIONS, SelectionMask, SelectionMode, Turn, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
 use lasso::{Lasso, LassoKind, PolygonEdit};
@@ -1181,6 +1181,11 @@ impl App {
                 self.edit_layer_properties(current, self.images[current].document.active_layer);
                 return;
             }
+            LayerCommand::RotateZoom | LayerCommand::Transform3d => {
+                let kind = if command == LayerCommand::RotateZoom { EffectKind::RotateZoom } else { EffectKind::Transform3d };
+                self.adjust(ctx, FilterKind::Effect(kind));
+                return;
+            }
             LayerCommand::Resize => Some(image_size::Kind::Resize),
             LayerCommand::CanvasSize => Some(image_size::Kind::CanvasSize),
             _ => None,
@@ -1449,6 +1454,12 @@ impl App {
                     && preview != layer.pixels
                 {
                     layer.pixels = preview;
+                    // The selection goes along with the pixels it holds.
+                    if let FilterKind::Effect(kind) = dialog.kind
+                        && let Effect::Turn { turn, .. } = kind.effect(&dialog.values, &image.document.layers)
+                    {
+                        turn_selection(&mut image.document, dialog.mask.as_ref(), &turn);
+                    }
                     image.document.commit(dialog.kind.name(), None);
                 }
                 image.refresh(ctx);
@@ -2086,6 +2097,21 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
         }
+    }
+}
+
+/// Turns the selection as `turn` turned the pixels `mask` holds, or all of them, about
+/// the middle of the rectangle around them, unless that takes part of them behind the eye.
+fn turn_selection(document: &mut Document, mask: Option<&SelectionMask>, turn: &Turn) {
+    let (width, height) = document.size();
+    let whole = PixelRect { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+    let Some(area) = mask.map_or(Some(whole), SelectionMask::bounds) else {
+        return;
+    };
+    let map = turn.map(area);
+    let corners = [(area.left, area.top), (area.right, area.top), (area.right, area.bottom), (area.left, area.bottom)];
+    if !document.selection.is_empty() && corners.iter().all(|&(x, y)| map.w((x as f64, y as f64)) > 1e-9) {
+        document.selection = document.selection.transformed(map);
     }
 }
 

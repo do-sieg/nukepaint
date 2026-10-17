@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use image::{RgbaImage, imageops};
 
 use crate::{
-    Adjustment, Affine, BlendMode, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
+    Adjustment, Affine, BlendMode, FloatingPixels, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
     SelectionMode, Step, blend_layer, composite, composite_area, copy_selected, erase_selected, history::History,
     adjust, load_image, resize, save_image,
 };
@@ -319,6 +319,24 @@ impl Document {
         }
     }
 
+    /// Mirrors the active layer's pixels that `area` holds, along either axis or both,
+    /// about the middle of the rectangle around them on the layer, and the selection
+    /// with them. Returns whether any of `area` was on the layer.
+    pub fn flip_selected(&mut self, area: &Selection, horizontally: bool, vertically: bool) -> bool {
+        let Some(floating) = FloatingPixels::lift(&self.active().pixels, area) else {
+            return false;
+        };
+        let PixelRect { left, top, right, bottom } = floating.area();
+        let mirror = |flip: bool, from: i32, to: i32| if flip { (-1.0, (from + to) as f64) } else { (1.0, 0.0) };
+        let ((xx, dx), (yy, dy)) = (mirror(horizontally, left, right), mirror(vertically, top, bottom));
+        let map = Affine { xx, yy, dx, dy, ..Affine::IDENTITY };
+        self.active_mut().pixels = floating.place(map, Interpolation::Nearest);
+        if !self.selection.is_empty() {
+            self.selection = self.selection.transformed(map);
+        }
+        true
+    }
+
     /// Changes the colours of the active layer's selected pixels, or of all of them
     /// while nothing is selected, as the adjustment does. Returns whether any changed.
     pub fn adjust(&mut self, adjustment: &Adjustment) -> bool {
@@ -632,6 +650,25 @@ mod tests {
         document.flip_image(false, true);
         assert!(document.layers.iter().all(|layer| layer.pixels[(3, 1)] == Rgba([0, 0, 255, 255])));
         assert!(document.selection.contains(3, 1) && !document.selection.contains(3, 0));
+    }
+
+    #[test]
+    fn flipping_the_selected_pixels_about_their_middle() {
+        let blue = Rgba([0, 0, 255, 255]);
+        let mut pixels = RgbaImage::new(6, 4);
+        pixels.put_pixel(1, 1, blue);
+        let mut document = Document::new(pixels);
+        document.selection = Selection::rect(PixelRect { left: 1, top: 1, right: 4, bottom: 3 });
+        let area = document.selection.clone();
+        assert!(document.flip_selected(&area, true, false));
+        assert_eq!(document.active().pixels[(3, 1)], blue);
+        assert_eq!(document.active().pixels[(1, 1)][3], 0);
+        // The selection stays on the same rectangle, mirrored onto itself.
+        assert_eq!(document.selection.bounds(), area.bounds());
+        assert!(document.flip_selected(&area, false, true));
+        assert_eq!(document.active().pixels[(3, 2)], blue);
+        let off = Selection::rect(PixelRect { left: 10, top: 10, right: 12, bottom: 12 });
+        assert!(!document.flip_selected(&off, true, false));
     }
 
     #[test]

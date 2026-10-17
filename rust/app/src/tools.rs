@@ -31,7 +31,7 @@ macro_rules! shape_help {
 /// Goes from one selection tool to the next.
 pub const SELECT_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::S);
 pub const MOVE_SELECTION_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::M);
-/// Goes from the Shear to the Perspective and back.
+/// Goes from the Shear to the Perspective and the Flip.
 pub const TRANSFORM_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::T);
 pub const ZOOM_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Z);
 pub const PAN_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::H);
@@ -109,10 +109,11 @@ pub enum Tool {
     MoveSelection,
     Shear,
     Perspective,
+    Flip,
 }
 
 impl Tool {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::LassoSelect,
@@ -141,6 +142,7 @@ impl Tool {
         Self::MoveSelection,
         Self::Shear,
         Self::Perspective,
+        Self::Flip,
     ];
 
     pub fn name(self) -> &'static str {
@@ -153,6 +155,7 @@ impl Tool {
             Self::MoveSelection => "Move Selection",
             Self::Shear => "Shear",
             Self::Perspective => "Perspective",
+            Self::Flip => "Flip",
             Self::Zoom => "Zoom",
             Self::Pan => "Pan",
             Self::Paintbrush => "Paintbrush",
@@ -181,7 +184,7 @@ impl Tool {
             Self::RectangleSelect | Self::EllipseSelect | Self::LassoSelect | Self::PolygonSelect | Self::MagicWand => {
                 Group::Select
             }
-            Self::MoveSelection | Self::Shear | Self::Perspective => Group::Transform,
+            Self::MoveSelection | Self::Shear | Self::Perspective | Self::Flip => Group::Transform,
             Self::Paintbrush
             | Self::Pencil
             | Self::Eraser
@@ -212,6 +215,7 @@ impl Tool {
             Self::MoveSelection => icons::MOVE_SELECTION,
             Self::Shear => icons::SHEAR,
             Self::Perspective => icons::PERSPECTIVE,
+            Self::Flip => icons::FLIP,
             Self::Zoom => icons::ZOOM,
             Self::Pan => icons::PAN,
             Self::Paintbrush => icons::PAINTBRUSH,
@@ -241,7 +245,7 @@ impl Tool {
                 SELECT_KEY
             }
             Self::MoveSelection => MOVE_SELECTION_KEY,
-            Self::Shear | Self::Perspective => TRANSFORM_KEY,
+            Self::Shear | Self::Perspective | Self::Flip => TRANSFORM_KEY,
             Self::Zoom => ZOOM_KEY,
             Self::Pan => PAN_KEY,
             Self::Paintbrush => PAINTBRUSH_KEY,
@@ -304,6 +308,11 @@ impl Tool {
                 "Drag a corner of the selection's box to move it alone, which tilts the selected pixels, or all \
                  the layer's if nothing is selected, as if seen at an angle. The corners cannot fold over each \
                  other. Drag inside the box to move it, or the arrow keys to nudge it."
+            }
+            Self::Flip => {
+                "Click to mirror the selected pixels, or all the layer's if nothing is selected, from left to \
+                 right about their middle, or right click to mirror them upside down. Shift does the other. \
+                 The line shows the axis a click mirrors them about."
             }
             Self::Zoom => "Click to zoom in, right click to zoom out, or drag to frame what to zoom in on.",
             Self::Pan => {
@@ -395,6 +404,7 @@ impl Tool {
             | Self::MoveSelection
             | Self::Shear
             | Self::Perspective
+            | Self::Flip
             | Self::Zoom
             | Self::Pan
             | Self::Paintbrush
@@ -793,5 +803,7 @@ mod tests {
         assert_eq!(tools.next_tool(TRANSFORM_KEY), Tool::Shear);
         tools.set_tool(Tool::Shear);
         assert_eq!(tools.next_tool(TRANSFORM_KEY), Tool::Perspective);
+        tools.set_tool(Tool::Perspective);
+        assert_eq!(tools.next_tool(TRANSFORM_KEY), Tool::Flip);
     }
 }

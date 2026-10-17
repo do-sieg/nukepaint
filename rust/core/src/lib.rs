@@ -19,6 +19,7 @@ mod selection;
 mod shape;
 mod spray;
 mod stroke;
+mod turn;
 mod wrap;
 
 pub use adjustment::{Adjustment, Curves, adjust, sample_curve};
@@ -41,3 +42,4 @@ pub use selection::{Bounds, Frame, Overlaps, PixelRect, Selection, SelectionMode
 pub use shape::{Shape, ShapeCanvas, ShapeKind, ShapeStyle};
 pub use spray::{MAX_SPRAY_SIZE, Spray};
 pub use stroke::{BrushStroke, Ink, MAX_TIP_SIZE, hard_tip};
+pub use turn::{Turn, turn_pixels};

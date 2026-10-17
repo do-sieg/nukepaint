@@ -500,7 +500,8 @@ impl DragKind {
     pub fn cursor(self, angle: f64) -> CursorIcon {
         match self {
             Self::Move => CursorIcon::Move,
-            Self::Pivot | Self::Corner(_) => CursorIcon::Crosshair,
+            Self::Pivot => CursorIcon::Crosshair,
+            Self::Corner(_) => CursorIcon::Grab,
             // There is no turning arrow: this stands for one, which the canvas draws.
             Self::Rotate => CursorIcon::Alias,
             Self::Resize(_) | Self::Edge(_) => {

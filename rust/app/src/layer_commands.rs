@@ -22,6 +22,8 @@ pub enum LayerCommand {
     FlipHorizontal,
     FlipVertical,
     Rotate180,
+    RotateZoom,
+    Transform3d,
     GoToTop,
     GoToAbove,
     GoToBelow,
@@ -39,7 +41,7 @@ impl LayerCommand {
     /// The Layers menu, in groups that separators keep apart.
     pub const MENU: [&[Self]; 5] = [
         &[Add, Delete, Duplicate, MergeDown],
-        &[FlipHorizontal, FlipVertical, Rotate180],
+        &[FlipHorizontal, FlipVertical, Rotate180, RotateZoom, Transform3d],
         &[GoToTop, GoToAbove, GoToBelow, GoToBottom],
         &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
         &[Properties],
@@ -54,7 +56,7 @@ impl LayerCommand {
     /// the commands that go to another layer, and Flatten.
     pub const CONTEXT_MENU: [&[Self]; 4] = [
         &[Add, Delete, Duplicate, MergeDown, Flatten],
-        &[FlipHorizontal, FlipVertical, Rotate180],
+        &[FlipHorizontal, FlipVertical, Rotate180, RotateZoom, Transform3d],
         &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
         &[Properties],
     ];
@@ -74,6 +76,8 @@ impl LayerCommand {
             FlipImageHorizontal | FlipHorizontal => "Flip Horizontal",
             FlipImageVertical | FlipVertical => "Flip Vertical",
             RotateImage180 | Rotate180 => "Rotate 180°",
+            RotateZoom => "Rotate / Zoom…",
+            Transform3d => "3D Transform…",
             GoToTop => "Go to Top Layer",
             GoToAbove => "Go to Layer Above",
             GoToBelow => "Go to Layer Below",
@@ -147,13 +151,13 @@ impl LayerCommand {
             Flatten => !document.is_flat(),
             GoToTop | GoToAbove | MoveToTop | MoveUp => has_above,
             MergeDown | GoToBottom | GoToBelow | MoveToBottom | MoveDown => has_below,
-            Add | Duplicate | Resize | CanvasSize | Properties => true,
+            Add | Duplicate | Resize | CanvasSize | RotateZoom | Transform3d | Properties => true,
             FlipImageHorizontal | FlipImageVertical | RotateImage180 | FlipHorizontal | FlipVertical | Rotate180 => true,
         }
     }
 
     /// Runs the command on the document, but for those that ask the user first:
-    /// Resize, Canvas Size and Properties. Returns whether the layers changed, rather
+    /// Resize, Canvas Size, Rotate / Zoom, 3D Transform and Properties. Returns whether the layers changed, rather
     /// than only which one is active.
     pub fn run(self, document: &mut Document) -> bool {
         let active = document.active_layer;
@@ -185,7 +189,7 @@ impl LayerCommand {
             MoveUp => return document.move_layer(active, active + 1),
             MoveDown => return document.move_layer(active, active.saturating_sub(1)),
             MoveToBottom => return document.move_layer(active, 0),
-            Resize | CanvasSize | Properties => return false,
+            Resize | CanvasSize | RotateZoom | Transform3d | Properties => return false,
         }
         true
     }

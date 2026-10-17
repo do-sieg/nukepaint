@@ -20,7 +20,7 @@ use std::{
 
 use image::{Rgba, RgbaImage};
 
-use crate::{PixelRect, SelectionMask};
+use crate::{Interpolation, PixelRect, SelectionMask, Turn, turn_pixels};
 
 /// Fewest pixels worth sharing between threads.
 const PARALLEL_PIXELS: usize = 1 << 14;
@@ -90,6 +90,10 @@ pub enum Effect {
     /// within the rectangle around the selected ones, or the whole image, filling where
     /// they move away from as `edges` says.
     Offset { x: i32, y: i32, edges: OffsetEdges },
+    /// Turns, zooms and moves the selected pixels, or all of them, as the turn says,
+    /// about the middle of the rectangle around them, redrawing them as `interpolation`
+    /// says. Unlike the other effects, it may carry them out of the selection.
+    Turn { turn: Turn, interpolation: Interpolation },
     /// Lays the image on woven canvas, lit from `azimuth`, which stands out by `depth`.
     ApplyCanvas { azimuth: f32, depth: f32 },
     /// Darkens what is darker than around it, `radius` away, as the outlines of a
@@ -197,6 +201,7 @@ pub fn apply_effect(pixels: &RgbaImage, effect: &Effect, mask: Option<&Selection
     let mut result = match *effect {
         Effect::MedianBlur { radius, percentile } => median(pixels, radius, percentile / 100.0, stop)?,
         Effect::Offset { x, y, edges } => offset(pixels, x, y, edges, mask),
+        Effect::Turn { turn, interpolation } => return Some(turn_pixels(pixels, mask, &turn, interpolation)),
         Effect::TileableBlur { radius } if radius < 1.0 => return Some(pixels.clone()),
         Effect::TileableBlur { radius } => tileable(pixels, radius, mask, stop)?,
         _ => match render(&Buffer::premultiplied(pixels), effect, stop)? {
@@ -382,7 +387,7 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
             })
         }
         Effect::Sharpen { amount, .. } if amount.abs() < f32::EPSILON => return Some(None),
-        Effect::Offset { .. } => return Some(None),
+        Effect::Offset { .. } | Effect::Turn { .. } => return Some(None),
         Effect::ApplyCanvas { .. }
         | Effect::Cartoon { .. }
         | Effect::Clothify { .. }

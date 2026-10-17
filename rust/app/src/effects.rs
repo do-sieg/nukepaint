@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use power_paint_core::{Effect, FocusShape, Layer, OffsetEdges};
+use power_paint_core::{Effect, FocusShape, Interpolation, Layer, OffsetEdges, Turn};
 
 use crate::adjustment_dialog::{Setting, check, choice, layer, slider};
 
@@ -39,6 +39,8 @@ pub enum EffectKind {
     ZoomBlur,
     Sharpen,
     Offset,
+    RotateZoom,
+    Transform3d,
 }
 
 use EffectKind::*;
@@ -151,6 +153,25 @@ const OFFSET: [Setting; 3] = [
     slider("Vertical:", -100_000.0, 100_000.0, 1.0, 0.0, " px"),
     slider("Edges:", 0.0, 2.0, 1.0, 0.0, ""),
 ];
+/// The names of [`Interpolation::ALL`].
+const RESAMPLINGS: [&str; 4] = ["Nearest Neighbor", "Bilinear", "Bicubic", "Lanczos"];
+const ROTATE_ZOOM: [Setting; 5] = [
+    slider("Angle:", -180.0, 180.0, 1.0, 0.0, "°"),
+    slider("Zoom:", 1.0, 1000.0, 1.0, 100.0, " %"),
+    slider("Pan X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Pan Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+    choice("Resampling:", &RESAMPLINGS, 1),
+];
+const TRANSFORM_3D: [Setting; 8] = [
+    slider("Rotate X:", -180.0, 180.0, 1.0, 0.0, "°"),
+    slider("Rotate Y:", -180.0, 180.0, 1.0, 0.0, "°"),
+    slider("Rotate Z:", -180.0, 180.0, 1.0, 0.0, "°"),
+    slider("Field of View:", 1.0, 170.0, 1.0, 60.0, "°"),
+    slider("Zoom:", 1.0, 1000.0, 1.0, 100.0, " %"),
+    slider("Pan X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Pan Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+    choice("Resampling:", &RESAMPLINGS, 1),
+];
 const SHARPEN: [Setting; 3] = [
     slider("Radius:", 1.0, 50.0, 1.0, 3.0, " px"),
     slider("Amount:", 0.0, 300.0, 1.0, 50.0, " %"),
@@ -237,6 +258,8 @@ impl EffectKind {
             ZoomBlur => "Zoom Blur",
             Sharpen => "Sharpen",
             Offset => "Offset",
+            RotateZoom => "Rotate / Zoom",
+            Transform3d => "3D Transform",
         }
     }
 
@@ -274,6 +297,8 @@ impl EffectKind {
             ZoomBlur => &ZOOM,
             Sharpen => &SHARPEN,
             Offset => &OFFSET,
+            RotateZoom => &ROTATE_ZOOM,
+            Transform3d => &TRANSFORM_3D,
         }
     }
 
@@ -336,6 +361,19 @@ impl EffectKind {
                 x: values[0] as i32,
                 y: values[1] as i32,
                 edges: OffsetEdges::ALL[(values[2] as usize).min(OffsetEdges::ALL.len() - 1)],
+            },
+            RotateZoom => Effect::Turn {
+                turn: Turn { angles: [0.0, 0.0, values[0]], zoom: values[1], pan: [values[2], values[3]], ..Turn::NONE },
+                interpolation: Interpolation::ALL[pick(4, Interpolation::ALL.len())],
+            },
+            Transform3d => Effect::Turn {
+                turn: Turn {
+                    angles: [values[0], values[1], values[2]],
+                    field_of_view: values[3],
+                    zoom: values[4],
+                    pan: [values[5], values[6]],
+                },
+                interpolation: Interpolation::ALL[pick(7, Interpolation::ALL.len())],
             },
         }
     }
