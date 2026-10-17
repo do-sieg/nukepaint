@@ -34,6 +34,7 @@ mod view;
 use std::{
     ops::RangeInclusive,
     path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 
@@ -49,7 +50,7 @@ use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
     Affine, Document, Effect, FloatingPixels, GradientKind, GradientMode, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
-    RgbaImage, SAVE_EXTENSIONS, SelectionMask, SelectionMode, ShapeKind, Turn, is_savable, keeps_layers, thumbnail,
+    RgbaImage, SAVE_EXTENSIONS, SelectionMask, SelectionMode, ShapeKind, Turn, apply_effect, is_savable, keeps_layers, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
 use lasso::{Lasso, LassoKind, PolygonEdit};
@@ -92,6 +93,10 @@ const ZOOM_TO_WINDOW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAN
 const ACTUAL_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0);
 const SHOW_GRID: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Quote);
 const SNAP_TO_GRID: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::S);
+const REPEAT_FILTER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const RESHOW_FILTER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::F);
+const REPEAT_ADJUSTMENT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::A);
+const RESHOW_ADJUSTMENT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::A);
 
 const APP_NAME: &str = "Power Paint";
 
@@ -512,6 +517,10 @@ struct App {
     adjustment_dialog: Option<adjustment_dialog::Dialog>,
     /// What each adjustment's and each effect's dialog opens with.
     last_adjustments: LastSettings,
+    /// The effect of the Filters menu last applied, which can be applied again.
+    last_filter: Option<EffectKind>,
+    /// The adjustment of the Colors menu last applied, which can be applied again.
+    last_adjustment: Option<AdjustmentKind>,
 }
 
 impl App {
@@ -549,6 +558,8 @@ impl App {
             checkerboard_dialog: None,
             adjustment_dialog: None,
             last_adjustments: LastSettings::default(),
+            last_filter: None,
+            last_adjustment: None,
         }
     }
 
@@ -1357,6 +1368,8 @@ impl App {
     fn adjustments_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.menu_button("Colors", |ui| {
+            let last = self.last_adjustment.map(FilterKind::Adjustment);
+            self.repeat_buttons(ui, &ctx, last, "Last Adjustment", [REPEAT_ADJUSTMENT, RESHOW_ADJUSTMENT]);
             for kind in AdjustmentKind::MENU {
                 let mut button = egui::Button::new(kind.label());
                 if let Some(shortcut) = kind.shortcut() {
@@ -1372,6 +1385,8 @@ impl App {
     fn filters_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.menu_button("Filters", |ui| {
+            let last = self.last_filter.map(FilterKind::Effect);
+            self.repeat_buttons(ui, &ctx, last, "Last Filter", [REPEAT_FILTER, RESHOW_FILTER]);
             for (name, kinds, more) in EffectKind::MENUS {
                 ui.menu_button(name, |ui| {
                     for &kind in kinds {
@@ -1388,6 +1403,30 @@ impl App {
                 });
             }
         });
+    }
+
+    /// The buttons at the top of a menu that apply what was last applied from it again,
+    /// at once or once its dialog says so, with their `shortcuts` in that order, then a
+    /// separator. They are named after it, or `nothing` until there is one.
+    fn repeat_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        last: Option<FilterKind>,
+        nothing: &'static str,
+        shortcuts: [KeyboardShortcut; 2],
+    ) {
+        let enabled = last.is_some() && self.can_adjust();
+        let name = last.map_or(nothing, FilterKind::name);
+        let repeat = egui::Button::new(format!("Repeat {name}")).shortcut_text(ctx.format_shortcut(&shortcuts[0]));
+        if ui.add_enabled(enabled, repeat).clicked() {
+            self.repeat(ctx, last.unwrap());
+        }
+        let reshow = egui::Button::new(format!("{name}…")).shortcut_text(ctx.format_shortcut(&shortcuts[1]));
+        if ui.add_enabled(enabled && last.is_some_and(has_dialog), reshow).clicked() {
+            self.adjust(ctx, last.unwrap());
+        }
+        ui.separator();
     }
 
     fn effect_button(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, kind: EffectKind) {
@@ -1409,10 +1448,7 @@ impl App {
         }
         let current = self.current.unwrap();
         let image = &mut self.images[current];
-        // A transform would go on with the pixels of the layer as they were.
-        image.transform = None;
-        image.cancel_lasso();
-        image.drop_shape();
+        settle_edits(image);
         let document = &mut image.document;
         if let FilterKind::Adjustment(kind) = kind
             && !kind.has_dialog()
@@ -1421,6 +1457,7 @@ impl App {
                 document.commit(kind.name(), None);
                 image.refresh(ctx);
             }
+            self.last_adjustment = Some(kind);
             return;
         }
         // Tiled, only the tile is shown, and changed.
@@ -1435,6 +1472,84 @@ impl App {
         let dialog = adjustment_dialog::Dialog::new(current, layer, kind, values, curves, mask, size, names);
         self.adjustment_dialog = Some(dialog);
         self.preview_adjustment();
+    }
+
+    /// Applies the adjustment or the effect again, with the settings it was last used
+    /// with, without asking for them.
+    fn repeat(&mut self, ctx: &egui::Context, kind: FilterKind) {
+        if !self.can_adjust() {
+            return;
+        }
+        let current = self.current.unwrap();
+        let image = &mut self.images[current];
+        settle_edits(image);
+        let Some(mask) = canvas::tile_mask(image) else {
+            return;
+        };
+        let values = self.last_adjustments.values(kind);
+        let layers = &image.document.layers;
+        let layer = image.document.active_layer;
+        let pixels = &layers[layer].pixels;
+        let changed = match kind {
+            FilterKind::Adjustment(adjustment) => {
+                Some(adjust(pixels, &adjustment.adjustment(&values, &self.last_adjustments.curves), mask.as_ref()))
+            }
+            FilterKind::Effect(effect) if effect.makes_layers() => None,
+            FilterKind::Effect(effect) => {
+                apply_effect(pixels, &effect.effect(&values, layers), mask.as_ref(), &AtomicBool::new(false))
+            }
+        };
+        self.finish_filter(ctx, current, layer, kind, values, mask.as_ref(), changed);
+    }
+
+    /// Puts the pixels the adjustment or the effect made, `changed`, in the layer, as a
+    /// step of the image's history, or splits the layer as the Wavelet-decompose does,
+    /// and keeps the settings it was used with for next time.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_filter(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        layer: usize,
+        kind: FilterKind,
+        values: Vec<f64>,
+        mask: Option<&SelectionMask>,
+        changed: Option<RgbaImage>,
+    ) {
+        let image = &mut self.images[index];
+        match kind {
+            FilterKind::Adjustment(adjustment) => self.last_adjustment = Some(adjustment),
+            FilterKind::Effect(effect)
+                if EffectKind::MENUS.iter().any(|(_, kinds, more)| kinds.contains(&effect) || more.contains(&effect)) =>
+            {
+                self.last_filter = Some(effect)
+            }
+            FilterKind::Effect(_) => {}
+        }
+        if let FilterKind::Effect(effect) = kind
+            && effect.makes_layers()
+        {
+            image.document.wavelet_decompose(values[0] as u32);
+            image.document.commit(effect.name(), None);
+            image.refresh_layers(ctx);
+            self.last_adjustments.set_values(kind, values);
+            return;
+        }
+        let pixels = &mut image.document.layers[layer].pixels;
+        if let Some(changed) = changed
+            && changed != *pixels
+        {
+            *pixels = changed;
+            // The selection goes along with the pixels it holds.
+            if let FilterKind::Effect(effect) = kind
+                && let Effect::Turn { turn, .. } = effect.effect(&values, &image.document.layers)
+            {
+                turn_selection(&mut image.document, mask, &turn);
+            }
+            image.document.commit(kind.name(), None);
+        }
+        image.refresh(ctx);
+        self.last_adjustments.set_values(kind, values);
     }
 
     /// Shows the layer as the adjustment dialog's settings make it, at once for an
@@ -1494,31 +1609,8 @@ impl App {
                 if let Some(job) = dialog.job.take() {
                     dialog.preview = job.wait();
                 }
-                let image = &mut self.images[dialog.image];
-                if let FilterKind::Effect(kind) = dialog.kind
-                    && kind.makes_layers()
-                {
-                    image.document.wavelet_decompose(dialog.values[0] as u32);
-                    image.document.commit(kind.name(), None);
-                    image.refresh_layers(ctx);
-                    self.last_adjustments.set_values(dialog.kind, dialog.values);
-                    return;
-                }
-                let layer = &mut image.document.layers[dialog.layer];
-                if let Some(preview) = dialog.preview
-                    && preview != layer.pixels
-                {
-                    layer.pixels = preview;
-                    // The selection goes along with the pixels it holds.
-                    if let FilterKind::Effect(kind) = dialog.kind
-                        && let Effect::Turn { turn, .. } = kind.effect(&dialog.values, &image.document.layers)
-                    {
-                        turn_selection(&mut image.document, dialog.mask.as_ref(), &turn);
-                    }
-                    image.document.commit(dialog.kind.name(), None);
-                }
-                image.refresh(ctx);
-                self.last_adjustments.set_values(dialog.kind, dialog.values);
+                let (mask, preview) = (dialog.mask.take(), dialog.preview.take());
+                self.finish_filter(ctx, dialog.image, dialog.layer, dialog.kind, dialog.values, mask.as_ref(), preview);
                 if dialog.kind == FilterKind::Adjustment(AdjustmentKind::Curves) {
                     self.last_adjustments.curves = dialog.curves;
                 }
@@ -2002,6 +2094,24 @@ impl App {
                     }
                 }
             }
+            // After the layer commands, as Flatten takes F with Ctrl and Shift, and before
+            // Select All, which takes A with Ctrl. Those with Alt go first, as keys with Ctrl
+            // count with Alt held as well.
+            let last_adjustment = self.last_adjustment.map(FilterKind::Adjustment);
+            let last_filter = self.last_filter.map(FilterKind::Effect);
+            let repeats = [
+                (RESHOW_ADJUSTMENT, last_adjustment.filter(|&kind| has_dialog(kind)), false),
+                (REPEAT_ADJUSTMENT, last_adjustment, true),
+                (RESHOW_FILTER, last_filter, false),
+                (REPEAT_FILTER, last_filter, true),
+            ];
+            for (shortcut, last, at_once) in repeats {
+                if ctx.input_mut(|input| input.consume_shortcut(&shortcut))
+                    && let Some(kind) = last
+                {
+                    if at_once { self.repeat(ctx, kind) } else { self.adjust(ctx, kind) }
+                }
+            }
             // After the layer commands, as Delete Layer takes Delete with Ctrl and Shift,
             // and Duplicate Layer D.
             let edit_shortcuts = [
@@ -2229,6 +2339,24 @@ impl App {
             self.title = title;
         }
     }
+}
+
+/// Whether a dialog asks for the settings of the adjustment or the effect: all effects
+/// have one.
+fn has_dialog(kind: FilterKind) -> bool {
+    match kind {
+        FilterKind::Adjustment(adjustment) => adjustment.has_dialog(),
+        FilterKind::Effect(_) => true,
+    }
+}
+
+/// Ends what is being done to the image that an adjustment or an effect would leave
+/// behind: a transform, which would go on with the pixels of the layer as they were, a
+/// lasso being drawn and a shape not yet drawn in.
+fn settle_edits(image: &mut OpenImage) {
+    image.transform = None;
+    image.cancel_lasso();
+    image.drop_shape();
 }
 
 /// Turns the selection as `turn` turned the pixels `mask` holds, or all of them, about
