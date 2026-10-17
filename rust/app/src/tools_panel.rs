@@ -3,7 +3,7 @@
 //! The current tool's stands out.
 
 use eframe::egui::{self, CursorIcon, Id, LayerId, Order, Rect, Sense, Stroke};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 
 use crate::dock::{self, INSERT_LINE_WIDTH};
 use crate::icons::{ICON_SIZE, Icons};
@@ -14,7 +14,28 @@ use crate::tools::{Group, Tool};
 #[serde(default)]
 pub struct ToolOrder {
     /// All the tools, each group's in the order they go in it.
+    #[serde(deserialize_with = "saved_tools")]
     tools: Vec<Tool>,
+}
+
+/// A tool as saved, or the name of one there is no longer.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedTool {
+    Tool(Tool),
+    Gone(IgnoredAny),
+}
+
+/// The tools saved, without those no longer made.
+fn saved_tools<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Tool>, D::Error> {
+    let saved = Vec::<SavedTool>::deserialize(deserializer)?;
+    Ok(saved
+        .into_iter()
+        .filter_map(|tool| match tool {
+            SavedTool::Tool(tool) => Some(tool),
+            SavedTool::Gone(_) => None,
+        })
+        .collect())
 }
 
 impl Default for ToolOrder {
@@ -153,5 +174,11 @@ mod tests {
         order.move_tool(Tool::Curve, 0);
         let text = toml::to_string(&order).unwrap();
         assert_eq!(toml::from_str::<ToolOrder>(&text).unwrap(), order);
+    }
+
+    #[test]
+    fn saved_tools_no_longer_made_are_left_out() {
+        let order: ToolOrder = toml::from_str(r#"tools = ["Pan", "Gone", "Zoom"]"#).unwrap();
+        assert_eq!(order.tools, [Tool::Pan, Tool::Zoom]);
     }
 }

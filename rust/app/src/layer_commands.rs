@@ -18,9 +18,13 @@ pub enum LayerCommand {
     Flatten,
     FlipImageHorizontal,
     FlipImageVertical,
+    RotateImageClockwise,
+    RotateImageCounterClockwise,
     RotateImage180,
     FlipHorizontal,
     FlipVertical,
+    RotateClockwise,
+    RotateCounterClockwise,
     Rotate180,
     RotateZoom,
     Transform3d,
@@ -41,7 +45,7 @@ impl LayerCommand {
     /// The Layers menu, in groups that separators keep apart.
     pub const MENU: [&[Self]; 5] = [
         &[Add, Delete, Duplicate, MergeDown],
-        &[FlipHorizontal, FlipVertical, Rotate180, RotateZoom, Transform3d],
+        &[FlipHorizontal, FlipVertical, RotateClockwise, RotateCounterClockwise, Rotate180, RotateZoom, Transform3d],
         &[GoToTop, GoToAbove, GoToBelow, GoToBottom],
         &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
         &[Properties],
@@ -49,14 +53,14 @@ impl LayerCommand {
     /// The Image menu.
     pub const IMAGE_MENU: [&[Self]; 3] = [
         &[CropToSelection, Resize, CanvasSize],
-        &[FlipImageHorizontal, FlipImageVertical, RotateImage180],
+        &[FlipImageHorizontal, FlipImageVertical, RotateImageClockwise, RotateImageCounterClockwise, RotateImage180],
         &[Flatten],
     ];
     /// The menu of a layer in the layers list, which acts on it: the Layers menu without
     /// the commands that go to another layer, and Flatten.
     pub const CONTEXT_MENU: [&[Self]; 4] = [
         &[Add, Delete, Duplicate, MergeDown, Flatten],
-        &[FlipHorizontal, FlipVertical, Rotate180, RotateZoom, Transform3d],
+        &[FlipHorizontal, FlipVertical, RotateClockwise, RotateCounterClockwise, Rotate180, RotateZoom, Transform3d],
         &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
         &[Properties],
     ];
@@ -75,6 +79,8 @@ impl LayerCommand {
             Flatten => "Flatten",
             FlipImageHorizontal | FlipHorizontal => "Flip Horizontal",
             FlipImageVertical | FlipVertical => "Flip Vertical",
+            RotateImageClockwise | RotateClockwise => "Rotate 90° Clockwise",
+            RotateImageCounterClockwise | RotateCounterClockwise => "Rotate 90° Counter-Clockwise",
             RotateImage180 | Rotate180 => "Rotate 180°",
             RotateZoom => "Rotate / Zoom…",
             Transform3d => "3D Transform…",
@@ -91,14 +97,24 @@ impl LayerCommand {
     }
 
     /// The name of the step it makes in the history, which tells the image's flips
-    /// from the layer's.
-    pub fn step_name(self) -> &'static str {
+    /// from the layer's, and those from the selected pixels'.
+    pub fn step_name(self, document: &Document) -> &'static str {
+        let selected = !document.selection.is_empty();
         match self {
+            FlipHorizontal if selected => "Flip Selection Horizontal",
+            FlipVertical if selected => "Flip Selection Vertical",
+            RotateClockwise if selected => "Rotate Selection 90° Clockwise",
+            RotateCounterClockwise if selected => "Rotate Selection 90° Counter-Clockwise",
+            Rotate180 if selected => "Rotate Selection 180°",
             FlipImageHorizontal => "Flip Image Horizontal",
             FlipImageVertical => "Flip Image Vertical",
+            RotateImageClockwise => "Rotate Image 90° Clockwise",
+            RotateImageCounterClockwise => "Rotate Image 90° Counter-Clockwise",
             RotateImage180 => "Rotate Image 180°",
             FlipHorizontal => "Flip Layer Horizontal",
             FlipVertical => "Flip Layer Vertical",
+            RotateClockwise => "Rotate Layer 90° Clockwise",
+            RotateCounterClockwise => "Rotate Layer 90° Counter-Clockwise",
             Rotate180 => "Rotate Layer 180°",
             _ => self.label().trim_end_matches('…'),
         }
@@ -117,6 +133,8 @@ impl LayerCommand {
             Resize => (Modifiers::COMMAND, Key::R),
             CanvasSize => (ctrl_shift, Key::R),
             Flatten => (ctrl_shift, Key::F),
+            RotateImageClockwise => (Modifiers::COMMAND, Key::H),
+            RotateImageCounterClockwise => (Modifiers::COMMAND, Key::G),
             GoToTop => (ctrl_alt, Key::PageUp),
             GoToAbove => (Modifiers::ALT, Key::PageUp),
             GoToBelow => (Modifiers::ALT, Key::PageDown),
@@ -152,16 +170,31 @@ impl LayerCommand {
             GoToTop | GoToAbove | MoveToTop | MoveUp => has_above,
             MergeDown | GoToBottom | GoToBelow | MoveToBottom | MoveDown => has_below,
             Add | Duplicate | Resize | CanvasSize | RotateZoom | Transform3d | Properties => true,
-            FlipImageHorizontal | FlipImageVertical | RotateImage180 | FlipHorizontal | FlipVertical | Rotate180 => true,
+            FlipImageHorizontal | FlipImageVertical | RotateImageClockwise | RotateImageCounterClockwise | RotateImage180 => true,
+            FlipHorizontal | FlipVertical | RotateClockwise | RotateCounterClockwise | Rotate180 => true,
         }
     }
 
     /// Runs the command on the document, but for those that ask the user first:
-    /// Resize, Canvas Size, Rotate / Zoom, 3D Transform and Properties. Returns whether the layers changed, rather
+    /// Resize, Canvas Size, Rotate / Zoom, 3D Transform and Properties. The layer's flips
+    /// and rotations turn only the selected pixels while there is a selection, and its
+    /// quarter turns lose what they carry off the layer. Returns whether the layers changed, rather
     /// than only which one is active.
     pub fn run(self, document: &mut Document) -> bool {
         let active = document.active_layer;
         let top = document.layers.len() - 1;
+        if let FlipHorizontal | FlipVertical | Rotate180 = self
+            && !document.selection.is_empty()
+        {
+            let selection = document.selection.clone();
+            return document.flip_selected(&selection, self != FlipVertical, self != FlipHorizontal);
+        }
+        if let RotateClockwise | RotateCounterClockwise = self
+            && !document.selection.is_empty()
+        {
+            let selection = document.selection.clone();
+            return document.rotate_selected(&selection, self == RotateClockwise);
+        }
         match self {
             Add => document.add_layer(),
             Delete => return document.delete_layer(),
@@ -171,9 +204,13 @@ impl LayerCommand {
             Flatten => document.flatten(),
             FlipImageHorizontal => document.flip_image(true, false),
             FlipImageVertical => document.flip_image(false, true),
+            RotateImageClockwise => document.rotate_image(true),
+            RotateImageCounterClockwise => document.rotate_image(false),
             RotateImage180 => document.flip_image(true, true),
             FlipHorizontal => document.flip_layer(true, false),
             FlipVertical => document.flip_layer(false, true),
+            RotateClockwise => document.rotate_layer(true),
+            RotateCounterClockwise => document.rotate_layer(false),
             Rotate180 => document.flip_layer(true, true),
             GoToTop | GoToAbove | GoToBelow | GoToBottom => {
                 let index = match self {

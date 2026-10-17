@@ -337,6 +337,50 @@ impl Document {
         true
     }
 
+    /// Turns the whole active layer a quarter turn, clockwise or not, about its middle.
+    /// What the turn carries off the layer is lost, unless it is square.
+    pub fn rotate_layer(&mut self, clockwise: bool) {
+        let whole = self.whole(None);
+        let selection = std::mem::take(&mut self.selection);
+        self.rotate_selected(&whole, clockwise);
+        self.selection = selection;
+    }
+
+    /// Turns the active layer's pixels that `area` holds a quarter turn, clockwise or
+    /// not, about the middle of the rectangle around them on the layer, and the selection
+    /// with them. What the turn carries off the layer is lost. Returns whether any of
+    /// `area` was on the layer.
+    pub fn rotate_selected(&mut self, area: &Selection, clockwise: bool) -> bool {
+        let Some(floating) = FloatingPixels::lift(&self.active().pixels, area) else {
+            return false;
+        };
+        let PixelRect { left, top, right, bottom } = floating.area();
+        // About the middle, or half a pixel from it when the sides are one odd, one
+        // even, to keep the pixels on the grid: towards the top left turning clockwise,
+        // and so as to turn them back the other way.
+        let difference = left + right - top - bottom;
+        let difference = if clockwise { difference.div_euclid(2) } else { (difference + 1).div_euclid(2) };
+        let sum = (left + right + top + bottom).div_euclid(2);
+        let map = quarter_turn(clockwise, sum, difference);
+        self.active_mut().pixels = floating.place(map, Interpolation::Nearest);
+        if !self.selection.is_empty() {
+            self.selection = self.selection.transformed(map);
+        }
+        true
+    }
+
+    /// Turns the whole image a quarter turn, clockwise or not, every layer and the
+    /// selection, which swaps its width and height.
+    pub fn rotate_image(&mut self, clockwise: bool) {
+        let (width, height) = self.size();
+        for layer in &mut self.layers {
+            layer.pixels = if clockwise { imageops::rotate90(&layer.pixels) } else { imageops::rotate270(&layer.pixels) };
+        }
+        let (dx, dy) = if clockwise { (height as f64, 0.0) } else { (0.0, width as f64) };
+        let (xy, yx) = if clockwise { (-1.0, 1.0) } else { (1.0, -1.0) };
+        self.selection = self.selection.transformed(Affine { xx: 0.0, yx, xy, yy: 0.0, dx, dy });
+    }
+
     /// Changes the colours of the active layer's selected pixels, or of all of them
     /// while nothing is selected, as the adjustment does. Returns whether any changed.
     pub fn adjust(&mut self, adjustment: &Adjustment) -> bool {
@@ -426,6 +470,18 @@ impl Document {
             .map(|number| format!("Layer {number}"))
             .find(|name| self.layers.iter().all(|layer| &layer.name != name))
             .expect("some number is free")
+    }
+}
+
+/// A quarter turn, clockwise on screen or not, about the point whose coordinates add up
+/// to `sum`, and of which x less y is `difference`.
+fn quarter_turn(clockwise: bool, sum: i32, difference: i32) -> Affine {
+    let (sum, difference) = (sum as f64, difference as f64);
+    match clockwise {
+        // x' = sum - y, y' = x - difference
+        true => Affine { xx: 0.0, yx: 1.0, xy: -1.0, yy: 0.0, dx: sum, dy: -difference },
+        // x' = y + difference, y' = sum - x
+        false => Affine { xx: 0.0, yx: -1.0, xy: 1.0, yy: 0.0, dx: difference, dy: sum },
     }
 }
 
@@ -669,6 +725,44 @@ mod tests {
         assert_eq!(document.active().pixels[(3, 2)], blue);
         let off = Selection::rect(PixelRect { left: 10, top: 10, right: 12, bottom: 12 });
         assert!(!document.flip_selected(&off, true, false));
+    }
+
+    #[test]
+    fn rotating_the_image_swaps_its_sides_and_turns_the_selection() {
+        let blue = Rgba([0, 0, 255, 255]);
+        let mut pixels = RgbaImage::new(4, 2);
+        pixels.put_pixel(0, 0, blue);
+        let mut document = Document::new(pixels);
+        document.selection = Selection::rect(PixelRect { left: 0, top: 0, right: 1, bottom: 1 });
+        document.rotate_image(true);
+        assert_eq!(document.size(), (2, 4));
+        assert_eq!(document.active().pixels[(1, 0)], blue);
+        assert!(document.selection.contains(1, 0) && !document.selection.contains(0, 0));
+        document.rotate_image(false);
+        assert_eq!(document.size(), (4, 2));
+        assert_eq!(document.active().pixels[(0, 0)], blue);
+        assert!(document.selection.contains(0, 0) && !document.selection.contains(1, 0));
+    }
+
+    #[test]
+    fn rotating_the_selected_pixels_about_their_middle() {
+        let blue = Rgba([0, 0, 255, 255]);
+        let mut pixels = RgbaImage::new(8, 8);
+        pixels.put_pixel(2, 2, blue);
+        let mut document = Document::new(pixels);
+        // Three wide and two high, from 2, 2.
+        document.selection = Selection::rect(PixelRect { left: 2, top: 2, right: 5, bottom: 4 });
+        let area = document.selection.clone();
+        assert!(document.rotate_selected(&area, true));
+        // Two wide and three high, the top left corner now the top right one.
+        let bounds = document.selection.bounds().unwrap();
+        assert_eq!((bounds.right - bounds.left, bounds.bottom - bounds.top), (2.0, 3.0));
+        assert_eq!(bounds.left.fract(), 0.0);
+        assert_eq!(document.active().pixels[(bounds.right as u32 - 1, bounds.top as u32)], blue);
+        assert_eq!(document.active().pixels.pixels().filter(|pixel| pixel[3] > 0).count(), 1);
+        let area = document.selection.clone();
+        assert!(document.rotate_selected(&area, false));
+        assert_eq!(document.active().pixels[(2, 2)], blue);
     }
 
     #[test]

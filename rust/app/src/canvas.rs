@@ -13,8 +13,7 @@
 //! selection from a handle
 //! of its box, or the one out from its bottom right corner, or rotate it from around
 //! the box. Shear and Perspective slant the selected pixels, or tilt them, from the
-//! handles on the edges or the corners of the selection's box. The Flip mirrors them,
-//! or the whole layer, on a click. The shape tools draw their shape, which their handles then change until it
+//! handles on the edges or the corners of the selection's box. The shape tools draw their shape, which their handles then change until it
 //! is finished. The selection shows as a tinted area in a dashed outline, with a button by it: with the
 //! selection tools and Move Selection, to go from one to the other, and with the other
 //! tools, to deselect. The grid shows over the image; while snapping to it, the
@@ -257,8 +256,6 @@ pub fn show(
         use_gradient(ui, &response, image, tools, space);
     } else if tools.tool == Tool::MagicWand {
         wand_at = pointer.filter(|_| use_magic_wand(ui, &response, image, tools, space));
-    } else if tools.tool == Tool::Flip {
-        use_flip_tool(ui, &response, image, space);
     } else if tools.tool.shape().is_some() {
         use_shape_tool(ui, &response, image, tools, pointer, space);
     } else if let Some(warp) = tools.tool.warp() {
@@ -1325,67 +1322,6 @@ fn use_magic_wand(
     (click.step, click.after) = (document.current_step(), document.selection.clone());
     image.wand = Some(click);
     response.hovered()
-}
-
-/// Works the Flip: a click mirrors the selected pixels, or the whole layer, or the
-/// tile while tiled, about the middle of the rectangle around them: across with the left
-/// button, and up and down with the right one, or the other way with Shift. While the
-/// pointer is over the image, the axis it would mirror them about shows.
-fn use_flip_tool(ui: &egui::Ui, response: &egui::Response, image: &mut OpenImage, space: bool) {
-    if space || !response.hovered() {
-        return;
-    }
-    let shift = ui.input(|input| input.modifiers.shift);
-    let area = flip_area(image);
-    let Some(rect) = flipped_rect(image, &area) else {
-        return;
-    };
-    let pressed = [PointerButton::Primary, PointerButton::Secondary].into_iter().find(|&button| response.drag_started_by(button));
-    if let Some(button) = pressed {
-        let across = (button == PointerButton::Primary) != shift;
-        // A transform would go on with the pixels as they were.
-        image.transform = None;
-        if image.document.flip_selected(&area, across, !across) {
-            let name = if across { "Flip Horizontal" } else { "Flip Vertical" };
-            image.document.commit(name, Some(Tool::Flip.icon().name()));
-            image.refresh(ui.ctx());
-        }
-        return;
-    }
-    // The axis the left button would mirror about.
-    let across = !shift;
-    ui.ctx().set_cursor_icon(if across { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical });
-    let (middle_x, middle_y) = ((rect.left + rect.right) as f32 / 2.0, (rect.top + rect.bottom) as f32 / 2.0);
-    let ends = match across {
-        true => [(middle_x, rect.top as f32), (middle_x, rect.bottom as f32)],
-        false => [(rect.left as f32, middle_y), (rect.right as f32, middle_y)],
-    };
-    let ends = ends.map(|(x, y)| image.view.to_screen(x, y));
-    let pixel = 1.0 / ui.ctx().pixels_per_point();
-    let painter = ui.painter();
-    painter.line_segment(ends, Stroke::new(3.0 * pixel, Color32::WHITE));
-    painter.add(egui::Shape::dashed_line(&ends, Stroke::new(pixel, Color32::BLACK), 4.0, 4.0));
-}
-
-/// What the Flip mirrors: the selection, or else the tile while tiled, or the whole layer.
-fn flip_area(image: &OpenImage) -> Selection {
-    if !image.document.selection.is_empty() {
-        return image.document.selection.clone();
-    }
-    Selection::rect(image.view.tile().unwrap_or_else(|| image.view.whole()))
-}
-
-/// The rectangle around what the Flip mirrors, on the layer, if any of it is.
-fn flipped_rect(image: &OpenImage, area: &Selection) -> Option<PixelRect> {
-    let bounds = area.bounds()?;
-    let whole = image.view.whole();
-    let rect = PixelRect {
-        left: (bounds.left.floor() as i32).max(whole.left),
-        top: (bounds.top.floor() as i32).max(whole.top),
-        right: (bounds.right.ceil() as i32).min(whole.right),
-        bottom: (bounds.bottom.ceil() as i32).min(whole.bottom),
-    };
-    (!rect.is_empty()).then_some(rect)
 }
 
 /// A Magic Wand click, to select again from the same pixel as the wand's settings

@@ -1199,7 +1199,7 @@ impl App {
         // A transform would go on with the pixels of the layer it began on.
         image.transform = None;
         if command.run(&mut image.document) {
-            image.document.commit(command.step_name(), command.icon().map(Icon::name));
+            image.document.commit(command.step_name(&image.document), command.icon().map(Icon::name));
             image.refresh_layers(ctx);
         }
     }
