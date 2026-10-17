@@ -75,6 +75,7 @@ impl DockSide {
 pub enum Section {
     /// The tools of a group.
     Tools(Group),
+    Palette,
     Colors,
     History,
     Layers,
@@ -82,13 +83,14 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Tools(Group::Select),
         Self::Tools(Group::Navigate),
         Self::Tools(Group::Paint),
         Self::Tools(Group::Shapes),
         Self::Tools(Group::Retouch),
         Self::Tools(Group::Transform),
+        Self::Palette,
         Self::Colors,
         Self::History,
         Self::Layers,
@@ -98,6 +100,7 @@ impl Section {
     pub fn title(self) -> &'static str {
         match self {
             Self::Tools(group) => group.name(),
+            Self::Palette => "Palette",
             Self::Colors => "Colors",
             Self::History => "History",
             Self::Layers => "Layers",
@@ -152,11 +155,11 @@ impl Default for DockLayout {
     fn default() -> Self {
         Self {
             // The tools and the colours on the left, what is about the image on the right.
-            left: Group::ALL.into_iter().map(Section::Tools).chain([Section::Colors]).collect(),
+            left: Group::ALL.into_iter().map(Section::Tools).chain([Section::Palette, Section::Colors]).collect(),
             right: vec![Section::History, Section::Navigator, Section::Layers],
             top: Vec::new(),
             bottom: Vec::new(),
-            hidden: Vec::new(),
+            hidden: vec![Section::Palette],
             sizes: DockSizes::default(),
         }
     }
@@ -219,8 +222,9 @@ impl DockLayout {
     }
 
     /// Has each section once: the ones in more than one place keep the first, and
-    /// those missing, as from settings saved before they were made, go at the end of
-    /// the left dock.
+    /// those missing, as from settings saved before they were made, go where the
+    /// default layout has them, before the section after them there, hidden if it
+    /// hides them.
     pub fn normalize(&mut self) {
         let mut seen = Vec::new();
         for side in DockSide::ALL {
@@ -230,8 +234,24 @@ impl DockLayout {
                 new
             });
         }
-        let missing = Section::ALL.into_iter().filter(|section| !seen.contains(section));
-        self.left.extend(missing);
+        let default = Self::default();
+        for section in Section::ALL.into_iter().filter(|section| !seen.contains(section)) {
+            let side = DockSide::ALL
+                .into_iter()
+                .find(|&side| default.sections(side).contains(&section))
+                .unwrap_or(DockSide::Left);
+            let defaults = default.sections(side);
+            let after = defaults.iter().skip_while(|&&other| other != section).skip(1);
+            let sections = self.sections_mut(side);
+            let index = after
+                .filter_map(|after| sections.iter().position(|other| other == after))
+                .next()
+                .unwrap_or(sections.len());
+            sections.insert(index, section);
+            if !default.is_shown(section) {
+                self.set_shown(section, false);
+            }
+        }
     }
 
     pub fn is_shown(&self, section: Section) -> bool {
@@ -529,10 +549,21 @@ mod tests {
         let mut layout = DockLayout { left: vec![Colors], right: vec![Colors, Layers], ..DockLayout::default() };
         layout.normalize();
         let tools = Group::ALL.map(Tools);
-        assert_eq!(layout.sections(DockSide::Left)[0], Colors);
-        assert_eq!(layout.sections(DockSide::Left)[1..7], tools);
-        assert_eq!(layout.sections(DockSide::Left)[7..], [History, Navigator]);
-        assert_eq!(layout.sections(DockSide::Right), [Layers]);
+        assert_eq!(layout.sections(DockSide::Left)[..6], tools);
+        assert_eq!(layout.sections(DockSide::Left)[6..], [Palette, Colors]);
+        assert_eq!(layout.sections(DockSide::Right), [History, Navigator, Layers]);
+    }
+
+    #[test]
+    fn normalize_puts_new_sections_where_the_default_has_them() {
+        let mut left = Group::ALL.map(Tools).to_vec();
+        left.push(Colors);
+        let mut layout = DockLayout { left, right: vec![History, Navigator, Layers], ..DockLayout::default() };
+        layout.hidden.clear();
+        layout.normalize();
+        assert_eq!(layout.sections(DockSide::Left), DockLayout::default().sections(DockSide::Left));
+        assert!(!layout.is_shown(Palette));
+        assert!(layout.is_shown(Colors));
     }
 
     #[test]

@@ -3,16 +3,16 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-use image::{RgbaImage, imageops};
+use image::{Rgba, RgbaImage, imageops};
 
 use crate::{
     Adjustment, Affine, BlendMode, FloatingPixels, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
-    SelectionMode, Step, blend_layer, composite, composite_area, copy_selected, erase_selected, history::History,
+    SelectionMode, Step, DEFAULT_PALETTE, MAX_PALETTE_SIZE, blend_layer, palette_of, composite, composite_area, copy_selected, erase_selected, history::History,
     adjust, load_image, open_raster, resize, save_image, wavelet_decompose,
 };
 
-/// An image being edited: its layers, bottom first, the file it came from, and the
-/// steps it went through since, to undo and redo.
+/// An image being edited: its layers, bottom first, its palette, the file it came
+/// from, and the steps it went through since, to undo and redo.
 ///
 /// The layers, the active one and the selection are changed directly, then recorded
 /// as a step with [`Document::commit`]. Until then the history knows nothing of the
@@ -23,13 +23,17 @@ pub struct Document {
     pub layers: Vec<Layer>,
     pub active_layer: usize,
     pub selection: Selection,
+    /// The colours kept at hand for the image, in order. A new image starts with
+    /// [`DEFAULT_PALETTE`], one opened or pasted with its own colours.
+    pub palette: Vec<Rgba<u8>>,
     history: History,
 }
 
 impl Document {
     /// A document never saved, of a single layer, and with nothing to save either.
     pub fn new(pixels: RgbaImage) -> Self {
-        Self::with_first_step(vec![Layer::new("Background", pixels)], "New Image", None, true)
+        let document = Self::with_first_step(vec![Layer::new("Background", pixels)], "New Image", None, true);
+        Self { palette: DEFAULT_PALETTE.to_vec(), ..document }
     }
 
     /// A document of pasted pixels, which has changes to save as it is in no file.
@@ -52,7 +56,8 @@ impl Document {
     fn with_first_step(layers: Vec<Layer>, name: &str, icon: Option<&'static str>, saved: bool) -> Self {
         let selection = Selection::default();
         let history = History::new(Step { name: name.to_owned(), icon }, &layers, layers.len() - 1, &selection, saved);
-        Self { path: None, active_layer: layers.len() - 1, layers, selection, history }
+        let palette = palette_of(&composite(&layers), MAX_PALETTE_SIZE);
+        Self { path: None, active_layer: layers.len() - 1, layers, selection, palette, history }
     }
 
     /// Writes the image to a file, in the format its extension names, and makes that
@@ -527,6 +532,13 @@ mod tests {
 
     fn document() -> Document {
         Document::new(RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255])))
+    }
+
+    #[test]
+    fn new_documents_have_the_default_palette_and_pasted_ones_their_colors() {
+        assert_eq!(document().palette, DEFAULT_PALETTE);
+        let pasted = Document::pasted(RgbaImage::from_pixel(1, 1, Rgba([255, 0, 0, 255])));
+        assert_eq!(pasted.palette, [Rgba([255, 0, 0, 255])]);
     }
 
     #[test]

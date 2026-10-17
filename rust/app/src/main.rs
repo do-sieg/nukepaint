@@ -21,6 +21,7 @@ mod layer_commands;
 mod layer_properties;
 mod layers_panel;
 mod navigator;
+mod palette_panel;
 mod resample_preview;
 mod settings;
 mod shapes;
@@ -2505,6 +2506,7 @@ impl eframe::App for App {
                     let action = tools_panel::show(ui, icons, tool, tool_order, group);
                     tools_action = tools_action.take().or(action);
                 }
+                Section::Palette => palette_panel::show(ui, &image.document.palette, colors),
                 Section::Colors => colors.show(ui, right_click),
                 Section::History => {
                     let document = &image.document;

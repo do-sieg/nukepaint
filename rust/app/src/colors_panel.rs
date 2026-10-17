@@ -533,7 +533,7 @@ fn right_click_option(ui: &mut egui::Ui, right_click: &mut RightClick) {
 }
 
 /// A square of a colour, over light and dark quarters for a see-through one to show as one.
-fn paint_swatch(painter: &egui::Painter, square: Rect, color: Rgba<u8>) {
+pub fn paint_swatch(painter: &egui::Painter, square: Rect, color: Rgba<u8>) {
     let quarter = square.size() / 2.0;
     let dark = Color32::from_gray(180);
     painter.rect_filled(square, 0.0, Color32::WHITE);
@@ -545,7 +545,7 @@ fn paint_swatch(painter: &egui::Painter, square: Rect, color: Rgba<u8>) {
 }
 
 /// The colour's code, RRGGBB, with AA after it for a colour that is not opaque.
-fn hex_code(color: Rgba<u8>) -> String {
+pub fn hex_code(color: Rgba<u8>) -> String {
     let [red, green, blue, alpha] = color.0;
     match alpha {
         255 => format!("{red:02X}{green:02X}{blue:02X}"),
