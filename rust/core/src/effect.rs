@@ -7,6 +7,7 @@
 //! out at the same time on as many threads as there are cores.
 
 mod artistic;
+mod enhance;
 
 use std::{
     f32::consts::TAU,
@@ -19,6 +20,9 @@ use std::{
 };
 
 use image::{Rgba, RgbaImage};
+
+pub use enhance::wavelet_decompose;
+pub(crate) use enhance::GRAIN_MIDDLE;
 
 use crate::{Interpolation, PixelRect, SelectionMask, Turn, turn_pixels};
 
@@ -139,6 +143,23 @@ pub enum Effect {
     /// them, which darken by `darkness` over `depth` of the way down as they go under
     /// each other, with fibres as dark as `threads` says.
     Weave { width: f32, spacing: f32, darkness: f32, depth: f32, threads: f32 },
+    /// Smooths the stairs along the edges of flat colours, as pixel art enlarged would
+    /// have them rounded off.
+    Antialias,
+    /// Keeps every other band of `size` rows, or columns if vertical, the odd ones or
+    /// the even ones from the first, and fills the others from those either side, which
+    /// takes out the combing of a frame of interlaced video.
+    Deinterlace { keep_odd: bool, vertical: bool, size: u32 },
+    /// How far each colour is from the Gaussian blurred one, `contrast` percent of it,
+    /// around middle grey: the details, without the broad tones.
+    HighPass { radius: f32, contrast: f32 },
+    /// Takes the red out of the pixels redder than their green and blue, more of them
+    /// the higher the threshold, from 0 to 100. Meant for a selection around the eyes.
+    RedEyeRemoval { threshold: f32 },
+    /// Averages the pixels within the radius, less the more different their colour,
+    /// which smooths noise but keeps edges: the stronger, the more different the
+    /// colours it still mixes in.
+    ReduceNoise { radius: f32, strength: f32 },
 }
 
 /// How the Focus Blur measures how far a pixel is from the centre, which gives the
@@ -403,6 +424,12 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         | Effect::VanGogh { .. }
         | Effect::Waterpixels { .. }
         | Effect::Weave { .. } => artistic::render(source, effect, stop),
+        Effect::ReduceNoise { radius, strength } if radius < 1.0 || strength <= 0.0 => return Some(None),
+        Effect::Antialias
+        | Effect::Deinterlace { .. }
+        | Effect::HighPass { .. }
+        | Effect::RedEyeRemoval { .. }
+        | Effect::ReduceNoise { .. } => enhance::render(source, effect, stop),
         Effect::Sharpen { radius, amount, threshold } => {
             let blurred = if radius < 1.0 { None } else { Some(blur(source, Weighing::Gaussian, radius, 1.0, stop)?) };
             let blurred = blurred.as_ref().unwrap_or(source);
@@ -936,7 +963,7 @@ mod tests {
     use image::Rgba;
 
     use super::*;
-    use crate::{PixelRect, Selection};
+    use crate::{BlendMode, Layer, PixelRect, Selection, composite};
 
     /// One of each effect, with settings that change something.
     fn all() -> Vec<Effect> {
@@ -956,7 +983,16 @@ mod tests {
             Effect::VariableBlur { radius: 4.0, map: white_map(300, 300), invert: false },
             Effect::ZoomBlur { amount: 20.0, center: [10.0, -20.0] },
             Effect::Sharpen { radius: 3.0, amount: 100.0, threshold: 0.0 },
+            Effect::Antialias,
+            Effect::Deinterlace { keep_odd: false, vertical: false, size: 1 },
+            Effect::Deinterlace { keep_odd: true, vertical: true, size: 3 },
+            Effect::ReduceNoise { radius: 3.0, strength: 40.0 },
         ]
+    }
+
+    /// The effects of the Enhance menu that change even colours.
+    fn enhancing() -> Vec<Effect> {
+        vec![Effect::HighPass { radius: 4.0, contrast: 100.0 }, Effect::RedEyeRemoval { threshold: 50.0 }]
     }
 
     /// One of each effect of the Artistic menu, most of which change even colours too.
@@ -1096,7 +1132,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &[all(), artistic()].concat() {
+        for effect in &[all(), artistic(), enhancing()].concat() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -1106,7 +1142,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &[all(), artistic()].concat() {
+        for effect in &[all(), artistic(), enhancing()].concat() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -1289,6 +1325,84 @@ mod tests {
             let textured = apply(&pixels, &effect);
             assert!(textured.pixels().zip(pixels.pixels()).all(|(a, b)| a[3] == b[3]), "{effect:?}");
             assert_ne!(textured, pixels, "{effect:?}");
+        }
+    }
+
+    #[test]
+    fn reducing_noise_smooths_specks_but_keeps_edges() {
+        let mut pixels = RgbaImage::from_fn(21, 21, |x, _| if x < 10 { Rgba([40, 40, 40, 255]) } else { Rgba([220, 220, 220, 255]) });
+        pixels.put_pixel(4, 10, Rgba([60, 60, 60, 255]));
+        let smoothed = apply(&pixels, &Effect::ReduceNoise { radius: 3.0, strength: 40.0 });
+        assert!(smoothed[(4, 10)][0] < 60, "{:?}", smoothed[(4, 10)]);
+        assert!(smoothed[(9, 10)][0] < 50 && smoothed[(10, 10)][0] > 210, "{:?} {:?}", smoothed[(9, 10)], smoothed[(10, 10)]);
+    }
+
+    #[test]
+    fn red_eye_removal_takes_out_red_only() {
+        let mut pixels = RgbaImage::from_pixel(4, 4, Rgba([200, 40, 40, 255]));
+        pixels.put_pixel(0, 0, Rgba([40, 160, 200, 255]));
+        let removed = apply(&pixels, &Effect::RedEyeRemoval { threshold: 50.0 });
+        assert!(removed[(1, 1)][0] < 100, "{:?}", removed[(1, 1)]);
+        assert_eq!(removed[(1, 1)].0[1..], [40, 40, 255]);
+        assert_eq!(removed[(0, 0)], pixels[(0, 0)]);
+    }
+
+    #[test]
+    fn antialias_rounds_off_stairs() {
+        // A diagonal: white below it, black above.
+        let pixels = RgbaImage::from_fn(10, 10, |x, y| if x <= y { Rgba([255, 255, 255, 255]) } else { Rgba([0, 0, 0, 255]) });
+        let smoothed = apply(&pixels, &Effect::Antialias);
+        let step = smoothed[(5, 5)][0];
+        assert!(step > 0 && step < 255, "{step}");
+        assert_eq!(smoothed[(1, 8)], pixels[(1, 8)]);
+        assert_eq!(smoothed[(8, 1)], pixels[(8, 1)]);
+        // Straight edges have no stairs.
+        let edge = RgbaImage::from_fn(10, 10, |x, _| if x < 5 { Rgba([0, 0, 0, 255]) } else { Rgba([255, 255, 255, 255]) });
+        assert_eq!(apply(&edge, &Effect::Antialias), edge);
+    }
+
+    #[test]
+    fn deinterlacing_fills_the_other_rows_from_those_around() {
+        let pixels = RgbaImage::from_fn(3, 6, |_, y| Rgba([(y * 40) as u8, 0, 0, 255]));
+        let even = apply(&pixels, &Effect::Deinterlace { keep_odd: false, vertical: false, size: 1 });
+        let reds: Vec<u8> = (0..6).map(|y| even[(1, y)][0]).collect();
+        assert_eq!(reds, [0, 40, 80, 120, 160, 160]);
+        let odd = apply(&pixels, &Effect::Deinterlace { keep_odd: true, vertical: false, size: 1 });
+        let reds: Vec<u8> = (0..6).map(|y| odd[(1, y)][0]).collect();
+        assert_eq!(reds, [40, 40, 80, 120, 160, 200]);
+        // Across, the rows stay as they are.
+        assert_eq!(apply(&pixels, &Effect::Deinterlace { keep_odd: false, vertical: true, size: 1 }), pixels);
+    }
+
+    #[test]
+    fn a_high_pass_keeps_only_details() {
+        let flat = apply(&RgbaImage::from_pixel(9, 9, Rgba([200, 30, 90, 180])), &Effect::HighPass { radius: 3.0, contrast: 100.0 });
+        assert!(flat.pixels().all(|pixel| pixel.0 == [128, 128, 128, 180]));
+        let detail = apply(&dot(), &Effect::HighPass { radius: 3.0, contrast: 100.0 });
+        assert!(detail[(10, 10)][0] > 200);
+        assert!(detail[(12, 10)][0] < 128);
+    }
+
+    #[test]
+    fn wavelet_layers_blend_back_into_the_image() {
+        // Detail layers hold differences of up to half the range either way, so a smooth image.
+        let wave = |x: u32, y: u32| (128.0 + 100.0 * (x as f32 * 0.5).sin() * (y as f32 * 0.3).cos()) as u8;
+        let pixels = RgbaImage::from_fn(40, 30, |x, y| Rgba([(x * 6) as u8, (y * 8) as u8, wave(x, y), 255]));
+        let layers = wavelet_decompose(&pixels, 3, &AtomicBool::new(false)).unwrap();
+        assert_eq!(layers.len(), 4);
+        let layers: Vec<Layer> = layers
+            .into_iter()
+            .enumerate()
+            .map(|(index, pixels)| Layer {
+                blend_mode: if index > 0 { BlendMode::GrainMerge } else { BlendMode::Normal },
+                ..Layer::new("", pixels)
+            })
+            .collect();
+        let recomposed = composite(&layers);
+        for (a, b) in recomposed.pixels().zip(pixels.pixels()) {
+            for channel in 0..4 {
+                assert!(a[channel].abs_diff(b[channel]) <= 3, "{a:?} {b:?}");
+            }
         }
     }
 }

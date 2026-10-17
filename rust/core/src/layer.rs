@@ -44,10 +44,13 @@ pub enum BlendMode {
     Darken,
     Screen,
     Xor,
+    /// Adds the layer's colours to those under it, middle grey adding nothing, as the
+    /// detail layers of the Wavelet-decompose are blended.
+    GrainMerge,
 }
 
 impl BlendMode {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Normal,
         Self::Multiply,
         Self::Additive,
@@ -62,6 +65,7 @@ impl BlendMode {
         Self::Darken,
         Self::Screen,
         Self::Xor,
+        Self::GrainMerge,
     ];
 
     pub fn name(self) -> &'static str {
@@ -80,6 +84,7 @@ impl BlendMode {
             Self::Darken => "Darken",
             Self::Screen => "Screen",
             Self::Xor => "Xor",
+            Self::GrainMerge => "Grain Merge",
         }
     }
 }

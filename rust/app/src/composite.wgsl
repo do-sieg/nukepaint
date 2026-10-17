@@ -97,8 +97,11 @@ fn blend(under: f32, over: f32) -> f32 {
         case 12u: {
             return u + o - u * o;
         }
-        default: {
+        case 13u: {
             return f32(u32(under) ^ u32(over)) / 255.0;
+        }
+        default: {
+            return clamp(u + o - 128.0 / 255.0, 0.0, 1.0);
         }
     }
 }

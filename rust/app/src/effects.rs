@@ -37,6 +37,12 @@ pub enum EffectKind {
     TileableBlur,
     VariableBlur,
     ZoomBlur,
+    Antialias,
+    Deinterlace,
+    HighPass,
+    RedEyeRemoval,
+    ReduceNoise,
+    WaveletDecompose,
     Sharpen,
     Offset,
     RotateZoom,
@@ -172,6 +178,17 @@ const TRANSFORM_3D: [Setting; 8] = [
     slider("Pan Y:", -100.0, 100.0, 1.0, 0.0, " %"),
     choice("Resampling:", &RESAMPLINGS, 1),
 ];
+const DEINTERLACE_FIELDS: [&str; 2] = ["Even", "Odd"];
+const DEINTERLACE_ORIENTATIONS: [&str; 2] = ["Horizontal", "Vertical"];
+const DEINTERLACE: [Setting; 3] = [
+    choice("Keep:", &DEINTERLACE_FIELDS, 0),
+    choice("Orientation:", &DEINTERLACE_ORIENTATIONS, 0),
+    slider("Block Size:", 1.0, 64.0, 1.0, 1.0, " px"),
+];
+const HIGH_PASS: [Setting; 2] = [slider("Radius:", 1.0, 200.0, 1.0, 8.0, " px"), slider("Contrast:", 0.0, 500.0, 1.0, 100.0, " %")];
+const RED_EYE: [Setting; 1] = [slider("Threshold:", 0.0, 100.0, 1.0, 50.0, " %")];
+const REDUCE_NOISE: [Setting; 2] = [slider("Radius:", 1.0, 20.0, 1.0, 3.0, " px"), slider("Strength:", 0.0, 100.0, 1.0, 40.0, " %")];
+const WAVELET: [Setting; 1] = [slider("Scales:", 1.0, 7.0, 1.0, 5.0, "")];
 const SHARPEN: [Setting; 3] = [
     slider("Radius:", 1.0, 50.0, 1.0, 3.0, " px"),
     slider("Amount:", 0.0, 300.0, 1.0, 50.0, " %"),
@@ -181,7 +198,7 @@ const SHARPEN: [Setting; 3] = [
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects, then the niche ones it keeps
     /// in a More menu at its end.
-    pub const MENUS: [(&str, &[Self], &[Self]); 4] = [
+    pub const MENUS: [(&str, &[Self], &[Self]); 5] = [
         (
             "Artistic",
             &[ApplyCanvas, Cartoon, GlassTile, Glow, InkSketch, OilPainting, PencilSketch, Photocopy, VanGogh],
@@ -204,6 +221,7 @@ impl EffectKind {
             ],
             &[FragmentBlur, MeanCurvatureBlur, SketchBlur],
         ),
+        ("Enhance", &[Antialias, HighPass, RedEyeRemoval, ReduceNoise], &[Deinterlace, WaveletDecompose]),
         ("Map", &[Offset], &[]),
         ("Photo", &[Sharpen], &[]),
     ];
@@ -240,6 +258,12 @@ impl EffectKind {
             TileableBlur => "Tileable Blur",
             VariableBlur => "Variable Blur",
             ZoomBlur => "Zoom Blur",
+            Antialias => "Antialias",
+            Deinterlace => "Deinterlace",
+            HighPass => "High Pass",
+            RedEyeRemoval => "Red Eye Removal",
+            ReduceNoise => "Reduce Noise",
+            WaveletDecompose => "Wavelet-decompose",
             Sharpen => "Sharpen",
             Offset => "Offset",
             RotateZoom => "Rotate / Zoom",
@@ -279,11 +303,23 @@ impl EffectKind {
             TileableBlur => &TILEABLE,
             VariableBlur => &VARIABLE,
             ZoomBlur => &ZOOM,
+            Antialias => &[],
+            Deinterlace => &DEINTERLACE,
+            HighPass => &HIGH_PASS,
+            RedEyeRemoval => &RED_EYE,
+            ReduceNoise => &REDUCE_NOISE,
+            WaveletDecompose => &WAVELET,
             Sharpen => &SHARPEN,
             Offset => &OFFSET,
             RotateZoom => &ROTATE_ZOOM,
             Transform3d => &TRANSFORM_3D,
         }
+    }
+
+    /// Whether it splits the layer into new ones rather than changing its pixels, so
+    /// has no [`EffectKind::effect`].
+    pub fn makes_layers(self) -> bool {
+        self == WaveletDecompose
     }
 
     /// The effect with these settings, in the order [`EffectKind::settings`] lists them,
@@ -340,6 +376,16 @@ impl EffectKind {
                 invert: values[2] != 0.0,
             },
             ZoomBlur => Effect::ZoomBlur { amount: value(0), center: [value(1), value(2)] },
+            Antialias => Effect::Antialias,
+            Deinterlace => Effect::Deinterlace {
+                keep_odd: pick(0, DEINTERLACE_FIELDS.len()) == 1,
+                vertical: pick(1, DEINTERLACE_ORIENTATIONS.len()) == 1,
+                size: value(2) as u32,
+            },
+            HighPass => Effect::HighPass { radius: value(0), contrast: value(1) },
+            RedEyeRemoval => Effect::RedEyeRemoval { threshold: value(0) },
+            ReduceNoise => Effect::ReduceNoise { radius: value(0), strength: value(1) },
+            WaveletDecompose => unreachable!("makes layers"),
             Sharpen => Effect::Sharpen { radius: value(0), amount: value(1), threshold: value(2) },
             Offset => Effect::Offset {
                 x: values[0] as i32,

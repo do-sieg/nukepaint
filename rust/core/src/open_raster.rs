@@ -36,6 +36,7 @@ fn blend_name(mode: BlendMode) -> &'static str {
         BlendMode::Darken => "svg:darken",
         BlendMode::Screen => "svg:screen",
         BlendMode::Xor => "power-paint:xor",
+        BlendMode::GrainMerge => "power-paint:grain-merge",
     }
 }
 

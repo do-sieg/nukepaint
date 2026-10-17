@@ -1,11 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
+};
 
 use image::{RgbaImage, imageops};
 
 use crate::{
     Adjustment, Affine, BlendMode, FloatingPixels, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
     SelectionMode, Step, blend_layer, composite, composite_area, copy_selected, erase_selected, history::History,
-    adjust, load_image, open_raster, resize, save_image,
+    adjust, load_image, open_raster, resize, save_image, wavelet_decompose,
 };
 
 /// An image being edited: its layers, bottom first, the file it came from, and the
@@ -401,6 +404,23 @@ impl Document {
         }
         self.active_mut().pixels = adjusted;
         true
+    }
+
+    /// Splits the active layer into `scales` layers of details and what is left once
+    /// they are taken out, put over it, as [`wavelet_decompose`] makes them: the details
+    /// blended in the Grain Merge mode, so together they look as it does. The top one
+    /// becomes active. The selection is not looked at.
+    pub fn wavelet_decompose(&mut self, scales: u32) {
+        let layers = wavelet_decompose(&self.active().pixels, scales, &AtomicBool::new(false)).expect("never stopped");
+        let mut names = vec!["Residual".to_owned()];
+        names.extend((1..=scales).rev().map(|scale| format!("Scale {scale}")));
+        for (index, (name, pixels)) in names.into_iter().zip(layers).enumerate() {
+            let mut layer = Layer::new(name, pixels);
+            if index > 0 {
+                layer.blend_mode = BlendMode::GrainMerge;
+            }
+            self.insert_layer(layer);
+        }
     }
 
     /// Mirrors the whole image, every layer and the selection, along either axis or

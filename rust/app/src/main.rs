@@ -1447,6 +1447,8 @@ impl App {
                 image.texture.show_layer_as(layers, dialog.layer, &preview, None);
                 dialog.preview = Some(preview);
             }
+            // Splitting the layer leaves it as it looks.
+            FilterKind::Effect(kind) if kind.makes_layers() => {}
             // The one working out the settings before, if any, gives up.
             FilterKind::Effect(kind) => {
                 let effect = kind.effect(&dialog.values, layers);
@@ -1488,6 +1490,15 @@ impl App {
                     dialog.preview = job.wait();
                 }
                 let image = &mut self.images[dialog.image];
+                if let FilterKind::Effect(kind) = dialog.kind
+                    && kind.makes_layers()
+                {
+                    image.document.wavelet_decompose(dialog.values[0] as u32);
+                    image.document.commit(kind.name(), None);
+                    image.refresh_layers(ctx);
+                    self.last_adjustments.set_values(dialog.kind, dialog.values);
+                    return;
+                }
                 let layer = &mut image.document.layers[dialog.layer];
                 if let Some(preview) = dialog.preview
                     && preview != layer.pixels

@@ -6,7 +6,7 @@ use std::{num::NonZero, thread};
 
 use image::{RgbaImage, imageops};
 
-use crate::{BlendMode, Layer, MAX_OPACITY, PixelRect};
+use crate::{BlendMode, GRAIN_MIDDLE, Layer, MAX_OPACITY, PixelRect};
 
 /// Fewest pixels worth sharing between threads.
 const PARALLEL_PIXELS: usize = 1 << 16;
@@ -121,6 +121,7 @@ fn blend(mode: BlendMode, under: u8, over: u8) -> f32 {
         BlendMode::Darken => u.min(o),
         BlendMode::Screen => u + o - u * o,
         BlendMode::Xor => (under ^ over) as f32 / 255.0,
+        BlendMode::GrainMerge => (u + o - GRAIN_MIDDLE).clamp(0.0, 1.0),
     }
 }
 
