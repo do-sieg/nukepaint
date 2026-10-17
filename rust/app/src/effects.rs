@@ -59,6 +59,11 @@ pub enum EffectKind {
     ReduceNoise,
     WaveletDecompose,
     Sharpen,
+    SoftenPortrait,
+    Straighten,
+    AddBevel,
+    AddBorder,
+    RoundCorners,
     CloudsAndNoise,
     FractalExplorer,
     BayerMatrix,
@@ -289,6 +294,24 @@ const SHARPEN: [Setting; 3] = [
     slider("Amount:", 0.0, 300.0, 1.0, 50.0, " %"),
     slider("Threshold:", 0.0, 100.0, 1.0, 0.0, " %"),
 ];
+const SOFTEN_PORTRAIT: [Setting; 3] = [
+    slider("Softness:", 0.0, 50.0, 1.0, 5.0, " px"),
+    slider("Lighting:", -20.0, 20.0, 1.0, 0.0, ""),
+    slider("Warmth:", 0.0, 20.0, 1.0, 10.0, ""),
+];
+const STRAIGHTEN: [Setting; 3] = [
+    slider("Angle:", -45.0, 45.0, 0.1, 0.0, "°"),
+    check("Zoom to Fill", true),
+    choice("Resampling:", &RESAMPLINGS, 2),
+];
+const BEVEL: [Setting; 3] = [
+    slider("Width:", 1.0, 200.0, 1.0, 10.0, " px"),
+    slider("Depth:", 0.0, 100.0, 1.0, 50.0, " %"),
+    slider("Azimuth:", 0.0, 360.0, 1.0, 135.0, "°"),
+];
+const BORDER: [Setting; 3] =
+    [slider("Size:", 1.0, 500.0, 1.0, 16.0, " px"), color("Color:", PRIMARY), slider("Shading:", 0.0, 100.0, 1.0, 25.0, " %")];
+const ROUND_CORNERS: [Setting; 1] = [slider("Radius:", 1.0, 1000.0, 1.0, 16.0, " px").logarithmic()];
 /// The names of [`NoiseKind::ALL`].
 const NOISE_KINDS: [&str; 6] = ["Clouds", "Perlin", "Simplex", "Turbulence", "Cell Noise", "Plasma"];
 /// The names of [`CellStyle::ALL`].
@@ -413,7 +436,7 @@ const SPREAD: [Setting; 3] = [
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects, then the niche ones it keeps
     /// in a More menu at its end.
-    pub const MENUS: [(&str, &[Self], &[Self]); 9] = [
+    pub const MENUS: [(&str, &[Self], &[Self]); 10] = [
         (
             "Artistic",
             &[ApplyCanvas, Cartoon, GlassTile, Glow, InkSketch, OilPainting, PencilSketch, Photocopy, VanGogh],
@@ -436,6 +459,7 @@ impl EffectKind {
             ],
             &[FragmentBlur, MeanCurvatureBlur, SketchBlur],
         ),
+        ("Decor", &[AddBevel, AddBorder, RoundCorners], &[]),
         (
             "Distort",
             &[Bulge, Crystallize, LensDistortion, Pixelate, PolarCoordinates, Ripple, Twist, Waves, Wind],
@@ -444,7 +468,7 @@ impl EffectKind {
         ("Enhance", &[Antialias, HighPass, RedEyeRemoval, ReduceNoise], &[Deinterlace, WaveletDecompose]),
         ("Map", &[Offset], &[]),
         ("Noise", &[AddNoise, Spread], &[]),
-        ("Photo", &[Sharpen], &[]),
+        ("Photo", &[Sharpen, SoftenPortrait, Straighten], &[]),
         ("Render", &[CloudsAndNoise, FractalExplorer, Checkerboard, Grid, Maze, SpeedLines], &[BayerMatrix]),
         ("Stylize", &[EdgeDetect, Emboss, Outline, Relief], &[]),
     ];
@@ -500,6 +524,11 @@ impl EffectKind {
             ReduceNoise => "Reduce Noise",
             WaveletDecompose => "Wavelet-decompose",
             Sharpen => "Sharpen",
+            SoftenPortrait => "Soften Portrait",
+            Straighten => "Straighten",
+            AddBevel => "Add Bevel",
+            AddBorder => "Add Border",
+            RoundCorners => "Round Corners",
             CloudsAndNoise => "Clouds & Noise",
             FractalExplorer => "Fractal Explorer",
             BayerMatrix => "Bayer Matrix",
@@ -570,6 +599,11 @@ impl EffectKind {
             ReduceNoise => &REDUCE_NOISE,
             WaveletDecompose => &WAVELET,
             Sharpen => &SHARPEN,
+            SoftenPortrait => &SOFTEN_PORTRAIT,
+            Straighten => &STRAIGHTEN,
+            AddBevel => &BEVEL,
+            AddBorder => &BORDER,
+            RoundCorners => &ROUND_CORNERS,
             CloudsAndNoise => &CLOUDS,
             FractalExplorer => &FRACTAL,
             BayerMatrix => &BAYER,
@@ -696,6 +730,15 @@ impl EffectKind {
             ReduceNoise => Effect::ReduceNoise { radius: value(0), strength: value(1) },
             WaveletDecompose => unreachable!("makes layers"),
             Sharpen => Effect::Sharpen { radius: value(0), amount: value(1), threshold: value(2) },
+            SoftenPortrait => Effect::SoftenPortrait { softness: value(0), lighting: value(1), warmth: value(2) },
+            Straighten => Effect::Straighten {
+                angle: value(0),
+                fill: values[1] != 0.0,
+                interpolation: Interpolation::ALL[pick(2, Interpolation::ALL.len())],
+            },
+            AddBevel => Effect::AddBevel { width: value(0), depth: value(1), azimuth: value(2) },
+            AddBorder => Effect::AddBorder { size: value(0), color: unpack_color(values[1]), shading: value(2) },
+            RoundCorners => Effect::RoundCorners { radius: value(0) },
             CloudsAndNoise => Effect::CloudsAndNoise {
                 noise: Noise {
                     cells: CellStyle::ALL[pick(9, CellStyle::ALL.len())],

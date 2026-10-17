@@ -7,9 +7,11 @@
 //! out at the same time on as many threads as there are cores.
 
 mod artistic;
+mod decor;
 mod distort;
 mod enhance;
 mod noise;
+mod photo;
 mod render;
 mod stylize;
 
@@ -98,6 +100,14 @@ pub enum Effect {
     /// out edges and details, as an unsharp mask does, unless it is closer to it than
     /// the threshold. How opaque each pixel is stays the same.
     Sharpen { radius: f32, amount: f32, threshold: f32 },
+    /// Blurs the image by `softness` and lays it halfway over itself where lighter,
+    /// which smooths skin but keeps edges, then lights it by `lighting`, from -20 to 20,
+    /// and warms it by `warmth`, from 0 to 20. How opaque each pixel is stays the same.
+    SoftenPortrait { softness: f32, lighting: f32, warmth: f32 },
+    /// Turns the selected pixels, or all of them, by `angle` about the middle of the
+    /// rectangle around them, redrawing them as `interpolation` says, and if `fill`,
+    /// zooms them in just enough for that rectangle to stay full.
+    Straighten { angle: f32, fill: bool, interpolation: Interpolation },
     /// Moves the pixels right and down by this many, or left and up if below zero,
     /// within the rectangle around the selected ones, or the whole image, filling where
     /// they move away from as `edges` says.
@@ -106,6 +116,17 @@ pub enum Effect {
     /// about the middle of the rectangle around them, redrawing them as `interpolation`
     /// says. Unlike the other effects, it may carry them out of the selection.
     Turn { turn: Turn, interpolation: Interpolation },
+    /// Lights the edges of the selected pixels that can be seen, or of the whole image,
+    /// as a rounded bevel `width` wide, lit from `azimuth`, lighter or darker by up to
+    /// `depth` percent.
+    AddBevel { width: f32, depth: f32, azimuth: f32 },
+    /// A border `size` wide in the colour along the inside of the edges of the
+    /// selection, or of the whole image: lighter at the top and darker at the bottom by
+    /// `shading` percent, its sides half as much.
+    AddBorder { size: f32, color: [u8; 4], shading: f32 },
+    /// Makes the corners of the rectangle around the selected pixels, or of the whole
+    /// image, see-through outside quarter circles of the radius.
+    RoundCorners { radius: f32 },
     /// Lays the image on woven canvas, lit from `azimuth`, which stands out by `depth`.
     ApplyCanvas { azimuth: f32, depth: f32 },
     /// Darkens what is darker than around it, `radius` away, as the outlines of a
@@ -336,6 +357,19 @@ pub fn apply_effect(pixels: &RgbaImage, effect: &Effect, mask: Option<&Selection
         Effect::MedianBlur { radius, percentile } => median(pixels, radius, percentile / 100.0, stop)?,
         Effect::Offset { x, y, edges } => offset(pixels, x, y, edges, mask),
         Effect::Turn { turn, interpolation } => return Some(turn_pixels(pixels, mask, &turn, interpolation)),
+        Effect::Straighten { angle, .. } if angle.abs() < f32::EPSILON => return Some(pixels.clone()),
+        Effect::Straighten { angle, fill, interpolation } => {
+            let whole = PixelRect { left: 0, top: 0, right: pixels.width() as i32, bottom: pixels.height() as i32 };
+            let area = mask.and_then(SelectionMask::bounds).unwrap_or(whole);
+            let zoom = if fill { straightened_zoom(angle, area) } else { 100.0 };
+            // The turn goes clockwise.
+            let turn = Turn { angles: [0.0, 0.0, -angle as f64], zoom, ..Turn::NONE };
+            turn_pixels(pixels, mask, &turn, interpolation)
+        }
+        Effect::AddBevel { width, depth, .. } if width < 1.0 || depth <= 0.0 => return Some(pixels.clone()),
+        Effect::AddBorder { size, .. } if size < 1.0 => return Some(pixels.clone()),
+        Effect::RoundCorners { radius } if radius < 0.5 => return Some(pixels.clone()),
+        Effect::AddBevel { .. } | Effect::AddBorder { .. } | Effect::RoundCorners { .. } => decor::render(pixels, effect, mask, stop)?,
         Effect::TileableBlur { radius } if radius < 1.0 => return Some(pixels.clone()),
         Effect::TileableBlur { radius } => tileable(pixels, radius, mask, stop)?,
         Effect::CloudsAndNoise { .. }
@@ -386,6 +420,17 @@ fn offset(pixels: &RgbaImage, x: i32, y: i32, edges: OffsetEdges, mask: Option<&
         }
     }
     result
+}
+
+/// How much the Straighten zooms, as a percentage, for the area turned by `angle`
+/// degrees to still cover all of it, and a pixel around it, so its corners are not
+/// blended with nothing as they are redrawn.
+fn straightened_zoom(angle: f32, area: PixelRect) -> f64 {
+    let (width, height) = (area.width() as f64, area.height() as f64);
+    let (sin, cos) = (angle as f64).to_radians().abs().sin_cos();
+    // As wide and high as the area grown by a pixel each side is, turned the other way.
+    let (wide, high) = ((width + 2.0) * cos + (height + 2.0) * sin, (width + 2.0) * sin + (height + 2.0) * cos);
+    (wide / width).max(high / height) * 100.0
 }
 
 /// The pixels Gaussian blurred within the rectangle around those `mask` holds, or the
@@ -469,7 +514,11 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         | Effect::Checkerboard { .. }
         | Effect::Grid { .. }
         | Effect::Maze { .. }
-        | Effect::SpeedLines { .. } => unreachable!("worked out on the bytes"),
+        | Effect::SpeedLines { .. }
+        | Effect::Straighten { .. }
+        | Effect::AddBevel { .. }
+        | Effect::AddBorder { .. }
+        | Effect::RoundCorners { .. } => unreachable!("worked out on the bytes"),
         Effect::MotionBlur { angle, distance, centered } => {
             let angle = angle.to_radians();
             let direction = [angle.cos(), -angle.sin()];
@@ -585,6 +634,8 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         Effect::AddNoise { intensity, coverage, .. } if intensity <= 0.0 || coverage <= 0.0 => return Some(None),
         Effect::Spread { amount, .. } if amount < 0.5 => return Some(None),
         Effect::AddNoise { .. } | Effect::Spread { .. } => noise::render(source, effect, stop),
+        Effect::SoftenPortrait { softness, lighting, warmth } if softness < 1.0 && lighting == 0.0 && warmth <= 0.0 => return Some(None),
+        Effect::SoftenPortrait { .. } => photo::render(source, effect, stop),
         Effect::Sharpen { radius, amount, threshold } => {
             let blurred = if radius < 1.0 { None } else { Some(blur(source, Weighing::Gaussian, radius, 1.0, stop)?) };
             let blurred = blurred.as_ref().unwrap_or(source);
@@ -1087,6 +1138,11 @@ fn premultiply(pixel: Rgba<u8>) -> [f32; 4] {
     [r * a, g * a, b * a, a]
 }
 
+/// The channel, from 0 to 1, taken this share of the way to 1, or to 0 below zero.
+fn lightened(channel: f32, amount: f32) -> f32 {
+    if amount >= 0.0 { channel + (1.0 - channel) * amount } else { channel * (1.0 + amount) }
+}
+
 fn add(sum: &mut [f32; 4], color: [f32; 4], weight: f32) {
     for (sum, channel) in sum.iter_mut().zip(color) {
         *sum += channel * weight;
@@ -1244,6 +1300,16 @@ mod tests {
         effects
     }
 
+    /// One of each effect of the Decor menu, and the Soften Portrait.
+    fn decorating() -> Vec<Effect> {
+        vec![
+            Effect::AddBevel { width: 4.0, depth: 50.0, azimuth: 135.0 },
+            Effect::AddBorder { size: 3.0, color: [255, 0, 0, 255], shading: 25.0 },
+            Effect::RoundCorners { radius: 6.0 },
+            Effect::SoftenPortrait { softness: 3.0, lighting: 5.0, warmth: 10.0 },
+        ]
+    }
+
     /// An Add Noise in the colour space, half saturated, over `coverage` percent of the pixels.
     fn add_noise(color_space: NoiseColorSpace, coverage: f32, seed: u32) -> Effect {
         Effect::AddNoise { intensity: 64.0, saturation: 50.0, coverage, color_space, seed }
@@ -1311,6 +1377,9 @@ mod tests {
             Effect::AddNoise { intensity: 0.0, saturation: 50.0, coverage: 100.0, color_space: NoiseColorSpace::Rgb, seed: 0 },
             add_noise(NoiseColorSpace::Lch, 0.0, 0),
             Effect::Spread { amount: 0.0, downward: 50.0, seed: 0 },
+            Effect::SoftenPortrait { softness: 0.0, lighting: 0.0, warmth: 0.0 },
+            Effect::Straighten { angle: 0.0, fill: true, interpolation: Interpolation::Bilinear },
+            Effect::AddBevel { width: 5.0, depth: 0.0, azimuth: 135.0 },
         ];
         for effect in unchanged {
             assert_eq!(apply(&pixels, &effect), pixels, "{effect:?}");
@@ -1388,7 +1457,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy(), decorating()].concat() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -1398,7 +1467,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy(), decorating()].concat() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -1988,5 +2057,90 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn soften_portrait_fills_in_dark_specks_and_warms() {
+        let mut pixels = RgbaImage::from_pixel(21, 21, Rgba([200, 160, 140, 255]));
+        pixels.put_pixel(10, 10, Rgba([100, 80, 70, 255]));
+        let soft = apply(&pixels, &Effect::SoftenPortrait { softness: 3.0, lighting: 0.0, warmth: 0.0 });
+        assert!(soft[(10, 10)][0] > 130, "the speck is half filled in: {:?}", soft[(10, 10)]);
+        assert_eq!(soft[(0, 0)], pixels[(0, 0)], "flat skin stays as it is");
+        let warm = apply(&pixels, &Effect::SoftenPortrait { softness: 0.0, lighting: 0.0, warmth: 20.0 });
+        assert!(warm[(0, 0)][0] > 200 && warm[(0, 0)][2] < 140, "{:?}", warm[(0, 0)]);
+        let lit = apply(&pixels, &Effect::SoftenPortrait { softness: 0.0, lighting: 20.0, warmth: 0.0 });
+        assert!(lit[(0, 0)].0[..3].iter().zip(&pixels[(0, 0)].0[..3]).all(|(after, before)| after > before));
+    }
+
+    #[test]
+    fn straightening_turns_and_fills_the_area() {
+        let pixels = RgbaImage::from_fn(80, 40, |x, y| Rgba([(x * 3) as u8, (y * 6) as u8, 0, 255]));
+        let straightened = |fill| apply(&pixels, &Effect::Straighten { angle: 10.0, fill, interpolation: Interpolation::Bilinear });
+        let filled = straightened(true);
+        assert_ne!(filled, pixels);
+        let empty: Vec<_> = filled.enumerate_pixels().filter(|p| p.2[3] < 255).map(|p| (p.0, p.1, p.2[3])).collect();
+        assert!(empty.is_empty(), "no corner is left empty: {empty:?}");
+        assert_eq!(straightened(false)[(0, 0)][3], 0, "the corners are left empty without zooming");
+        // Turned anticlockwise, the top left comes down, taking its dark green there.
+        let middle_left = filled[(2, 20)];
+        assert!(middle_left[1] < pixels[(2, 20)][1], "{middle_left:?}");
+    }
+
+    #[test]
+    fn a_bevel_lights_the_edges_facing_the_light() {
+        let pixels = RgbaImage::from_pixel(40, 40, Rgba([128, 128, 128, 255]));
+        let bevelled = apply(&pixels, &Effect::AddBevel { width: 6.0, depth: 50.0, azimuth: 135.0 });
+        assert!(bevelled[(0, 20)][0] > 128 && bevelled[(20, 0)][0] > 128, "top and left are lit");
+        assert!(bevelled[(39, 20)][0] < 128 && bevelled[(20, 39)][0] < 128, "bottom and right are in shade");
+        assert!(bevelled[(1, 20)][0] < bevelled[(0, 20)][0], "rounded: steepest at the edge");
+        assert_eq!(bevelled[(20, 20)], pixels[(20, 20)], "the middle stays flat");
+        assert_eq!(bevelled[(6, 20)], pixels[(6, 20)], "past the width");
+        // A see-through layer's shape is bevelled along its own edges.
+        let mut shape = RgbaImage::new(40, 40);
+        for (x, y, pixel) in shape.enumerate_pixels_mut() {
+            if (10..30).contains(&x) && (10..30).contains(&y) {
+                *pixel = Rgba([128, 128, 128, 255]);
+            }
+        }
+        let bevelled = apply(&shape, &Effect::AddBevel { width: 4.0, depth: 50.0, azimuth: 135.0 });
+        assert!(bevelled[(10, 20)][0] > 128 && bevelled[(29, 20)][0] < 128);
+        assert_eq!(bevelled[(5, 5)], Rgba([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn a_border_follows_the_edges_of_the_selection() {
+        let pixels = RgbaImage::from_pixel(40, 40, Rgba([0, 0, 255, 255]));
+        let red = [200, 0, 0, 255];
+        let bordered = apply(&pixels, &Effect::AddBorder { size: 3.0, color: red, shading: 0.0 });
+        assert_eq!(bordered[(0, 20)], Rgba(red));
+        assert_eq!(bordered[(37, 37)], Rgba(red));
+        assert_eq!(bordered[(3, 20)], pixels[(3, 20)], "past its size");
+        let shaded = apply(&pixels, &Effect::AddBorder { size: 3.0, color: red, shading: 50.0 });
+        let [top, left, right, bottom] = [(20, 0), (0, 20), (39, 20), (20, 39)].map(|at| shaded[at][0]);
+        assert!(top > left && left > 200 && right < 200 && bottom < right, "{top} {left} {right} {bottom}");
+        let mask = SelectionMask::of(&Selection::rect(PixelRect { left: 10, top: 10, right: 30, bottom: 30 }), 40, 40).unwrap();
+        let framed = apply_effect(&pixels, &Effect::AddBorder { size: 2.0, color: red, shading: 0.0 }, Some(&mask), &AtomicBool::new(false)).unwrap();
+        assert_eq!(framed[(10, 20)], Rgba(red));
+        assert_eq!(framed[(11, 20)], Rgba(red));
+        assert_eq!(framed[(12, 20)], pixels[(12, 20)]);
+        assert_eq!(framed[(9, 20)], pixels[(9, 20)], "outside the selection");
+    }
+
+    #[test]
+    fn rounding_cuts_the_corners_of_the_area() {
+        let pixels = RgbaImage::from_pixel(40, 30, Rgba([10, 20, 30, 255]));
+        let rounded = apply(&pixels, &Effect::RoundCorners { radius: 8.0 });
+        for corner in [(0, 0), (39, 0), (0, 29), (39, 29), (1, 1)] {
+            assert_eq!(rounded[corner], Rgba([0, 0, 0, 0]), "{corner:?}");
+        }
+        let edge = rounded[(0, 4)][3];
+        assert!(edge > 0 && edge < 255, "the arc is smooth: {edge}");
+        for kept in [(0, 15), (20, 0), (8, 8), (20, 15)] {
+            assert_eq!(rounded[kept], pixels[kept], "{kept:?}");
+        }
+        let mask = SelectionMask::of(&Selection::rect(PixelRect { left: 10, top: 5, right: 30, bottom: 25 }), 40, 30).unwrap();
+        let within = apply_effect(&pixels, &Effect::RoundCorners { radius: 4.0 }, Some(&mask), &AtomicBool::new(false)).unwrap();
+        assert_eq!(within[(10, 5)][3], 0);
+        assert_eq!(within[(0, 0)], pixels[(0, 0)]);
     }
 }

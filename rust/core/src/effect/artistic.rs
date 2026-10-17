@@ -659,7 +659,7 @@ pub(super) fn straight([r, g, b, a]: [f32; 4]) -> [f32; 4] {
 }
 
 /// Red, green and blue, from 0 to 1, multiplied by how opaque the colour is.
-fn opaque_as(rgb: [f32; 3], alpha: f32) -> [f32; 4] {
+pub(super) fn opaque_as(rgb: [f32; 3], alpha: f32) -> [f32; 4] {
     let [r, g, b] = rgb.map(|channel| channel.clamp(0.0, 1.0) * alpha);
     [r, g, b, alpha]
 }
