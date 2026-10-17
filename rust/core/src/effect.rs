@@ -9,6 +9,7 @@
 mod artistic;
 mod distort;
 mod enhance;
+mod noise;
 mod render;
 mod stylize;
 
@@ -26,6 +27,7 @@ use image::{Rgba, RgbaImage};
 
 pub use distort::{NewsprintScreen, WaveShape, WindDirection};
 pub use enhance::wavelet_decompose;
+pub use noise::NoiseColorSpace;
 pub use render::{CellStyle, FractalKind, Noise, NoiseKind};
 pub use stylize::EdgeAlgorithm;
 pub(crate) use enhance::GRAIN_MIDDLE;
@@ -225,6 +227,14 @@ pub enum Effect {
     /// colour as much as the colours change around it, the more so the more
     /// `intensity`, from 0 to 100, and white elsewhere.
     Outline { thickness: f32, intensity: f32 },
+    /// Changes the colours of the `coverage` share of the pixels at random, as much as
+    /// `intensity` says, in `color_space`: how light they are, and the more `saturation`,
+    /// from 0 to 100, their colour too. The seed picks which pixels and how.
+    AddNoise { intensity: f32, saturation: f32, coverage: f32, color_space: NoiseColorSpace, seed: u32 },
+    /// Swaps each pixel for one picked at random up to `amount` away, as the Jumble tool
+    /// does: from above, as far again in streaks down the image, rather than from every
+    /// way, the more `downward`, from 0 to 100, which melts it. The seed picks which.
+    Spread { amount: f32, downward: f32, seed: u32 },
     /// Draws the noise, from the first of `colors` where there is none to the second
     /// where it is full, blended over the image in `blend_mode`: the Difference one
     /// gives Difference Clouds. The Plasma draws red, green and blue each a noise of
@@ -572,6 +582,9 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         Effect::EdgeDetect { .. } | Effect::Emboss { .. } | Effect::Relief { .. } | Effect::Outline { .. } => {
             stylize::render(source, effect, stop)
         }
+        Effect::AddNoise { intensity, coverage, .. } if intensity <= 0.0 || coverage <= 0.0 => return Some(None),
+        Effect::Spread { amount, .. } if amount < 0.5 => return Some(None),
+        Effect::AddNoise { .. } | Effect::Spread { .. } => noise::render(source, effect, stop),
         Effect::Sharpen { radius, amount, threshold } => {
             let blurred = if radius < 1.0 { None } else { Some(blur(source, Weighing::Gaussian, radius, 1.0, stop)?) };
             let blurred = blurred.as_ref().unwrap_or(source);
@@ -1224,6 +1237,23 @@ mod tests {
         effects
     }
 
+    /// One of each effect of the Noise menu, and each colour space.
+    fn noisy() -> Vec<Effect> {
+        let mut effects: Vec<Effect> = NoiseColorSpace::ALL.into_iter().map(|color_space| add_noise(color_space, 100.0, 1)).collect();
+        effects.extend([spread(0.0), spread(100.0)]);
+        effects
+    }
+
+    /// An Add Noise in the colour space, half saturated, over `coverage` percent of the pixels.
+    fn add_noise(color_space: NoiseColorSpace, coverage: f32, seed: u32) -> Effect {
+        Effect::AddNoise { intensity: 64.0, saturation: 50.0, coverage, color_space, seed }
+    }
+
+    /// A Spread 4 pixels far, `downward` percent of the way to melting.
+    fn spread(downward: f32) -> Effect {
+        Effect::Spread { amount: 4.0, downward, seed: 2 }
+    }
+
     /// An Edge Detect with the algorithm, both ways and two radii, not normalized.
     fn edges(algorithm: EdgeAlgorithm) -> Effect {
         edge_detect(algorithm, [true, true], false, false)
@@ -1257,7 +1287,7 @@ mod tests {
     fn an_even_colour_stays_as_it_is() {
         for pixels in [RgbaImage::from_pixel(40, 30, Rgba([200, 100, 50, 180])), RgbaImage::new(40, 30)] {
             let relief = Effect::Relief { azimuth: 135.0, elevation: 45.0, depth: 3.0 };
-            for effect in &[all(), distorting(), vec![relief]].concat() {
+            for effect in &[all(), distorting(), vec![relief, spread(0.0), spread(100.0)]].concat() {
                 assert_eq!(apply(&pixels, effect), pixels, "{effect:?}");
             }
         }
@@ -1278,6 +1308,9 @@ mod tests {
             Effect::VariableBlur { radius: 5.0, map: Arc::new(RgbaImage::new(21, 21)), invert: false },
             Effect::VariableBlur { radius: 5.0, map: white_map(21, 21), invert: true },
             Effect::FocusBlur { radius: 5.0, shape: FocusShape::Square, center: [0.0, 0.0], size: 100.0, transition: 0.0 },
+            Effect::AddNoise { intensity: 0.0, saturation: 50.0, coverage: 100.0, color_space: NoiseColorSpace::Rgb, seed: 0 },
+            add_noise(NoiseColorSpace::Lch, 0.0, 0),
+            Effect::Spread { amount: 0.0, downward: 50.0, seed: 0 },
         ];
         for effect in unchanged {
             assert_eq!(apply(&pixels, &effect), pixels, "{effect:?}");
@@ -1355,7 +1388,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy()].concat() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -1365,7 +1398,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy()].concat() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -1914,5 +1947,46 @@ mod tests {
         assert_eq!(outlined[(3, 3)], Rgba([255, 255, 255, 255]));
         assert_eq!(outlined[(12, 15)], Rgba([0, 0, 0, 255]), "within the thickness of the edge");
         assert_eq!(outlined[(13, 15)], Rgba([255, 255, 255, 255]), "past it");
+    }
+
+    /// A gradient from black on the left to white on the right, and from no blue at the
+    /// top to full blue at the bottom, half opaque.
+    fn ramp() -> RgbaImage {
+        RgbaImage::from_fn(64, 64, |x, y| Rgba([(x * 4) as u8, (x * 4) as u8, (y * 4) as u8, 128]))
+    }
+
+    #[test]
+    fn noise_changes_as_many_pixels_as_it_covers_and_keeps_how_opaque_they_are() {
+        let pixels = ramp();
+        for color_space in NoiseColorSpace::ALL {
+            for coverage in [100.0, 30.0] {
+                let noisy = apply(&pixels, &add_noise(color_space, coverage, 1));
+                assert!(noisy.pixels().all(|pixel| pixel[3] == 128), "{color_space:?}");
+                let changed = noisy.pixels().zip(pixels.pixels()).filter(|(after, before)| after != before).count() as f32;
+                let share = changed / (64.0 * 64.0) * 100.0;
+                assert!(share <= coverage + 3.0 && share > coverage * 0.8, "{color_space:?} changed {share}% for {coverage}%");
+            }
+            assert_eq!(apply(&pixels, &add_noise(color_space, 100.0, 1)), apply(&pixels, &add_noise(color_space, 100.0, 1)));
+            assert_ne!(apply(&pixels, &add_noise(color_space, 100.0, 1)), apply(&pixels, &add_noise(color_space, 100.0, 2)));
+        }
+    }
+
+    #[test]
+    fn spreading_only_moves_colours_around_within_its_reach() {
+        let pixels = ramp();
+        for downward in [0.0, 50.0, 100.0] {
+            let spread = apply(&pixels, &spread(downward));
+            assert_ne!(spread, pixels);
+            for (x, y, pixel) in spread.enumerate_pixels() {
+                // Each column is a shade of grey, and each row a shade of blue.
+                let (from_x, from_y) = (pixel[0] as i32 / 4, pixel[2] as i32 / 4);
+                assert!((from_x - x as i32).abs() <= 4, "{downward}: from {from_x} to {x}");
+                let above = (y as i32 - from_y).clamp(-4, 12);
+                assert_eq!(y as i32 - from_y, above, "{downward}: from {from_y} to {y}");
+                if downward == 100.0 {
+                    assert!(from_y <= y as i32, "melting only pulls colours down");
+                }
+            }
+        }
     }
 }

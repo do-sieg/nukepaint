@@ -272,7 +272,7 @@ fn to_srgb(channel: f32) -> f32 {
 }
 
 /// Hue, saturation and value, each from 0 to 1.
-fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
+pub(crate) fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
     let max = r.max(g).max(b);
     let range = max - r.min(g).min(b);
     if range <= 0.0 {
@@ -288,7 +288,7 @@ fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
     [(sector / 6.0).rem_euclid(1.0), range / max, max]
 }
 
-fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
+pub(crate) fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
     [1.0, 2.0 / 3.0, 1.0 / 3.0].map(|offset| {
         let p = ((h + offset).fract() * 6.0 - 3.0).abs();
         v * (1.0 + ((p - 1.0).clamp(0.0, 1.0) - 1.0) * s)

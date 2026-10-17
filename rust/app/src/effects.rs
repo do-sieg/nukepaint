@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use power_paint_core::{
-    BlendMode, CellStyle, EdgeAlgorithm, Effect, FocusShape, FractalKind, Interpolation, Layer, NewsprintScreen, Noise, NoiseKind, OffsetEdges, Turn,
+    BlendMode, CellStyle, EdgeAlgorithm, Effect, FocusShape, FractalKind, Interpolation, Layer, NewsprintScreen, Noise, NoiseColorSpace, NoiseKind, OffsetEdges, Turn,
     WaveShape, WindDirection,
 };
 
@@ -70,6 +70,8 @@ pub enum EffectKind {
     Emboss,
     Outline,
     Relief,
+    AddNoise,
+    Spread,
     Offset,
     RotateZoom,
     Transform3d,
@@ -393,11 +395,25 @@ const RELIEF: [Setting; 3] = [
     slider("Depth:", 1.0, 50.0, 1.0, 3.0, ""),
 ];
 const OUTLINE: [Setting; 2] = [slider("Thickness:", 1.0, 50.0, 1.0, 3.0, " px"), slider("Intensity:", 0.0, 100.0, 1.0, 50.0, " %")];
+/// The names of [`NoiseColorSpace::ALL`].
+const NOISE_COLOR_SPACES: [&str; 3] = ["RGB", "HSV", "CIE LCh"];
+const ADD_NOISE: [Setting; 5] = [
+    slider("Intensity:", 0.0, 100.0, 1.0, 64.0, " %"),
+    slider("Color Saturation:", 0.0, 100.0, 1.0, 50.0, " %"),
+    slider("Coverage:", 0.0, 100.0, 1.0, 100.0, " %"),
+    choice("Color Space:", &NOISE_COLOR_SPACES, 0),
+    SEED,
+];
+const SPREAD: [Setting; 3] = [
+    slider("Amount:", 1.0, 200.0, 1.0, 5.0, " px").logarithmic(),
+    slider("Downward Bias:", 0.0, 100.0, 1.0, 0.0, " %"),
+    SEED,
+];
 
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects, then the niche ones it keeps
     /// in a More menu at its end.
-    pub const MENUS: [(&str, &[Self], &[Self]); 8] = [
+    pub const MENUS: [(&str, &[Self], &[Self]); 9] = [
         (
             "Artistic",
             &[ApplyCanvas, Cartoon, GlassTile, Glow, InkSketch, OilPainting, PencilSketch, Photocopy, VanGogh],
@@ -427,6 +443,7 @@ impl EffectKind {
         ),
         ("Enhance", &[Antialias, HighPass, RedEyeRemoval, ReduceNoise], &[Deinterlace, WaveletDecompose]),
         ("Map", &[Offset], &[]),
+        ("Noise", &[AddNoise, Spread], &[]),
         ("Photo", &[Sharpen], &[]),
         ("Render", &[CloudsAndNoise, FractalExplorer, Checkerboard, Grid, Maze, SpeedLines], &[BayerMatrix]),
         ("Stylize", &[EdgeDetect, Emboss, Outline, Relief], &[]),
@@ -494,6 +511,8 @@ impl EffectKind {
             Emboss => "Emboss",
             Outline => "Outline",
             Relief => "Relief",
+            AddNoise => "Add Noise",
+            Spread => "Spread",
             Offset => "Offset",
             RotateZoom => "Rotate / Zoom",
             Transform3d => "3D Transform",
@@ -561,6 +580,8 @@ impl EffectKind {
             EdgeDetect => &EDGE_DETECT,
             Emboss | Relief => &RELIEF,
             Outline => &OUTLINE,
+            AddNoise => &ADD_NOISE,
+            Spread => &SPREAD,
             Offset => &OFFSET,
             RotateZoom => &ROTATE_ZOOM,
             Transform3d => &TRANSFORM_3D,
@@ -733,6 +754,14 @@ impl EffectKind {
             Emboss => Effect::Emboss { azimuth: value(0), elevation: value(1), depth: value(2) },
             Relief => Effect::Relief { azimuth: value(0), elevation: value(1), depth: value(2) },
             Outline => Effect::Outline { thickness: value(0), intensity: value(1) },
+            AddNoise => Effect::AddNoise {
+                intensity: value(0),
+                saturation: value(1),
+                coverage: value(2),
+                color_space: NoiseColorSpace::ALL[pick(3, NoiseColorSpace::ALL.len())],
+                seed: value(4) as u32,
+            },
+            Spread => Effect::Spread { amount: value(0), downward: value(1), seed: value(2) as u32 },
             Offset => Effect::Offset {
                 x: values[0] as i32,
                 y: values[1] as i32,

@@ -669,7 +669,7 @@ fn smooth(t: f32) -> f32 {
 }
 
 /// The colour in CIE L*a*b*, which measures how different colours look evenly.
-fn lab([r, g, b]: [f32; 3]) -> [f32; 3] {
+pub(super) fn lab([r, g, b]: [f32; 3]) -> [f32; 3] {
     let linear = |channel: f32| if channel <= 0.04045 { channel / 12.92 } else { ((channel + 0.055) / 1.055).powf(2.4) };
     let (r, g, b) = (linear(r), linear(g), linear(b));
     let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
