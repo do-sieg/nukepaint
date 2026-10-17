@@ -611,7 +611,8 @@ mod tests {
     use super::*;
 
     const BLACK: Rgba<u8> = Rgba([0, 0, 0, 255]);
-    const STYLE: ShapeStyle = ShapeStyle { color: BLACK, size: 1, smooth: false, overlaps: Overlaps::Add };
+    const STYLE: ShapeStyle = ShapeStyle { color: BLACK, fill: None, size: 1, smooth: false, overlaps: Overlaps::Add };
+    const FILLED: ShapeStyle = ShapeStyle { fill: Some(BLACK), ..STYLE };
 
     /// The middle of the pixel at `x`, `y`.
     fn at(x: i32, y: i32) -> (f64, f64) {
@@ -628,7 +629,17 @@ mod tests {
 
     /// A shape drawn with a drag from `from` to `to`, as a step.
     fn drawn(document: &mut Document, kind: ShapeKind, from: (i32, i32), to: (i32, i32)) -> ShapeEdit {
-        let (mut edit, _) = ShapeEdit::begin(document, kind, from, STYLE, false, None);
+        drawn_with(document, kind, from, to, STYLE)
+    }
+
+    fn drawn_with(
+        document: &mut Document,
+        kind: ShapeKind,
+        from: (i32, i32),
+        to: (i32, i32),
+        style: ShapeStyle,
+    ) -> ShapeEdit {
+        let (mut edit, _) = ShapeEdit::begin(document, kind, from, style, false, None);
         edit.draw_to(to, false);
         assert!(edit.finish(document, "Shape", None));
         edit
@@ -706,14 +717,14 @@ mod tests {
     #[test]
     fn the_body_moves_and_the_box_resizes() {
         let mut document = document();
-        let mut edit = drawn(&mut document, ShapeKind::FilledRectangle, (2, 2), (5, 5));
+        let mut edit = drawn_with(&mut document, ShapeKind::Rectangle, (2, 2), (5, 5), FILLED);
         edit.press(&document, Handle::Body, at(3, 3));
         edit.drag_to(at(6, 4), false);
-        edit.release(&mut document, "Filled Rectangle", None);
+        edit.release(&mut document, "Rectangle", None);
         assert_eq!(edit.shape(&document).unwrap().points, [(5, 3), (8, 6)]);
         edit.press(&document, Handle::Box(-1, 0), at(5, 4));
         edit.drag_to(at(1, 9), false);
-        edit.release(&mut document, "Filled Rectangle", None);
+        edit.release(&mut document, "Rectangle", None);
         assert_eq!(edit.shape(&document).unwrap().points, [(1, 3), (8, 6)]);
         assert!(black(&document, 1, 3) && black(&document, 4, 5) && !black(&document, 1, 9));
         // A corner with Shift keeps to a square from the opposite one.
@@ -725,7 +736,7 @@ mod tests {
     #[test]
     fn a_contour_stretches_with_its_box() {
         let mut document = document();
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Contour, (0, 0), STYLE, false, None);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Contour, (0, 0), FILLED, false, None);
         for at in [(4, 0), (4, 4), (0, 4)] {
             edit.draw_to(at, false);
         }
@@ -739,14 +750,14 @@ mod tests {
     #[test]
     fn the_polygon_puts_down_corners_and_they_change() {
         let mut document = document();
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false, None);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), FILLED, false, None);
         assert!(edit.is_drawing() && !edit.is_dragging());
         edit.add_corner((8, 0));
         edit.reach(Some((8, 8)));
         assert!(*edit.pixels().get_pixel(6, 2) == BLACK, "it shows closed on the pointer");
         assert!(!edit.finish(&mut document, "Polygon", None), "two corners are not enough");
 
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false, None);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), FILLED, false, None);
         for at in [(8, 0), (8, 8), (0, 8)] {
             edit.add_corner(at);
         }
@@ -768,10 +779,10 @@ mod tests {
     fn dragging_around_a_shape_turns_it() {
         let mut document = document();
         // A Rectangle turns with its box, about its middle.
-        let mut edit = drawn(&mut document, ShapeKind::FilledRectangle, (2, 8), (16, 10));
+        let mut edit = drawn_with(&mut document, ShapeKind::Rectangle, (2, 8), (16, 10), FILLED);
         edit.press(&document, Handle::Rotate, (18.0, 9.5));
         edit.drag_to((9.5, 17.0), false);
-        assert!(edit.release(&mut document, "Filled Rectangle", None));
+        assert!(edit.release(&mut document, "Rectangle", None));
         let shape = edit.shape(&document).unwrap();
         assert!((shape.angle - PI / 2.0).abs() < 1e-9 && shape.points == [(2, 8), (16, 10)]);
         assert!(black(&document, 9, 3) && black(&document, 9, 15) && !black(&document, 3, 9));
@@ -782,7 +793,7 @@ mod tests {
         assert!((x - 9.5).abs() < 1e-9 && (y - 2.5).abs() < 1e-9);
         edit.press(&document, Handle::Box(-1, 0), (9.5, 2.5));
         edit.drag_to((9.5, 0.5), false);
-        edit.release(&mut document, "Filled Rectangle", None);
+        edit.release(&mut document, "Rectangle", None);
         assert!(black(&document, 9, 0) && black(&document, 9, 15) && !black(&document, 9, 17));
         // A Line's ends turn instead, in steps of 15° with Shift.
         let mut line = drawn(&mut document, ShapeKind::Line, (0, 0), (10, 0));
@@ -825,7 +836,7 @@ mod tests {
     #[test]
     fn a_shape_being_drawn_goes_on_while_nothing_else_changes() {
         let mut document = document();
-        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), STYLE, false, None);
+        let (mut edit, _) = ShapeEdit::begin(&document, ShapeKind::Polygon, (0, 0), FILLED, false, None);
         assert!(edit.is_current(&document));
         document.active_mut().pixels.put_pixel(19, 19, BLACK);
         document.commit("Pencil", None);

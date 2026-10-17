@@ -45,9 +45,15 @@ pub const JUMBLE: Icon = icon!("jumble");
 pub const LINE: Icon = icon!("line");
 pub const CURVE: Icon = icon!("curve");
 pub const RECTANGLE: Icon = icon!("rectangle");
-pub const FILLED_RECTANGLE: Icon = icon!("filled_rectangle");
+pub const RECTANGLE_FILLED: Icon = icon!("filled_rectangle");
+pub const RECTANGLE_BOTH: Icon = icon!("rectangle_both");
 pub const ELLIPSE: Icon = icon!("ellipse");
-pub const FILLED_ELLIPSE: Icon = icon!("filled_ellipse");
+pub const ELLIPSE_FILLED: Icon = icon!("filled_ellipse");
+pub const ELLIPSE_BOTH: Icon = icon!("ellipse_both");
+pub const CONTOUR_OUTLINE: Icon = icon!("contour_outline");
+pub const CONTOUR_BOTH: Icon = icon!("contour_both");
+pub const POLYGON_OUTLINE: Icon = icon!("polygon_outline");
+pub const POLYGON_BOTH: Icon = icon!("polygon_both");
 pub const CONTOUR: Icon = icon!("contour");
 pub const POLYGON: Icon = icon!("polygon");
 pub const CURSOR_PAINTBRUSH: Icon = icon!("cursor_paintbrush");
@@ -90,7 +96,7 @@ pub const UNDO: Icon = icon!("undo");
 pub const REDO: Icon = icon!("redo");
 
 /// Those the history can list steps with, which it keeps by name.
-const STEP_ICONS: [Icon; 39] = [
+const STEP_ICONS: [Icon; 37] = [
     RECT_SELECT,
     LASSO_SELECT,
     ELLIPSE_SELECT,
@@ -125,9 +131,7 @@ const STEP_ICONS: [Icon; 39] = [
     LINE,
     CURVE,
     RECTANGLE,
-    FILLED_RECTANGLE,
     ELLIPSE,
-    FILLED_ELLIPSE,
     CONTOUR,
     POLYGON,
 ];

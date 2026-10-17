@@ -1,8 +1,9 @@
-//! The shapes the shape tools draw: a Line, a Curve, a Rectangle or an Ellipse, empty
-//! or filled, and a Contour or a Polygon, which are filled. Each goes through the
-//! middle of the pixels its points are on, in a line as wide as asked, of a colour
-//! blended over what is under it, with smooth edges if asked to. However often it goes
-//! over a pixel, it changes it no more than the once it covered it most. A shape may
+//! The shapes the shape tools draw: a Line, a Curve, a Rectangle, an Ellipse, a Contour
+//! or a Polygon. Each goes through the middle of the pixels its points are on, in a
+//! line as wide as asked, of a colour blended over what is under it, with smooth edges
+//! if asked to, and those that close can be filled, in that colour or another under
+//! the line. However often it goes over a pixel, it changes it no more than the once it
+//! covered it most. A shape may
 //! wrap around the edges of an area, coming back in at one edge as it goes off the other.
 
 use std::f64::consts::{PI, TAU};
@@ -21,20 +22,13 @@ pub enum ShapeKind {
     Line,
     Curve,
     Rectangle,
-    FilledRectangle,
     Ellipse,
-    FilledEllipse,
     /// Drawn freehand.
     Contour,
     Polygon,
 }
 
 impl ShapeKind {
-    /// Whether it fills what its outline goes around.
-    pub fn is_filled(self) -> bool {
-        matches!(self, Self::FilledRectangle | Self::FilledEllipse | Self::Contour | Self::Polygon)
-    }
-
     /// Whether its outline goes back to where it began.
     pub fn is_closed(self) -> bool {
         !matches!(self, Self::Line | Self::Curve)
@@ -42,7 +36,7 @@ impl ShapeKind {
 
     /// Whether it is placed by the rectangle it fits in.
     pub fn is_framed(self) -> bool {
-        matches!(self, Self::Rectangle | Self::FilledRectangle | Self::Ellipse | Self::FilledEllipse)
+        matches!(self, Self::Rectangle | Self::Ellipse)
     }
 }
 
@@ -94,7 +88,7 @@ impl Shape {
             kind if kind.is_framed() => {
                 let (a, b) = (points[0], points[1]);
                 // An ellipse no wider or no taller than a pixel is the line it then is.
-                let round = matches!(kind, ShapeKind::Ellipse | ShapeKind::FilledEllipse);
+                let round = kind == ShapeKind::Ellipse;
                 if round && a.0 != b.0 && a.1 != b.1 { ellipse_points(a, b) } else { vec![a, (b.0, a.1), b, (a.0, b.1)] }
             }
             _ => points,
@@ -141,6 +135,8 @@ fn ellipse_points(a: (f64, f64), b: (f64, f64)) -> Vec<(f64, f64)> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShapeStyle {
     pub color: Rgba<u8>,
+    /// What fills what its outline goes around, if anything does and it closes.
+    pub fill: Option<Rgba<u8>>,
     /// How wide its line is, in pixels.
     pub size: u32,
     /// Whether its edges fade out over a pixel rather than stop at one.
@@ -251,12 +247,17 @@ fn draw(
     if area.is_empty() {
         return None;
     }
+    let fill = style.fill.filter(|_| shape.kind.is_closed());
     let mut coverage = Coverage::new(area);
-    if shape.kind.is_filled() {
+    // A fill of another colour goes under the line; one of the line's own goes in with
+    // it, so that a see-through colour goes no darker where they meet.
+    let mut inside = fill.filter(|&color| color != style.color).map(|color| (Coverage::new(area), color));
+    if fill.is_some() {
         // As with the lassos, an outline that crosses itself fills what the overlaps say.
         let overlaps = if shape.kind.is_framed() { Overlaps::Add } else { style.overlaps };
+        let filled = inside.as_mut().map_or(&mut coverage, |(inside, _)| inside);
         for span in Selection::enclosed(&outline, overlaps).spans(area) {
-            coverage.fill(span);
+            filled.fill(span);
         }
     }
     let tip = tip(size);
@@ -269,27 +270,26 @@ fn draw(
             coverage.hard_segment(from, to, &tip);
         }
     }
-    let (coverage, area) = match wrap {
-        Some(wrap) => {
-            let mut folded = Coverage::new(wrap);
-            for y in area.top..area.bottom {
-                for x in area.left..area.right {
-                    let (on_x, on_y) = wrap::pixel(wrap, x as i64, y as i64);
-                    folded.cover(on_x as i64, on_y as i64, coverage.at(x, y));
-                }
-            }
-            (folded, wrap::changed_area(wrap, area)?)
-        }
-        None => (coverage, area),
+    let (coverage, inside, area) = match wrap {
+        Some(wrap) => (
+            coverage.folded(wrap),
+            inside.map(|(inside, color)| (inside.folded(wrap), color)),
+            wrap::changed_area(wrap, area)?,
+        ),
+        None => (coverage, inside, area),
     };
     for y in area.top..area.bottom {
         for x in area.left..area.right {
             let covered = coverage.at(x, y);
+            let filled = inside.as_ref().map_or(0, |(inside, _)| inside.at(x, y));
             let (x, y) = (x as u32, y as u32);
-            if covered == 0 || mask.is_some_and(|mask| !mask.contains(x, y)) {
+            if (covered == 0 && filled == 0) || mask.is_some_and(|mask| !mask.contains(x, y)) {
                 continue;
             }
             let mut pixel = base.get_pixel(x, y).0;
+            if let Some((_, color)) = &inside {
+                blend_pixel(&mut pixel, &color.0, filled as f32 / 255.0, BlendMode::Normal);
+            }
             blend_pixel(&mut pixel, &style.color.0, covered as f32 / 255.0, BlendMode::Normal);
             pixels.put_pixel(x, y, Rgba(pixel));
         }
@@ -310,6 +310,18 @@ impl Coverage {
 
     fn at(&self, x: i32, y: i32) -> u8 {
         self.values[((y - self.area.top) * self.area.width() + x - self.area.left) as usize]
+    }
+
+    /// The coverage of an area that wraps around the edges of `wrap`, folded into it.
+    fn folded(&self, wrap: PixelRect) -> Self {
+        let mut folded = Coverage::new(wrap);
+        for y in self.area.top..self.area.bottom {
+            for x in self.area.left..self.area.right {
+                let (on_x, on_y) = wrap::pixel(wrap, x as i64, y as i64);
+                folded.cover(on_x as i64, on_y as i64, self.at(x, y));
+            }
+        }
+        folded
     }
 
     /// Covers the pixel at `x`, `y` by `value`, unless it is covered as much already or
@@ -388,7 +400,11 @@ mod tests {
     const BLACK: Rgba<u8> = Rgba([0, 0, 0, 255]);
 
     fn style(size: u32, smooth: bool) -> ShapeStyle {
-        ShapeStyle { color: BLACK, size, smooth, overlaps: Overlaps::Add }
+        ShapeStyle { color: BLACK, fill: None, size, smooth, overlaps: Overlaps::Add }
+    }
+
+    fn filled(size: u32, smooth: bool) -> ShapeStyle {
+        ShapeStyle { fill: Some(BLACK), ..style(size, smooth) }
     }
 
     fn shape(kind: ShapeKind, points: &[(i32, i32)]) -> Shape {
@@ -417,14 +433,19 @@ mod tests {
         let outlined = drawn(&canvas);
         assert_eq!(outlined.len(), 12);
         assert!(outlined.contains(&(1, 1)) && outlined.contains(&(4, 4)) && !outlined.contains(&(2, 2)));
-        canvas.draw(&shape(ShapeKind::FilledRectangle, &corners), &style(1, false));
+        canvas.draw(&shape(ShapeKind::Rectangle, &corners), &filled(1, false));
         assert_eq!(drawn(&canvas).len(), 16);
+        // Filled in another colour, it is under the line.
+        let white = Rgba([255, 255, 255, 255]);
+        canvas.draw(&shape(ShapeKind::Rectangle, &corners), &ShapeStyle { fill: Some(white), ..style(1, false) });
+        assert_eq!(drawn(&canvas), outlined);
+        assert_eq!(*canvas.pixels().get_pixel(2, 2), white);
     }
 
     #[test]
     fn an_ellipse_fits_in_its_rectangle() {
         let mut canvas = ShapeCanvas::new(RgbaImage::new(12, 12), None);
-        canvas.draw(&shape(ShapeKind::FilledEllipse, &[(1, 1), (9, 9)]), &style(1, false));
+        canvas.draw(&shape(ShapeKind::Ellipse, &[(1, 1), (9, 9)]), &filled(1, false));
         let pixels = drawn(&canvas);
         assert!(pixels.contains(&(5, 5)) && pixels.contains(&(1, 5)) && pixels.contains(&(5, 9)));
         assert!(!pixels.contains(&(1, 1)) && !pixels.contains(&(9, 9)));
@@ -448,9 +469,9 @@ mod tests {
     fn a_turned_shape_turns_about_its_middle() {
         let mut canvas = ShapeCanvas::new(RgbaImage::new(12, 12), None);
         // A wide flat rectangle, a quarter turn round, stands up.
-        let turned = Shape { angle: PI / 2.0, ..shape(ShapeKind::FilledRectangle, &[(1, 5), (9, 6)]) };
+        let turned = Shape { angle: PI / 2.0, ..shape(ShapeKind::Rectangle, &[(1, 5), (9, 6)]) };
         assert_eq!(turned.center(), (5.5, 6.0));
-        canvas.draw(&turned, &style(1, false));
+        canvas.draw(&turned, &filled(1, false));
         let pixels = drawn(&canvas);
         assert!(pixels.contains(&(5, 2)) && pixels.contains(&(5, 9)) && pixels.contains(&(6, 6)));
         assert!(!pixels.contains(&(1, 5)) && !pixels.contains(&(9, 6)));
@@ -461,9 +482,10 @@ mod tests {
         // Around a square twice over: the second time round only its right half.
         let twice = [(0, 0), (8, 0), (8, 8), (0, 8), (0, 0), (4, 0), (8, 0), (8, 8), (4, 8), (4, 0)];
         let mut canvas = ShapeCanvas::new(RgbaImage::new(10, 10), None);
-        canvas.draw(&shape(ShapeKind::Polygon, &twice), &style(1, false));
+        canvas.draw(&shape(ShapeKind::Polygon, &twice), &filled(1, false));
         assert!(drawn(&canvas).contains(&(6, 4)));
-        canvas.draw(&shape(ShapeKind::Polygon, &twice), &ShapeStyle { overlaps: Overlaps::Subtract, ..style(1, false) });
+        let subtract = ShapeStyle { overlaps: Overlaps::Subtract, ..filled(1, false) };
+        canvas.draw(&shape(ShapeKind::Polygon, &twice), &subtract);
         assert!(!drawn(&canvas).contains(&(6, 4)) && drawn(&canvas).contains(&(2, 4)));
     }
 
@@ -471,8 +493,8 @@ mod tests {
     fn drawing_again_takes_the_last_one_off() {
         let base = RgbaImage::from_pixel(10, 10, Rgba([255, 255, 255, 255]));
         let mut canvas = ShapeCanvas::new(base.clone(), None);
-        canvas.draw(&shape(ShapeKind::FilledRectangle, &[(0, 0), (3, 3)]), &style(1, false));
-        let area = canvas.draw(&shape(ShapeKind::FilledRectangle, &[(6, 6), (8, 8)]), &style(1, false));
+        canvas.draw(&shape(ShapeKind::Rectangle, &[(0, 0), (3, 3)]), &filled(1, false));
+        let area = canvas.draw(&shape(ShapeKind::Rectangle, &[(6, 6), (8, 8)]), &filled(1, false));
         assert!(!drawn(&canvas).contains(&(1, 1)) && drawn(&canvas).contains(&(7, 7)));
         let area = area.expect("both are on the image");
         assert!(area.left == 0 && area.right >= 9, "the area both were drawn over");
@@ -496,13 +518,14 @@ mod tests {
     #[test]
     fn smooth_edges_cover_pixels_in_part_without_building_up() {
         let mut canvas = ShapeCanvas::new(RgbaImage::new(10, 10), None);
-        canvas.draw(&shape(ShapeKind::Polygon, &[(1, 1), (8, 2), (3, 8)]), &style(2, true));
+        canvas.draw(&shape(ShapeKind::Polygon, &[(1, 1), (8, 2), (3, 8)]), &filled(2, true));
         let alphas: Vec<u8> = canvas.pixels().pixels().map(|pixel| pixel[3]).collect();
         assert!(alphas.iter().any(|&alpha| alpha > 0 && alpha < 255), "a soft edge");
         assert_eq!(canvas.pixels().get_pixel(4, 4)[3], 255, "the inside is covered whole");
         // A see-through colour goes no darker where the line meets itself, or the fill.
-        let half = ShapeStyle { color: Rgba([0, 0, 0, 128]), ..style(3, false) };
-        canvas.draw(&shape(ShapeKind::FilledRectangle, &[(1, 1), (8, 8)]), &half);
+        let half = Rgba([0, 0, 0, 128]);
+        let half = ShapeStyle { color: half, fill: Some(half), ..style(3, false) };
+        canvas.draw(&shape(ShapeKind::Rectangle, &[(1, 1), (8, 8)]), &half);
         assert_eq!(canvas.pixels().get_pixel(1, 1)[3], canvas.pixels().get_pixel(4, 4)[3]);
     }
 
@@ -510,7 +533,7 @@ mod tests {
     fn a_wrapping_shape_comes_back_in_at_the_other_edge() {
         let area = PixelRect { left: 2, top: 2, right: 8, bottom: 8 };
         let mut canvas = ShapeCanvas::new(RgbaImage::new(10, 10), None).wrapping(Some(area));
-        let style = ShapeStyle { color: Rgba([0, 0, 0, 255]), size: 1, smooth: false, overlaps: Overlaps::Add };
+        let style = style(1, false);
         // A line from inside the area to past its right edge.
         let drawn = canvas.draw(&Shape::new(ShapeKind::Line, vec![(6, 4), (9, 4)]), &style);
         // All the way across, with the room kept around the line.

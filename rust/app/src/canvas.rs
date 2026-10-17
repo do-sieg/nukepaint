@@ -806,7 +806,7 @@ fn use_shape_tool(
             image.show_shape(area);
         }
     }
-    // Another colour, size or antialiasing draws the shape again that way.
+    // Another colour, size, fill or antialiasing draws the shape again that way.
     if !image.is_dragging()
         && let Some(shape) = image.shape.as_mut()
     {

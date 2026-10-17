@@ -48,7 +48,7 @@ use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
     Affine, Document, Effect, FloatingPixels, GradientKind, GradientMode, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
-    RgbaImage, SAVE_EXTENSIONS, SelectionMask, SelectionMode, Turn, is_savable, thumbnail,
+    RgbaImage, SAVE_EXTENSIONS, SelectionMask, SelectionMode, ShapeKind, Turn, is_savable, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
 use lasso::{Lasso, LassoKind, PolygonEdit};
@@ -57,7 +57,7 @@ use layer_properties::Properties;
 use settings::Settings;
 use shapes::ShapeEdit;
 use slider_field::SliderField;
-use tools::{SampleSource, Tool, Tools};
+use tools::{SampleSource, ShapeFill, Tool, Tools};
 use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
 
@@ -1593,15 +1593,31 @@ impl App {
             .on_hover_text(help);
     }
 
-    /// The shape tools' settings: how wide they draw, whether they smooth their edges,
-    /// and what the Contour and the Polygon fill where they cross themselves.
+    /// The shape tools' settings: how wide they draw, whether those that close their
+    /// outline are outlined, filled or both, whether they smooth their edges, and what
+    /// the Contour and the Polygon fill where they cross themselves.
     fn shape_options(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.label("Size:");
         let size = tool_field(&mut self.tools.shape_size, 1..=MAX_TIP_SIZE, " px").logarithmic();
         ui.add(size).on_hover_text("How wide the shapes' lines are.");
+        let tool = self.tools.tool;
+        if tool.shape().is_some_and(ShapeKind::is_closed) {
+            ui.separator();
+            ui.label("Fill:");
+            for fill in ShapeFill::ALL {
+                let texture = self.icons.get(ui.ctx(), fill.icon(tool));
+                // The icons are light gray lines, made the colour of the text to suit either theme.
+                let tint = ui.visuals().strong_text_color();
+                let image = egui::Image::new(texture).fit_to_exact_size(ICON_SIZE).tint(tint);
+                let button = egui::Button::selectable(self.tools.shape_fill == fill, image);
+                if ui.add(button).on_hover_text(format!("{}\n{}", fill.name(), fill.help())).clicked() {
+                    self.tools.shape_fill = fill;
+                }
+            }
+        }
         self.antialiasing_option(ui);
-        if matches!(self.tools.tool, Tool::Contour | Tool::Polygon) {
+        if matches!(tool, Tool::Contour | Tool::Polygon) && self.tools.shape_fill != ShapeFill::Outline {
             self.overlaps_option(
                 ui,
                 "What is filled where the outline crosses itself and goes around an area more than once. Add \
@@ -2239,7 +2255,11 @@ impl eframe::App for App {
             let right_click_before = *right_click;
             let tool_order = self.settings.tool_order();
             let moved = dock::show(ui, self.settings.dock(), |ui, section| match section {
-                Section::Tools(group) => tools_action = tools_panel::show(ui, icons, tool, tool_order, group),
+                // Each group's section is shown in turn, and only one of them is acted on.
+                Section::Tools(group) => {
+                    let action = tools_panel::show(ui, icons, tool, tool_order, group);
+                    tools_action = tools_action.take().or(action);
+                }
                 Section::Colors => colors.show(ui, right_click),
                 Section::History => {
                     let document = &image.document;

@@ -23,7 +23,7 @@ macro_rules! shape_help {
             " It is drawn in the primary colour, or the secondary one with the right button, unless that picks \
              a colour, as Right click says. Until Enter or Escape finishes it, drag its handles to change it, the \
              shape itself to move it, or around it to rotate it, in steps of 15° with Shift, or the arrow keys \
-             to nudge it, and another colour, size or antialiasing redraws it. Hold Ctrl to draw another over it. With a selection, only the selected pixels change."
+             to nudge it, and another colour, size, fill or antialiasing redraws it. Hold Ctrl to draw another over it. With a selection, only the selected pixels change."
         )
     };
 }
@@ -46,7 +46,7 @@ pub const GRADIENT_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE
 pub const RETOUCH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::R);
 /// Goes from the Line to the Curve and back.
 pub const LINE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::L);
-/// Goes from one of the Rectangles and the Ellipses to the next.
+/// Goes from the Rectangle to the Ellipse and back.
 pub const RECTANGLE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::U);
 /// Goes from the Contour to the Polygon and back.
 pub const CONTOUR_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::O);
@@ -98,9 +98,7 @@ pub enum Tool {
     Line,
     Curve,
     Rectangle,
-    FilledRectangle,
     Ellipse,
-    FilledEllipse,
     Contour,
     Polygon,
     Blur,
@@ -112,7 +110,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 26] = [
         Self::RectangleSelect,
         Self::EllipseSelect,
         Self::LassoSelect,
@@ -130,9 +128,7 @@ impl Tool {
         Self::Line,
         Self::Curve,
         Self::Rectangle,
-        Self::FilledRectangle,
         Self::Ellipse,
-        Self::FilledEllipse,
         Self::Contour,
         Self::Polygon,
         Self::Blur,
@@ -168,9 +164,7 @@ impl Tool {
             Self::Line => "Line",
             Self::Curve => "Curve",
             Self::Rectangle => "Rectangle",
-            Self::FilledRectangle => "Filled Rectangle",
             Self::Ellipse => "Ellipse",
-            Self::FilledEllipse => "Filled Ellipse",
             Self::Contour => "Contour",
             Self::Polygon => "Polygon",
         }
@@ -193,9 +187,7 @@ impl Tool {
             Self::Line
             | Self::Curve
             | Self::Rectangle
-            | Self::FilledRectangle
             | Self::Ellipse
-            | Self::FilledEllipse
             | Self::Contour
             | Self::Polygon => Group::Shapes,
             Self::Zoom | Self::Pan => Group::Navigate,
@@ -227,9 +219,7 @@ impl Tool {
             Self::Line => icons::LINE,
             Self::Curve => icons::CURVE,
             Self::Rectangle => icons::RECTANGLE,
-            Self::FilledRectangle => icons::FILLED_RECTANGLE,
             Self::Ellipse => icons::ELLIPSE,
-            Self::FilledEllipse => icons::FILLED_ELLIPSE,
             Self::Contour => icons::CONTOUR,
             Self::Polygon => icons::POLYGON,
         }
@@ -253,7 +243,7 @@ impl Tool {
             Self::Gradient => GRADIENT_KEY,
             Self::Blur | Self::Sharpen | Self::Jumble => RETOUCH_KEY,
             Self::Line | Self::Curve => LINE_KEY,
-            Self::Rectangle | Self::FilledRectangle | Self::Ellipse | Self::FilledEllipse => RECTANGLE_KEY,
+            Self::Rectangle | Self::Ellipse => RECTANGLE_KEY,
             Self::Contour | Self::Polygon => CONTOUR_KEY,
         }
     }
@@ -371,15 +361,23 @@ impl Tool {
             Self::Curve => shape_help!(
                 "Drag to draw a line, at steps of 15° with Shift, then drag the handles along it to bend it."
             ),
-            Self::Rectangle => shape_help!("Drag to draw a rectangle, a square with Shift."),
-            Self::FilledRectangle => shape_help!("Drag to draw a filled rectangle, a square with Shift."),
-            Self::Ellipse => shape_help!("Drag to draw an ellipse, a circle with Shift."),
-            Self::FilledEllipse => shape_help!("Drag to draw a filled ellipse, a circle with Shift."),
-            Self::Contour => shape_help!("Drag around the area to fill."),
+            Self::Rectangle => shape_help!(
+                "Drag to draw a rectangle, a square with Shift. Fill says whether it is outlined, filled, or \
+                 both, the outline in the colour it is drawn in and the inside in the other."
+            ),
+            Self::Ellipse => shape_help!(
+                "Drag to draw an ellipse, a circle with Shift. Fill says whether it is outlined, filled, or \
+                 both, the outline in the colour it is drawn in and the inside in the other."
+            ),
+            Self::Contour => shape_help!(
+                "Drag around an area. Fill says whether it is outlined, filled, or both, the outline in the \
+                 colour it is drawn in and the inside in the other."
+            ),
             Self::Polygon => shape_help!(
-                "Click to put down corners. Double-click, click the first corner or press Enter to fill what they \
-                 go around; Backspace takes back the last corner, and Escape gives up. Then click an edge to add \
-                 a corner there, or right click a corner to remove it."
+                "Click to put down corners. Double-click, click the first corner or press Enter to close them; \
+                 Backspace takes back the last corner, and Escape gives up. Then click an edge to add a corner \
+                 there, or right click a corner to remove it. Fill says whether it is outlined, filled, or both, \
+                 the outline in the colour it is drawn in and the inside in the other."
             ),
         }
     }
@@ -410,9 +408,7 @@ impl Tool {
             | Self::Line
             | Self::Curve
             | Self::Rectangle
-            | Self::FilledRectangle
             | Self::Ellipse
-            | Self::FilledEllipse
             | Self::Contour
             | Self::Polygon => None,
         }
@@ -424,9 +420,7 @@ impl Tool {
             Self::Line => Some(ShapeKind::Line),
             Self::Curve => Some(ShapeKind::Curve),
             Self::Rectangle => Some(ShapeKind::Rectangle),
-            Self::FilledRectangle => Some(ShapeKind::FilledRectangle),
             Self::Ellipse => Some(ShapeKind::Ellipse),
-            Self::FilledEllipse => Some(ShapeKind::FilledEllipse),
             Self::Contour => Some(ShapeKind::Contour),
             Self::Polygon => Some(ShapeKind::Polygon),
             _ => None,
@@ -520,6 +514,58 @@ impl SampleSource {
     }
 }
 
+/// What the shape tools that close their outline draw: the Rectangle, the Ellipse,
+/// the Contour and the Polygon.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShapeFill {
+    /// The outline alone.
+    #[default]
+    Outline,
+    /// What the outline goes around, with the outline, in the colour drawn in.
+    Fill,
+    /// The outline in the colour drawn in, and what it goes around in the other.
+    Both,
+}
+
+impl ShapeFill {
+    pub const ALL: [Self; 3] = [Self::Outline, Self::Fill, Self::Both];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Outline => "Outline",
+            Self::Fill => "Fill",
+            Self::Both => "Outline and Fill",
+        }
+    }
+
+    /// How it shows, on the shape `tool` draws.
+    pub fn icon(self, tool: Tool) -> Icon {
+        match (tool, self) {
+            (Tool::Ellipse, Self::Outline) => icons::ELLIPSE,
+            (Tool::Ellipse, Self::Fill) => icons::ELLIPSE_FILLED,
+            (Tool::Ellipse, Self::Both) => icons::ELLIPSE_BOTH,
+            (Tool::Contour, Self::Outline) => icons::CONTOUR_OUTLINE,
+            (Tool::Contour, Self::Fill) => icons::CONTOUR,
+            (Tool::Contour, Self::Both) => icons::CONTOUR_BOTH,
+            (Tool::Polygon, Self::Outline) => icons::POLYGON_OUTLINE,
+            (Tool::Polygon, Self::Fill) => icons::POLYGON,
+            (Tool::Polygon, Self::Both) => icons::POLYGON_BOTH,
+            (_, Self::Outline) => icons::RECTANGLE,
+            (_, Self::Fill) => icons::RECTANGLE_FILLED,
+            (_, Self::Both) => icons::RECTANGLE_BOTH,
+        }
+    }
+
+    /// What it draws, for its button.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Outline => "The outline alone, in the colour it is drawn in.",
+            Self::Fill => "The inside with the outline, in the colour it is drawn in.",
+            Self::Both => "The outline in the colour it is drawn in, and the inside in the other.",
+        }
+    }
+}
+
 /// What the right button does with the tools that draw in a colour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RightClick {
@@ -588,10 +634,12 @@ pub struct Tools {
     pub gradient_kind: GradientKind,
     pub gradient_mode: GradientMode,
     /// What the lassos' outlines shut in where they cross themselves, and the Contour
-    /// and the Polygon fill.
+    /// and the Polygon fill, when they are filled.
     pub overlaps: Overlaps,
     /// How wide the shape tools draw, in pixels.
     pub shape_size: u32,
+    /// What the Rectangle, the Ellipse, the Contour and the Polygon draw.
+    pub shape_fill: ShapeFill,
     /// The tools used last, the latest last, one of each of those that share a key.
     pub last_tools: Vec<Tool>,
     /// How the selection tools, Shear and Perspective redraw the pixels they move, once
@@ -631,6 +679,7 @@ impl Default for Tools {
             gradient_mode: GradientMode::default(),
             overlaps: Overlaps::default(),
             shape_size: 2,
+            shape_fill: ShapeFill::default(),
             last_tools: Vec::new(),
             resampling: Interpolation::Bilinear,
             snap: None,
@@ -725,10 +774,20 @@ impl Tools {
         self.antialiasing && self.tool.can_smooth()
     }
 
-    /// How the shape tools draw, in the secondary colour or the primary one.
+    /// How the shape tools draw, in the secondary colour or the primary one, those that
+    /// close their outline filled as asked, in that colour or the other.
     pub fn shape_style(&self, secondary: bool) -> ShapeStyle {
-        let color = if secondary { self.colors.secondary } else { self.colors.primary };
-        ShapeStyle { color, size: self.shape_size, smooth: self.antialiasing, overlaps: self.overlaps }
+        let (color, other) = if secondary {
+            (self.colors.secondary, self.colors.primary)
+        } else {
+            (self.colors.primary, self.colors.secondary)
+        };
+        let fill = match self.shape_fill {
+            ShapeFill::Outline => None,
+            ShapeFill::Fill => Some(color),
+            ShapeFill::Both => Some(other),
+        };
+        ShapeStyle { color, fill, size: self.shape_size, smooth: self.antialiasing, overlaps: self.overlaps }
     }
 
     /// The next selection tool, or the one used last from another tool.
@@ -778,11 +837,11 @@ mod tests {
         let mut tools = Tools::default();
         assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::Rectangle);
         tools.set_tool(Tool::Rectangle);
-        assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::FilledRectangle);
-        tools.set_tool(Tool::FilledEllipse);
+        assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::Ellipse);
+        tools.set_tool(Tool::Ellipse);
         assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::Rectangle);
         tools.set_tool(Tool::Curve);
-        assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::FilledEllipse, "the one used last");
+        assert_eq!(tools.next_tool(RECTANGLE_KEY), Tool::Ellipse, "the one used last");
         assert_eq!(tools.next_tool(LINE_KEY), Tool::Line);
         assert_eq!(tools.next_tool(PENCIL_KEY), Tool::Pencil);
         assert_eq!(tools.next_tool(RETOUCH_KEY), Tool::Blur);
