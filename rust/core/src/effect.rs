@@ -7,6 +7,7 @@
 //! out at the same time on as many threads as there are cores.
 
 mod artistic;
+mod distort;
 mod enhance;
 
 use std::{
@@ -21,6 +22,7 @@ use std::{
 
 use image::{Rgba, RgbaImage};
 
+pub use distort::{NewsprintScreen, WaveShape, WindDirection};
 pub use enhance::wavelet_decompose;
 pub(crate) use enhance::GRAIN_MIDDLE;
 
@@ -160,6 +162,50 @@ pub enum Effect {
     /// which smooths noise but keeps edges: the stronger, the more different the
     /// colours it still mixes in.
     ReduceNoise { radius: f32, strength: f32 },
+    /// Swells a disc around the centre out, as if seen through a lens, the more the
+    /// nearer its middle, or shrinks it if `amount`, from -100 to 100, is below zero.
+    /// The disc's radius is a share of half the image's shorter side.
+    Bulge { amount: f32, radius: f32, center: [f32; 2] },
+    /// Turns a disc around the centre by up to `angle`, the most in its middle and not
+    /// at all at its edge, and pinches it towards its middle, or pushes it out if
+    /// `pinch`, from -100 to 100, is below zero. The radius is as the Bulge's.
+    Twist { angle: f32, pinch: f32, radius: f32, center: [f32; 2] },
+    /// Breaks the image into irregular cells about `size` across, each the average
+    /// colour of its pixels.
+    Crystallize { size: f32 },
+    /// Cuts the image into cells this large, from its top left corner, each the
+    /// average colour of its pixels.
+    Pixelate { width: u32, height: u32 },
+    /// Wraps the image around its middle, its top there and its bottom along the
+    /// ellipse as large as the image, its left and right edges meeting above the
+    /// middle, or unwraps it again if not `to_polar`, turned by `rotation`. Nothing is
+    /// left where the image does not reach.
+    PolarCoordinates { to_polar: bool, rotation: f32 },
+    /// Shows the image through square tiles `size` wide, turned by `angle`, each
+    /// bending it as much as `curvature`, from -100 to 100, says: up to about that many
+    /// pixels halfway out from its middle, and endlessly at its edges.
+    TileReflection { size: f32, angle: f32, curvature: f32 },
+    /// Bends the image as a camera lens does, by the square of how far each pixel is
+    /// from the centre and by the fourth power, as `main` and `edge`, from -100 to 100,
+    /// say: as a barrel above zero, as a pincushion below. Zoomed in, or out below zero.
+    /// Nothing is left where the image does not reach.
+    LensDistortion { main: f32, edge: f32, zoom: f32, center: [f32; 2] },
+    /// The wedge turned by `angle` of `segments` pairs of them around the centre,
+    /// mirrored around it, every other one the other way round.
+    Kaleidoscope { segments: u32, angle: f32, center: [f32; 2] },
+    /// Prints the image in dots, as `screen` says, on grids of cells `size` wide
+    /// turned by `angle`.
+    Newsprint { size: f32, angle: f32, screen: NewsprintScreen },
+    /// Moves each row up and down, or each column sideways if vertical, by up to
+    /// `amplitude`, in waves `wavelength` long along the image, `phase` degrees on.
+    Ripple { amplitude: f32, wavelength: f32, phase: f32, vertical: bool, shape: WaveShape },
+    /// Moves the pixels towards and away from the centre, by up to `amplitude`, in
+    /// rings `wavelength` apart, `phase` degrees on, as waves on water.
+    Waves { amplitude: f32, wavelength: f32, phase: f32, center: [f32; 2] },
+    /// Blows streaks up to `strength` long from the edges the image gets darker past,
+    /// by more than `threshold` percent, the way of `direction`, fading out, or as long
+    /// as half that without fading if a blast.
+    Wind { strength: f32, threshold: f32, direction: WindDirection, blast: bool },
 }
 
 /// How the Focus Blur measures how far a pixel is from the centre, which gives the
@@ -430,6 +476,25 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         | Effect::HighPass { .. }
         | Effect::RedEyeRemoval { .. }
         | Effect::ReduceNoise { .. } => enhance::render(source, effect, stop),
+        Effect::Bulge { amount, .. } if amount.abs() < f32::EPSILON => return Some(None),
+        Effect::Twist { angle, pinch, .. } if angle.abs() < f32::EPSILON && pinch.abs() < f32::EPSILON => return Some(None),
+        Effect::Pixelate { width, height } if width <= 1 && height <= 1 => return Some(None),
+        Effect::TileReflection { curvature, .. } if curvature.abs() < f32::EPSILON => return Some(None),
+        Effect::LensDistortion { main, edge, zoom, .. } if main == 0.0 && edge == 0.0 && zoom == 0.0 => return Some(None),
+        Effect::Ripple { amplitude, .. } | Effect::Waves { amplitude, .. } if amplitude.abs() < f32::EPSILON => return Some(None),
+        Effect::Wind { strength, .. } if strength < 1.0 => return Some(None),
+        Effect::Bulge { .. }
+        | Effect::Twist { .. }
+        | Effect::Crystallize { .. }
+        | Effect::Pixelate { .. }
+        | Effect::PolarCoordinates { .. }
+        | Effect::TileReflection { .. }
+        | Effect::LensDistortion { .. }
+        | Effect::Kaleidoscope { .. }
+        | Effect::Newsprint { .. }
+        | Effect::Ripple { .. }
+        | Effect::Waves { .. }
+        | Effect::Wind { .. } => distort::render(source, effect, stop),
         Effect::Sharpen { radius, amount, threshold } => {
             let blurred = if radius < 1.0 { None } else { Some(blur(source, Weighing::Gaussian, radius, 1.0, stop)?) };
             let blurred = blurred.as_ref().unwrap_or(source);
@@ -995,6 +1060,34 @@ mod tests {
         vec![Effect::HighPass { radius: 4.0, contrast: 100.0 }, Effect::RedEyeRemoval { threshold: 50.0 }]
     }
 
+    /// One of each effect of the Distort menu that leaves even colours as they are.
+    fn distorting() -> Vec<Effect> {
+        vec![
+            Effect::Bulge { amount: 50.0, radius: 100.0, center: [10.0, 0.0] },
+            Effect::Twist { angle: 90.0, pinch: 30.0, radius: 100.0, center: [0.0, 0.0] },
+            Effect::Crystallize { size: 8.0 },
+            Effect::Pixelate { width: 4, height: 3 },
+            Effect::TileReflection { size: 20.0, angle: 30.0, curvature: 8.0 },
+            Effect::Kaleidoscope { segments: 5, angle: 20.0, center: [0.0, 0.0] },
+            Effect::Ripple { amplitude: 4.0, wavelength: 20.0, phase: 0.0, vertical: false, shape: WaveShape::Sine },
+            Effect::Ripple { amplitude: 4.0, wavelength: 20.0, phase: 90.0, vertical: true, shape: WaveShape::Sawtooth },
+            Effect::Waves { amplitude: 4.0, wavelength: 20.0, phase: 0.0, center: [0.0, 0.0] },
+            Effect::Wind { strength: 20.0, threshold: 10.0, direction: WindDirection::Left, blast: false },
+            Effect::Wind { strength: 20.0, threshold: 10.0, direction: WindDirection::Up, blast: true },
+        ]
+    }
+
+    /// The effects of the Distort menu that change even colours, or leave nothing where
+    /// the image does not reach.
+    fn reshaping() -> Vec<Effect> {
+        vec![
+            Effect::PolarCoordinates { to_polar: true, rotation: 0.0 },
+            Effect::PolarCoordinates { to_polar: false, rotation: 0.0 },
+            Effect::LensDistortion { main: 25.0, edge: 10.0, zoom: -20.0, center: [0.0, 0.0] },
+            Effect::Newsprint { size: 8.0, angle: 0.0, screen: NewsprintScreen::Cmyk },
+        ]
+    }
+
     /// One of each effect of the Artistic menu, most of which change even colours too.
     fn artistic() -> Vec<Effect> {
         vec![
@@ -1034,7 +1127,7 @@ mod tests {
     #[test]
     fn an_even_colour_stays_as_it_is() {
         for pixels in [RgbaImage::from_pixel(40, 30, Rgba([200, 100, 50, 180])), RgbaImage::new(40, 30)] {
-            for effect in &all() {
+            for effect in &[all(), distorting()].concat() {
                 assert_eq!(apply(&pixels, effect), pixels, "{effect:?}");
             }
         }
@@ -1132,7 +1225,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &[all(), artistic(), enhancing()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping()].concat() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -1142,7 +1235,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &[all(), artistic(), enhancing()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping()].concat() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -1404,5 +1497,104 @@ mod tests {
                 assert!(a[channel].abs_diff(b[channel]) <= 3, "{a:?} {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn pixelate_averages_each_cell() {
+        let pixels = RgbaImage::from_fn(4, 2, |x, _| Rgba([(x * 60) as u8, 0, 0, 255]));
+        let cells = apply(&pixels, &Effect::Pixelate { width: 2, height: 2 });
+        let reds: Vec<u8> = (0..4).map(|x| cells[(x, 1)][0]).collect();
+        assert_eq!(reds, [30, 30, 150, 150]);
+    }
+
+    #[test]
+    fn crystallize_makes_flat_cells() {
+        let pixels = RgbaImage::from_fn(60, 60, |x, y| Rgba([(x * 4) as u8, (y * 4) as u8, 0, 255]));
+        let cells = apply(&pixels, &Effect::Crystallize { size: 10.0 });
+        let mut colors: Vec<[u8; 4]> = cells.pixels().map(|pixel| pixel.0).collect();
+        colors.sort();
+        colors.dedup();
+        assert!(colors.len() <= 36 && colors.len() > 10, "{}", colors.len());
+    }
+
+    #[test]
+    fn a_bulge_swells_the_middle_only() {
+        let bulged = apply(&dot(), &Effect::Bulge { amount: 100.0, radius: 50.0, center: [0.0, 0.0] });
+        assert!(bulged[(11, 10)][0] > 0, "the dot grows");
+        assert_eq!(bulged[(0, 0)], Rgba([0, 0, 0, 255]));
+        let shrunk = apply(&dot(), &Effect::Bulge { amount: -100.0, radius: 50.0, center: [0.0, 0.0] });
+        assert!(shrunk[(10, 10)][0] > 0 && shrunk[(11, 10)][0] == 0);
+    }
+
+    #[test]
+    fn a_twist_turns_within_its_disc() {
+        let pixels = RgbaImage::from_fn(41, 41, |x, _| Rgba([(x * 6) as u8, 0, 0, 255]));
+        let twisted = apply(&pixels, &Effect::Twist { angle: 180.0, pinch: 0.0, radius: 50.0, center: [0.0, 0.0] });
+        assert_eq!(twisted[(20, 20)], pixels[(20, 20)]);
+        assert_eq!(twisted[(1, 1)], pixels[(1, 1)]);
+        assert_ne!(twisted[(20, 15)], pixels[(20, 15)]);
+    }
+
+    #[test]
+    fn a_kaleidoscope_mirrors_around_its_centre() {
+        let pixels = RgbaImage::from_fn(41, 41, |x, y| Rgba([(x * 6) as u8, (y * 6) as u8, 0, 255]));
+        let mirrored = apply(&pixels, &Effect::Kaleidoscope { segments: 2, angle: 0.0, center: [0.0, 0.0] });
+        // Four wedges a quarter turn wide, so it is the same either side of both middle lines.
+        assert_eq!(mirrored[(30, 12)], mirrored[(30, 28)]);
+        assert_eq!(mirrored[(30, 12)], mirrored[(10, 12)]);
+    }
+
+    #[test]
+    fn polar_coordinates_unwrap_what_they_wrap() {
+        let pixels = RgbaImage::from_fn(64, 64, |x, y| Rgba([(x * 4) as u8, (y * 4) as u8, 128, 255]));
+        let wrapped = apply(&pixels, &Effect::PolarCoordinates { to_polar: true, rotation: 0.0 });
+        assert_eq!(wrapped[(0, 0)][3], 0, "nothing past the ellipse");
+        let back = apply(&wrapped, &Effect::PolarCoordinates { to_polar: false, rotation: 0.0 });
+        for (x, y) in [(20, 20), (40, 30), (32, 50)] {
+            let (a, b) = (back[(x, y)], pixels[(x, y)]);
+            assert!(a[0].abs_diff(b[0]) <= 12 && a[1].abs_diff(b[1]) <= 12, "{a:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn zooming_a_lens_out_leaves_nothing_past_the_image() {
+        let pixels = RgbaImage::from_pixel(30, 30, Rgba([200, 100, 50, 255]));
+        let lens = apply(&pixels, &Effect::LensDistortion { main: 0.0, edge: 0.0, zoom: 100.0, center: [0.0, 0.0] });
+        assert_eq!(lens[(15, 15)], pixels[(15, 15)]);
+        assert_eq!(lens[(0, 0)], pixels[(0, 0)], "zoomed in");
+        let lens = apply(&pixels, &Effect::LensDistortion { main: 0.0, edge: 0.0, zoom: -100.0, center: [0.0, 0.0] });
+        assert_eq!(lens[(0, 0)][3], 0, "zoomed out");
+    }
+
+    #[test]
+    fn a_ripple_moves_rows_by_up_to_its_amplitude() {
+        let pixels = RgbaImage::from_fn(40, 40, |_, y| Rgba([(y * 6) as u8, 0, 0, 255]));
+        let rippled = apply(&pixels, &Effect::Ripple { amplitude: 3.0, wavelength: 40.0, phase: 0.0, vertical: false, shape: WaveShape::Sine });
+        // A quarter of the way along, the wave is at its top.
+        assert_eq!(rippled[(10, 20)][0], pixels[(10, 23)][0]);
+        assert_eq!(rippled[(30, 20)][0], pixels[(30, 17)][0]);
+    }
+
+    #[test]
+    fn wind_blows_streaks_downwind_of_edges() {
+        let pixels = RgbaImage::from_fn(40, 10, |x, _| if x < 10 { Rgba([255, 255, 255, 255]) } else { Rgba([0, 0, 0, 255]) });
+        let blown = apply(&pixels, &Effect::Wind { strength: 20.0, threshold: 10.0, direction: WindDirection::Right, blast: false });
+        assert!((0..10).any(|y| blown[(11, y)][0] > 0), "streaks to the right");
+        assert_eq!(blown[(39, 5)], pixels[(39, 5)]);
+        let left = apply(&pixels, &Effect::Wind { strength: 20.0, threshold: 10.0, direction: WindDirection::Left, blast: false });
+        assert_eq!(left, pixels, "no edge gets darker to the left");
+    }
+
+    #[test]
+    fn newsprint_prints_dots_as_large_as_the_ink() {
+        for value in [0, 255] {
+            let pixels = RgbaImage::from_pixel(32, 32, Rgba([value, value, value, 255]));
+            let printed = apply(&pixels, &Effect::Newsprint { size: 8.0, angle: 0.0, screen: NewsprintScreen::Black });
+            assert!(printed == pixels, "{value} stays as it is");
+        }
+        let grey = RgbaImage::from_pixel(64, 64, Rgba([128, 128, 128, 255]));
+        let printed = apply(&grey, &Effect::Newsprint { size: 8.0, angle: 0.0, screen: NewsprintScreen::Black });
+        let ink: f32 = printed.pixels().map(|pixel| 1.0 - pixel[0] as f32 / 255.0).sum::<f32>() / (64.0 * 64.0);
+        assert!((ink - 0.5).abs() < 0.08, "{ink}");
     }
 }

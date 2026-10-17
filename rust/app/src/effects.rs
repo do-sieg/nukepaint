@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use power_paint_core::{Effect, FocusShape, Interpolation, Layer, OffsetEdges, Turn};
+use power_paint_core::{Effect, FocusShape, Interpolation, Layer, NewsprintScreen, OffsetEdges, Turn, WaveShape, WindDirection};
 
 use crate::adjustment_dialog::{Setting, check, choice, layer, slider};
 
@@ -37,6 +37,18 @@ pub enum EffectKind {
     TileableBlur,
     VariableBlur,
     ZoomBlur,
+    Bulge,
+    Crystallize,
+    Kaleidoscope,
+    LensDistortion,
+    Newsprint,
+    Pixelate,
+    PolarCoordinates,
+    Ripple,
+    TileReflection,
+    Twist,
+    Waves,
+    Wind,
     Antialias,
     Deinterlace,
     HighPass,
@@ -178,11 +190,78 @@ const TRANSFORM_3D: [Setting; 8] = [
     slider("Pan Y:", -100.0, 100.0, 1.0, 0.0, " %"),
     choice("Resampling:", &RESAMPLINGS, 1),
 ];
+const BULGE: [Setting; 4] = [
+    slider("Amount:", -100.0, 100.0, 1.0, 45.0, " %"),
+    slider("Radius:", 1.0, 200.0, 1.0, 100.0, " %"),
+    slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+];
+const CRYSTALLIZE: [Setting; 1] = [slider("Cell Size:", 2.0, 250.0, 1.0, 16.0, " px")];
+const KALEIDOSCOPE: [Setting; 4] = [
+    slider("Segments:", 1.0, 32.0, 1.0, 6.0, ""),
+    slider("Angle:", 0.0, 360.0, 1.0, 0.0, "°"),
+    slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+];
+const LENS: [Setting; 5] = [
+    slider("Main:", -100.0, 100.0, 1.0, 25.0, ""),
+    slider("Edge:", -100.0, 100.0, 1.0, 0.0, ""),
+    slider("Zoom:", -100.0, 100.0, 1.0, 0.0, ""),
+    slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+];
+/// The names of [`NewsprintScreen::ALL`].
+const NEWSPRINT_SCREENS: [&str; 3] = ["Black", "RGB", "CMYK"];
+const NEWSPRINT: [Setting; 3] = [
+    slider("Cell Size:", 2.0, 100.0, 1.0, 8.0, " px"),
+    slider("Angle:", -90.0, 90.0, 1.0, 0.0, "°"),
+    choice("Screen:", &NEWSPRINT_SCREENS, 0),
+];
+const PIXELATE: [Setting; 2] = [slider("Cell Width:", 1.0, 250.0, 1.0, 8.0, " px"), slider("Cell Height:", 1.0, 250.0, 1.0, 8.0, " px")];
+const POLAR_MODES: [&str; 2] = ["Rectangular to Polar", "Polar to Rectangular"];
+const POLAR: [Setting; 2] = [choice("Mode:", &POLAR_MODES, 0), slider("Rotation:", -180.0, 180.0, 1.0, 0.0, "°")];
+const ORIENTATIONS: [&str; 2] = ["Horizontal", "Vertical"];
+/// The names of [`WaveShape::ALL`].
+const WAVE_SHAPES: [&str; 3] = ["Sine", "Triangle", "Sawtooth"];
+const RIPPLE: [Setting; 5] = [
+    slider("Amplitude:", 0.0, 200.0, 1.0, 5.0, " px"),
+    slider("Wavelength:", 1.0, 500.0, 1.0, 30.0, " px"),
+    slider("Phase:", 0.0, 360.0, 1.0, 0.0, "°"),
+    choice("Orientation:", &ORIENTATIONS, 0),
+    choice("Shape:", &WAVE_SHAPES, 0),
+];
+const TILE_REFLECTION: [Setting; 3] = [
+    slider("Tile Size:", 2.0, 200.0, 1.0, 40.0, " px"),
+    slider("Angle:", -180.0, 180.0, 1.0, 30.0, "°"),
+    slider("Curvature:", -100.0, 100.0, 1.0, 8.0, ""),
+];
+const TWIST: [Setting; 5] = [
+    slider("Angle:", -720.0, 720.0, 1.0, 90.0, "°"),
+    slider("Pinch:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Radius:", 1.0, 200.0, 1.0, 100.0, " %"),
+    slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+];
+const WAVES: [Setting; 5] = [
+    slider("Amplitude:", 0.0, 100.0, 1.0, 5.0, " px"),
+    slider("Wavelength:", 1.0, 500.0, 1.0, 30.0, " px"),
+    slider("Phase:", 0.0, 360.0, 1.0, 0.0, "°"),
+    slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+];
+/// The names of [`WindDirection::ALL`].
+const WIND_DIRECTIONS: [&str; 4] = ["Right", "Left", "Up", "Down"];
+const WIND_STYLES: [&str; 2] = ["Wind", "Blast"];
+const WIND: [Setting; 4] = [
+    slider("Strength:", 1.0, 200.0, 1.0, 20.0, " px"),
+    slider("Threshold:", 0.0, 100.0, 1.0, 10.0, " %"),
+    choice("Direction:", &WIND_DIRECTIONS, 0),
+    choice("Style:", &WIND_STYLES, 0),
+];
 const DEINTERLACE_FIELDS: [&str; 2] = ["Even", "Odd"];
-const DEINTERLACE_ORIENTATIONS: [&str; 2] = ["Horizontal", "Vertical"];
 const DEINTERLACE: [Setting; 3] = [
     choice("Keep:", &DEINTERLACE_FIELDS, 0),
-    choice("Orientation:", &DEINTERLACE_ORIENTATIONS, 0),
+    choice("Orientation:", &ORIENTATIONS, 0),
     slider("Block Size:", 1.0, 64.0, 1.0, 1.0, " px"),
 ];
 const HIGH_PASS: [Setting; 2] = [slider("Radius:", 1.0, 200.0, 1.0, 8.0, " px"), slider("Contrast:", 0.0, 500.0, 1.0, 100.0, " %")];
@@ -198,7 +277,7 @@ const SHARPEN: [Setting; 3] = [
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects, then the niche ones it keeps
     /// in a More menu at its end.
-    pub const MENUS: [(&str, &[Self], &[Self]); 5] = [
+    pub const MENUS: [(&str, &[Self], &[Self]); 6] = [
         (
             "Artistic",
             &[ApplyCanvas, Cartoon, GlassTile, Glow, InkSketch, OilPainting, PencilSketch, Photocopy, VanGogh],
@@ -220,6 +299,11 @@ impl EffectKind {
                 ZoomBlur,
             ],
             &[FragmentBlur, MeanCurvatureBlur, SketchBlur],
+        ),
+        (
+            "Distort",
+            &[Bulge, Crystallize, LensDistortion, Pixelate, PolarCoordinates, Ripple, Twist, Waves, Wind],
+            &[Kaleidoscope, Newsprint, TileReflection],
         ),
         ("Enhance", &[Antialias, HighPass, RedEyeRemoval, ReduceNoise], &[Deinterlace, WaveletDecompose]),
         ("Map", &[Offset], &[]),
@@ -258,6 +342,18 @@ impl EffectKind {
             TileableBlur => "Tileable Blur",
             VariableBlur => "Variable Blur",
             ZoomBlur => "Zoom Blur",
+            Bulge => "Bulge",
+            Crystallize => "Crystallize",
+            Kaleidoscope => "Kaleidoscope",
+            LensDistortion => "Lens Distortion",
+            Newsprint => "Newsprint",
+            Pixelate => "Pixelate",
+            PolarCoordinates => "Polar Coordinates",
+            Ripple => "Ripple",
+            TileReflection => "Tile Reflection",
+            Twist => "Twist",
+            Waves => "Waves",
+            Wind => "Wind",
             Antialias => "Antialias",
             Deinterlace => "Deinterlace",
             HighPass => "High Pass",
@@ -303,6 +399,18 @@ impl EffectKind {
             TileableBlur => &TILEABLE,
             VariableBlur => &VARIABLE,
             ZoomBlur => &ZOOM,
+            Bulge => &BULGE,
+            Crystallize => &CRYSTALLIZE,
+            Kaleidoscope => &KALEIDOSCOPE,
+            LensDistortion => &LENS,
+            Newsprint => &NEWSPRINT,
+            Pixelate => &PIXELATE,
+            PolarCoordinates => &POLAR,
+            Ripple => &RIPPLE,
+            TileReflection => &TILE_REFLECTION,
+            Twist => &TWIST,
+            Waves => &WAVES,
+            Wind => &WIND,
             Antialias => &[],
             Deinterlace => &DEINTERLACE,
             HighPass => &HIGH_PASS,
@@ -376,10 +484,37 @@ impl EffectKind {
                 invert: values[2] != 0.0,
             },
             ZoomBlur => Effect::ZoomBlur { amount: value(0), center: [value(1), value(2)] },
+            Bulge => Effect::Bulge { amount: value(0), radius: value(1), center: [value(2), value(3)] },
+            Crystallize => Effect::Crystallize { size: value(0) },
+            Kaleidoscope => Effect::Kaleidoscope { segments: value(0) as u32, angle: value(1), center: [value(2), value(3)] },
+            LensDistortion => Effect::LensDistortion { main: value(0), edge: value(1), zoom: value(2), center: [value(3), value(4)] },
+            Newsprint => Effect::Newsprint {
+                size: value(0),
+                angle: value(1),
+                screen: NewsprintScreen::ALL[pick(2, NewsprintScreen::ALL.len())],
+            },
+            Pixelate => Effect::Pixelate { width: value(0) as u32, height: value(1) as u32 },
+            PolarCoordinates => Effect::PolarCoordinates { to_polar: pick(0, POLAR_MODES.len()) == 0, rotation: value(1) },
+            Ripple => Effect::Ripple {
+                amplitude: value(0),
+                wavelength: value(1),
+                phase: value(2),
+                vertical: pick(3, ORIENTATIONS.len()) == 1,
+                shape: WaveShape::ALL[pick(4, WaveShape::ALL.len())],
+            },
+            TileReflection => Effect::TileReflection { size: value(0), angle: value(1), curvature: value(2) },
+            Twist => Effect::Twist { angle: value(0), pinch: value(1), radius: value(2), center: [value(3), value(4)] },
+            Waves => Effect::Waves { amplitude: value(0), wavelength: value(1), phase: value(2), center: [value(3), value(4)] },
+            Wind => Effect::Wind {
+                strength: value(0),
+                threshold: value(1),
+                direction: WindDirection::ALL[pick(2, WindDirection::ALL.len())],
+                blast: pick(3, WIND_STYLES.len()) == 1,
+            },
             Antialias => Effect::Antialias,
             Deinterlace => Effect::Deinterlace {
                 keep_odd: pick(0, DEINTERLACE_FIELDS.len()) == 1,
-                vertical: pick(1, DEINTERLACE_ORIENTATIONS.len()) == 1,
+                vertical: pick(1, ORIENTATIONS.len()) == 1,
                 size: value(2) as u32,
             },
             HighPass => Effect::HighPass { radius: value(0), contrast: value(1) },

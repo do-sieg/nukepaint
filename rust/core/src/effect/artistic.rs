@@ -667,7 +667,7 @@ fn lab([r, g, b]: [f32; 3]) -> [f32; 3] {
 
 /// A number from 0 to 1 that looks random, but is always the same for the same place
 /// and seed.
-fn noise(x: i64, y: i64, seed: u32) -> f32 {
+pub(super) fn noise(x: i64, y: i64, seed: u32) -> f32 {
     let mut hash = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
         ^ (seed as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
