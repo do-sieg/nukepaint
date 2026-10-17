@@ -34,6 +34,7 @@ mod view;
 use std::{
     ops::RangeInclusive,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use adjustment_dialog::FilterKind;
@@ -48,7 +49,7 @@ use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
     Affine, Document, Effect, FloatingPixels, GradientKind, GradientMode, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
-    RgbaImage, SAVE_EXTENSIONS, SelectionMask, SelectionMode, ShapeKind, Turn, is_savable, thumbnail,
+    RgbaImage, SAVE_EXTENSIONS, SelectionMask, SelectionMode, ShapeKind, Turn, is_savable, keeps_layers, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
 use lasso::{Lasso, LassoKind, PolygonEdit};
@@ -431,6 +432,26 @@ struct FlattenPrompt {
     path: PathBuf,
 }
 
+/// A file just saved, told in the status bar until it fades out.
+struct SaveNotice {
+    /// The file's name.
+    name: String,
+    at: Instant,
+}
+
+/// How long a save is told in the status bar, the last part of it fading out.
+const SAVE_NOTICE_TIME: Duration = Duration::from_millis(3000);
+const SAVE_NOTICE_FADE: Duration = Duration::from_millis(1000);
+
+/// What the user chose to do with an image whose file cannot keep its layers.
+#[derive(Clone, Copy)]
+enum FlattenChoice {
+    Flatten,
+    /// Save to an OpenRaster file of the same name instead, which keeps them.
+    OpenRaster,
+    Cancel,
+}
+
 /// How a save went.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Saving {
@@ -467,6 +488,8 @@ struct App {
     flatten_prompt: Option<FlattenPrompt>,
     /// Set once the user has said what to do with every unsaved change, for the window to close.
     may_quit: bool,
+    /// The last save, shown in the status bar for a moment.
+    save_notice: Option<SaveNotice>,
     /// What the window's title was last set to.
     title: String,
     settings: Settings,
@@ -512,6 +535,7 @@ impl App {
             closing: None,
             flatten_prompt: None,
             may_quit: false,
+            save_notice: None,
             title: APP_NAME.to_owned(),
             settings,
             checker: canvas::checker_texture(ctx),
@@ -589,8 +613,8 @@ impl App {
     }
 
     /// Saves the image to its own file, or to one the user picks when `ask_path` is set
-    /// or its own file cannot be saved to. None of the formats keep layers yet, so an
-    /// image of more than one plain layer is only saved once the user agrees to flatten it.
+    /// or its own file cannot be saved to. An image of more than one plain layer is only
+    /// saved to a file that cannot keep layers once the user agrees to flatten it.
     fn save(&mut self, index: usize, ask_path: bool) -> Saving {
         let document = &self.images[index].document;
         let path = match &document.path {
@@ -600,7 +624,7 @@ impl App {
                 None => return Saving::NotSaved,
             },
         };
-        if !document.is_flat() {
+        if !document.is_flat() && !keeps_layers(&path) {
             self.flatten_prompt = Some(FlattenPrompt { image: index, path });
             return Saving::AskingToFlatten;
         }
@@ -618,19 +642,21 @@ impl App {
             self.settings.set_last_dir(dir);
         }
         self.settings.add_recent_file(path);
+        self.save_notice = Some(SaveNotice { name: self.images[index].document.name(), at: Instant::now() });
         true
     }
 
     /// Asks where to save the document. A name without an extension that can be saved
-    /// to is saved as PNG.
+    /// to is saved as PNG, or as OpenRaster for an image with layers.
     fn pick_save_path(&self, document: &Document) -> Option<PathBuf> {
         let own = document.path.as_deref();
+        let extension = if document.is_flat() { SAVE_EXTENSIONS[0] } else { SAVE_EXTENSIONS[SAVE_EXTENSIONS.len() - 1] };
         let name = match own {
             Some(path) if is_savable(path) => document.name(),
             _ => {
                 let name = document.name();
                 let stem = Path::new(&name).file_stem().map(|stem| stem.to_string_lossy().into_owned());
-                format!("{}.{}", stem.unwrap_or(name), SAVE_EXTENSIONS[0])
+                format!("{}.{extension}", stem.unwrap_or(name))
             }
         };
         let mut dialog = rfd::FileDialog::new()
@@ -640,7 +666,8 @@ impl App {
             .add_filter("JPEG", &["jpg", "jpeg"])
             .add_filter("WebP", &["webp"])
             .add_filter("BMP", &["bmp"])
-            .add_filter("TGA", &["tga"]);
+            .add_filter("TGA", &["tga"])
+            .add_filter("OpenRaster", &["ora"]);
         if let Some(dir) = own.and_then(Path::parent).or(self.settings.last_dir()) {
             dialog = dialog.set_directory(dir);
         }
@@ -650,7 +677,7 @@ impl App {
         }
         let mut path = path.into_os_string();
         path.push(".");
-        path.push(SAVE_EXTENSIONS[0]);
+        path.push(extension);
         Some(PathBuf::from(path))
     }
 
@@ -1787,8 +1814,10 @@ impl App {
             || self.images.iter().any(OpenImage::is_dragging)
     }
 
-    /// The image's size, the pixel under the pointer, and a picker for the zoom.
+    /// The image's size, the pixel under the pointer, a picker for the zoom, and the
+    /// file last saved, for a moment.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        self.save_notice(ui);
         let Some(current) = self.current else {
             return;
         };
@@ -1821,6 +1850,27 @@ impl App {
                 ui.label(format!("{x}, {y}"));
             }
         });
+    }
+
+    /// Tells of the file last saved on the left of the status bar, until it fades out.
+    fn save_notice(&mut self, ui: &mut egui::Ui) {
+        let Some(notice) = &self.save_notice else {
+            return;
+        };
+        let elapsed = notice.at.elapsed();
+        let Some(left) = SAVE_NOTICE_TIME.checked_sub(elapsed) else {
+            self.save_notice = None;
+            return;
+        };
+        let opacity = (left.as_secs_f32() / SAVE_NOTICE_FADE.as_secs_f32()).min(1.0);
+        let color = ui.visuals().text_color().gamma_multiply(opacity);
+        ui.label(egui::RichText::new(format!("✔ Saved {}", notice.name)).color(color));
+        // Fading needs a frame each time; before that, one when it starts.
+        if left > SAVE_NOTICE_FADE {
+            ui.ctx().request_repaint_after(left - SAVE_NOTICE_FADE);
+        } else {
+            ui.ctx().request_repaint();
+        }
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -2087,27 +2137,64 @@ impl App {
         };
         let format = prompt.path.extension().map(|extension| extension.to_string_lossy().to_uppercase());
         let response = dialog::show(ctx, "flatten_prompt", "Flatten the image?", dialog::DIM, |ui| {
-            ui.label(format!("{} files cannot keep layers.\nFlatten the image and save it?", format.unwrap_or_default()));
+            ui.label(format!(
+                "{} files cannot keep layers.\nFlatten the image and save it, or save it as OpenRaster to keep them?",
+                format.unwrap_or_default()
+            ));
             dialog::buttons(ui, |ui| {
                 let cancel = ui.button("Cancel").clicked();
                 let flatten = ui.button("Flatten and Save").clicked();
-                flatten.then_some(true).or(cancel.then_some(false))
+                let open_raster = ui.button("Save as OpenRaster").clicked();
+                [(cancel, FlattenChoice::Cancel), (flatten, FlattenChoice::Flatten), (open_raster, FlattenChoice::OpenRaster)]
+                    .into_iter()
+                    .find_map(|(clicked, choice)| clicked.then_some(choice))
             })
         });
-        let flatten = if response.should_close() { Some(false) } else { response.inner };
-        let Some(flatten) = flatten else {
+        let choice = if response.should_close() { Some(FlattenChoice::Cancel) } else { response.inner };
+        let Some(choice) = choice else {
             return;
         };
         let FlattenPrompt { image: index, path } = self.flatten_prompt.take().unwrap();
-        if flatten && self.write(index, &path, true) {
-            let image = &mut self.images[index];
-            // A transform would go on with layers that are no longer there.
-            image.transform = None;
-            image.refresh_layers(ctx);
+        let saved = match choice {
+            FlattenChoice::Cancel => false,
+            FlattenChoice::Flatten => {
+                let saved = self.write(index, &path, true);
+                if saved {
+                    let image = &mut self.images[index];
+                    // A transform would go on with layers that are no longer there.
+                    image.transform = None;
+                    image.refresh_layers(ctx);
+                }
+                saved
+            }
+            FlattenChoice::OpenRaster => match self.open_raster_path(&path) {
+                Some(path) => self.write(index, &path, false),
+                None => false,
+            },
+        };
+        if saved {
             self.close_saved(index);
         } else {
             self.closing = None;
         }
+    }
+
+    /// The OpenRaster file next to `path`, of the same name. When there is one already,
+    /// the user is asked where to save instead, so as not to write over it unasked.
+    fn open_raster_path(&self, path: &Path) -> Option<PathBuf> {
+        let open_raster = path.with_extension(SAVE_EXTENSIONS[SAVE_EXTENSIONS.len() - 1]);
+        if !open_raster.exists() {
+            return Some(open_raster);
+        }
+        let mut dialog = rfd::FileDialog::new().add_filter("OpenRaster", &["ora"]);
+        if let Some(name) = open_raster.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
+        }
+        if let Some(dir) = open_raster.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        let chosen = dialog.save_file()?;
+        Some(if keeps_layers(&chosen) { chosen } else { chosen.with_extension("ora") })
     }
 
     /// Shows the name of the current image in the window's title, marked when it has
@@ -2246,7 +2333,8 @@ impl eframe::App for App {
         if self.current.is_some() {
             egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
         }
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        // One row: the save notice on the left, the rest on the right.
+        egui::Panel::bottom("status").show(ui, |ui| ui.horizontal(|ui| self.status_bar(ui)));
         // Only while the Magic Wand is the tool, on the image it clicked in.
         for (index, image) in self.images.iter_mut().enumerate() {
             if self.tools.tool == Tool::MagicWand && self.current == Some(index) {

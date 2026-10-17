@@ -8,12 +8,14 @@ use std::{
 use image::{DynamicImage, ImageFormat, RgbaImage, codecs::jpeg::JpegEncoder};
 use resvg::{tiny_skia, usvg};
 
+use crate::open_raster::is_open_raster;
+
 /// File extensions that can be opened, lower case.
-pub const OPEN_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "webp", "tga", "svg"];
+pub const OPEN_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "webp", "tga", "svg", "ora"];
 
 /// File extensions that can be saved to, lower case. The first is the one to use
-/// when a file has none of them.
-pub const SAVE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tga"];
+/// when a file has none of them and the image is flat, the last when it has layers.
+pub const SAVE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tga", "ora"];
 
 /// How good JPEG files are made, from 1 to 100.
 const JPEG_QUALITY: u8 = 90;
@@ -25,6 +27,10 @@ pub enum OpenError {
     Svg(usvg::Error),
     /// The SVG has no area to draw in.
     EmptySvg,
+    Zip(zip::result::ZipError),
+    Xml(roxmltree::Error),
+    /// The OpenRaster file has no size, or no layer that can be read.
+    NoLayers,
 }
 
 impl fmt::Display for OpenError {
@@ -34,6 +40,9 @@ impl fmt::Display for OpenError {
             Self::Image(error) => error.fmt(f),
             Self::Svg(error) => error.fmt(f),
             Self::EmptySvg => f.write_str("the SVG image is empty"),
+            Self::Zip(error) => error.fmt(f),
+            Self::Xml(error) => error.fmt(f),
+            Self::NoLayers => f.write_str("the OpenRaster file has no layers"),
         }
     }
 }
@@ -90,6 +99,11 @@ fn render_tree(tree: &usvg::Tree, scale: f32) -> Result<RgbaImage, OpenError> {
     Ok(RgbaImage::from_raw(size.width(), size.height(), pixels).expect("pixmap size matches"))
 }
 
+/// Whether a file of that name keeps the layers of an image, from its extension.
+pub fn keeps_layers(path: &Path) -> bool {
+    is_open_raster(path)
+}
+
 /// Whether a file of that name can be saved to, from its extension.
 pub fn is_savable(path: &Path) -> bool {
     path.extension().is_some_and(|extension| {
@@ -119,6 +133,7 @@ mod tests {
         assert!(is_savable(Path::new("b.jpeg")));
         assert!(!is_savable(Path::new("b.svg")));
         assert!(!is_savable(Path::new("png")));
+        assert!(is_savable(Path::new("b.ora")));
     }
 
     #[test]

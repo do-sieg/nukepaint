@@ -5,7 +5,7 @@ use image::{RgbaImage, imageops};
 use crate::{
     Adjustment, Affine, BlendMode, FloatingPixels, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
     SelectionMode, Step, blend_layer, composite, composite_area, copy_selected, erase_selected, history::History,
-    adjust, load_image, resize, save_image,
+    adjust, load_image, open_raster, resize, save_image,
 };
 
 /// An image being edited: its layers, bottom first, the file it came from, and the
@@ -26,32 +26,42 @@ pub struct Document {
 impl Document {
     /// A document never saved, of a single layer, and with nothing to save either.
     pub fn new(pixels: RgbaImage) -> Self {
-        Self::with_first_step(pixels, "New Image", None, true)
+        Self::with_first_step(vec![Layer::new("Background", pixels)], "New Image", None, true)
     }
 
     /// A document of pasted pixels, which has changes to save as it is in no file.
     pub fn pasted(pixels: RgbaImage) -> Self {
-        Self::with_first_step(pixels, "Paste in to New Image", Some("paste"), false)
+        Self::with_first_step(vec![Layer::new("Background", pixels)], "Paste in to New Image", Some("paste"), false)
     }
 
-    /// Reads a document from an image file, as a single layer.
+    /// Reads a document from an image file: an OpenRaster file with its layers, any
+    /// other as a single layer.
     pub fn open(path: &Path) -> Result<Self, OpenError> {
-        let document = Self::with_first_step(load_image(path)?, "Open", Some("open"), true);
+        let layers = if open_raster::is_open_raster(path) {
+            open_raster::load(path)?
+        } else {
+            vec![Layer::new("Background", load_image(path)?)]
+        };
+        let document = Self::with_first_step(layers, "Open", Some("open"), true);
         Ok(Self { path: Some(path.to_path_buf()), ..document })
     }
 
-    fn with_first_step(pixels: RgbaImage, name: &str, icon: Option<&'static str>, saved: bool) -> Self {
-        let layers = vec![Layer::new("Background", pixels)];
+    fn with_first_step(layers: Vec<Layer>, name: &str, icon: Option<&'static str>, saved: bool) -> Self {
         let selection = Selection::default();
-        let history = History::new(Step { name: name.to_owned(), icon }, &layers, 0, &selection, saved);
-        Self { path: None, layers, active_layer: 0, selection, history }
+        let history = History::new(Step { name: name.to_owned(), icon }, &layers, layers.len() - 1, &selection, saved);
+        Self { path: None, active_layer: layers.len() - 1, layers, selection, history }
     }
 
     /// Writes the image to a file, in the format its extension names, and makes that
-    /// file the document's own. With `flatten`, the layers are then blended into a
-    /// single one as well, as one more step, to be as they are in the file.
+    /// file the document's own. An OpenRaster file keeps the layers; with `flatten`,
+    /// those of any other are then blended into a single one, as one more step, to be
+    /// as they are in the file.
     pub fn save(&mut self, path: &Path, flatten: bool) -> Result<(), image::ImageError> {
-        save_image(path, &self.flattened())?;
+        if open_raster::is_open_raster(path) {
+            open_raster::save(path, &self.layers, &self.flattened())?;
+        } else {
+            save_image(path, &self.flattened())?;
+        }
         self.path = Some(path.to_path_buf());
         if flatten && !self.is_flat() {
             self.flatten();
