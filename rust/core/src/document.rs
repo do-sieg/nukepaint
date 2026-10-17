@@ -3,19 +3,19 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-use image::{Rgba, RgbaImage, imageops};
+use image::{RgbaImage, imageops};
 
 use crate::{
     Adjustment, Affine, BlendMode, FloatingPixels, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
-    SelectionMode, Step, DEFAULT_PALETTE, MAX_PALETTE_SIZE, blend_layer, palette_of, composite, composite_area, copy_selected, erase_selected, history::History,
+    SelectionMode, Step, DEFAULT_PALETTE, MAX_PALETTE_SIZE, Palette, blend_layer, palette_of, composite, composite_area, copy_selected, erase_selected, history::History,
     adjust, load_image, open_raster, resize, save_image, wavelet_decompose,
 };
 
 /// An image being edited: its layers, bottom first, its palette, the file it came
 /// from, and the steps it went through since, to undo and redo.
 ///
-/// The layers, the active one and the selection are changed directly, then recorded
-/// as a step with [`Document::commit`]. Until then the history knows nothing of the
+/// The layers, the active one, the selection and the palette are changed directly,
+/// then recorded as a step with [`Document::commit`]. Until then the history knows nothing of the
 /// change, and neither does [`Document::is_unsaved`].
 pub struct Document {
     /// The file the document is saved to, if it has one yet.
@@ -25,20 +25,20 @@ pub struct Document {
     pub selection: Selection,
     /// The colours kept at hand for the image, in order. A new image starts with
     /// [`DEFAULT_PALETTE`], one opened or pasted with its own colours.
-    pub palette: Vec<Rgba<u8>>,
+    pub palette: Palette,
     history: History,
 }
 
 impl Document {
     /// A document never saved, of a single layer, and with nothing to save either.
     pub fn new(pixels: RgbaImage) -> Self {
-        let document = Self::with_first_step(vec![Layer::new("Background", pixels)], "New Image", None, true);
-        Self { palette: DEFAULT_PALETTE.to_vec(), ..document }
+        let palette = Palette::new(DEFAULT_PALETTE.to_vec());
+        Self::with_first_step(vec![Layer::new("Background", pixels)], Some(palette), "New Image", None, true)
     }
 
     /// A document of pasted pixels, which has changes to save as it is in no file.
     pub fn pasted(pixels: RgbaImage) -> Self {
-        Self::with_first_step(vec![Layer::new("Background", pixels)], "Paste in to New Image", Some("paste"), false)
+        Self::with_first_step(vec![Layer::new("Background", pixels)], None, "Paste in to New Image", Some("paste"), false)
     }
 
     /// Reads a document from an image file: an OpenRaster file with its layers, any
@@ -49,14 +49,22 @@ impl Document {
         } else {
             vec![Layer::new("Background", load_image(path)?)]
         };
-        let document = Self::with_first_step(layers, "Open", Some("open"), true);
+        let document = Self::with_first_step(layers, None, "Open", Some("open"), true);
         Ok(Self { path: Some(path.to_path_buf()), ..document })
     }
 
-    fn with_first_step(layers: Vec<Layer>, name: &str, icon: Option<&'static str>, saved: bool) -> Self {
+    /// A document with `palette`, or else one of the layers' colours.
+    fn with_first_step(
+        layers: Vec<Layer>,
+        palette: Option<Palette>,
+        name: &str,
+        icon: Option<&'static str>,
+        saved: bool,
+    ) -> Self {
         let selection = Selection::default();
-        let history = History::new(Step { name: name.to_owned(), icon }, &layers, layers.len() - 1, &selection, saved);
-        let palette = palette_of(&composite(&layers), MAX_PALETTE_SIZE);
+        let palette = palette.unwrap_or_else(|| Palette::new(palette_of(&composite(&layers), MAX_PALETTE_SIZE)));
+        let step = Step { name: name.to_owned(), icon };
+        let history = History::new(step, &layers, layers.len() - 1, &selection, &palette, saved);
         Self { path: None, active_layer: layers.len() - 1, layers, selection, palette, history }
     }
 
@@ -86,17 +94,17 @@ impl Document {
         !self.history.is_saved()
     }
 
-    /// Records the layers, the active one and the selection as they now are, as a step
-    /// after the current one, in place of any undone.
+    /// Records the layers, the active one, the selection and the palette as they now
+    /// are, as a step after the current one, in place of any undone.
     pub fn commit(&mut self, name: impl Into<String>, icon: Option<&'static str>) {
         let step = Step { name: name.into(), icon };
-        self.history.record(step, &self.layers, self.active_layer, &self.selection);
+        self.history.record(step, &self.layers, self.active_layer, &self.selection, &self.palette);
     }
 
-    /// Records the layers, the active one and the selection as they now are in place of
-    /// the current step, for a change that carries on the one it records.
+    /// Records the layers, the active one, the selection and the palette as they now
+    /// are in place of the current step, for a change that carries on the one it records.
     pub fn amend(&mut self) {
-        self.history.amend(&self.layers, self.active_layer, &self.selection);
+        self.history.amend(&self.layers, self.active_layer, &self.selection, &self.palette);
     }
 
     /// Amends the current step as [`Document::amend`] does, renaming it.
@@ -144,12 +152,13 @@ impl Document {
     /// Puts the document back as it was after one of its steps, undoing or redoing as
     /// many as that takes. Returns whether it changed.
     pub fn go_to_step(&mut self, index: usize) -> bool {
-        let Some((layers, active_layer, selection)) = self.history.go_to(index) else {
+        let Some(restored) = self.history.go_to(index) else {
             return false;
         };
-        self.layers = layers;
-        self.active_layer = active_layer;
-        self.selection = selection;
+        self.layers = restored.layers;
+        self.active_layer = restored.active_layer;
+        self.selection = restored.selection;
+        self.palette = restored.palette;
         true
     }
 
@@ -536,9 +545,24 @@ mod tests {
 
     #[test]
     fn new_documents_have_the_default_palette_and_pasted_ones_their_colors() {
-        assert_eq!(document().palette, DEFAULT_PALETTE);
+        assert_eq!(document().palette.colors, DEFAULT_PALETTE);
         let pasted = Document::pasted(RgbaImage::from_pixel(1, 1, Rgba([255, 0, 0, 255])));
-        assert_eq!(pasted.palette, [Rgba([255, 0, 0, 255])]);
+        assert_eq!(pasted.palette.colors, [Rgba([255, 0, 0, 255])]);
+    }
+
+    #[test]
+    fn palette_changes_are_undone_and_leave_the_file_saved() {
+        let mut document = document();
+        document.palette.resize(2);
+        document.palette.transparent = Some(1);
+        document.commit("Resize Palette", None);
+        assert!(!document.is_unsaved());
+        assert!(document.undo());
+        assert_eq!(document.palette.colors, DEFAULT_PALETTE);
+        assert_eq!(document.palette.transparent, None);
+        assert!(document.redo());
+        assert_eq!(document.palette.len(), 2);
+        assert_eq!(document.palette.transparent, Some(1));
     }
 
     #[test]

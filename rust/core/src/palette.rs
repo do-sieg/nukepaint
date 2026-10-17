@@ -1,23 +1,25 @@
 //! The colours a document keeps at hand, in order.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::RangeInclusive};
 
 use image::{Rgba, RgbaImage};
 
-/// The palette documents start with: DawnBringer's 32 colours, a common start for
+use crate::palette_presets::from_code;
+
+/// DawnBringer's 32 colours, the palette documents start with: a common start for
 /// pixel art.
+const DB32: [u32; 32] = [
+    0x000000, 0x222034, 0x45283c, 0x663931, 0x8f563b, 0xdf7126, 0xd9a066, 0xeec39a, //
+    0xfbf236, 0x99e550, 0x6abe30, 0x37946e, 0x4b692f, 0x524b24, 0x323c39, 0x3f3f74, //
+    0x306082, 0x5b6ee1, 0x639bff, 0x5fcde4, 0xcbdbfc, 0xffffff, 0x9badb7, 0x847e87, //
+    0x696a6a, 0x595652, 0x76428a, 0xac3232, 0xd95763, 0xd77bba, 0x8f974a, 0x8a6f30,
+];
+
 pub const DEFAULT_PALETTE: [Rgba<u8>; 32] = {
-    const CODES: [u32; 32] = [
-        0x000000, 0x222034, 0x45283c, 0x663931, 0x8f563b, 0xdf7126, 0xd9a066, 0xeec39a, //
-        0xfbf236, 0x99e550, 0x6abe30, 0x37946e, 0x4b692f, 0x524b24, 0x323c39, 0x3f3f74, //
-        0x306082, 0x5b6ee1, 0x639bff, 0x5fcde4, 0xcbdbfc, 0xffffff, 0x9badb7, 0x847e87, //
-        0x696a6a, 0x595652, 0x76428a, 0xac3232, 0xd95763, 0xd77bba, 0x8f974a, 0x8a6f30,
-    ];
     let mut colors = [Rgba([0, 0, 0, 255]); 32];
     let mut index = 0;
-    while index < CODES.len() {
-        let [_, red, green, blue] = CODES[index].to_be_bytes();
-        colors[index] = Rgba([red, green, blue, 255]);
+    while index < DB32.len() {
+        colors[index] = from_code(DB32[index]);
         index += 1;
     }
     colors
@@ -25,6 +27,85 @@ pub const DEFAULT_PALETTE: [Rgba<u8>; 32] = {
 
 /// How many entries a palette made from an image has at most.
 pub const MAX_PALETTE_SIZE: usize = 256;
+
+/// A document's palette: its colours in order, and which of them, if any, stands for
+/// no colour at all, as the transparent index of an indexed image does.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Palette {
+    pub colors: Vec<Rgba<u8>>,
+    pub transparent: Option<usize>,
+}
+
+impl Palette {
+    pub fn new(colors: Vec<Rgba<u8>>) -> Self {
+        Self { colors, transparent: None }
+    }
+
+    pub fn len(&self) -> usize {
+        self.colors.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.colors.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.colors.len() >= MAX_PALETTE_SIZE
+    }
+
+    /// The colour entry `index` paints with: its own, or none at all for the
+    /// transparent one.
+    pub fn color(&self, index: usize) -> Rgba<u8> {
+        let mut color = self.colors[index];
+        if self.transparent == Some(index) {
+            color[3] = 0;
+        }
+        color
+    }
+
+    /// Puts `color` before entry `index`, or at the end with `index` the length.
+    pub fn insert(&mut self, index: usize, color: Rgba<u8>) {
+        self.colors.insert(index, color);
+        if let Some(transparent) = self.transparent.as_mut()
+            && *transparent >= index
+        {
+            *transparent += 1;
+        }
+    }
+
+    /// Takes out the entries of `range`. The transparent one among them leaves no
+    /// entry transparent.
+    pub fn remove(&mut self, range: RangeInclusive<usize>) {
+        let (first, last) = (*range.start(), *range.end());
+        self.colors.drain(range);
+        self.transparent = match self.transparent {
+            Some(transparent) if transparent > last => Some(transparent - (last + 1 - first)),
+            Some(transparent) if transparent >= first => None,
+            other => other,
+        };
+    }
+
+    /// Cuts the palette down to `len` entries, or adds black ones up to it, no more
+    /// than [`MAX_PALETTE_SIZE`].
+    pub fn resize(&mut self, len: usize) {
+        let len = len.min(MAX_PALETTE_SIZE);
+        self.colors.resize(len, Rgba([0, 0, 0, 255]));
+        self.transparent = self.transparent.filter(|&transparent| transparent < len);
+    }
+
+    /// Sets the entries between the ends of `range` to the colours evenly spaced
+    /// between theirs.
+    pub fn ramp(&mut self, range: RangeInclusive<usize>) {
+        let (first, last) = (*range.start(), *range.end());
+        let (from, to) = (self.colors[first], self.colors[last]);
+        let steps = (last - first) as f32;
+        for index in first + 1..last {
+            let along = (index - first) as f32 / steps;
+            let mix = |channel: usize| (from[channel] as f32 + (to[channel] as f32 - from[channel] as f32) * along).round() as u8;
+            self.colors[index] = Rgba(std::array::from_fn(mix));
+        }
+    }
+}
 
 /// How many bits of each channel tell apart the colours cut down to a palette.
 const BIN_BITS: u32 = 5;
@@ -158,6 +239,61 @@ mod tests {
                 .unwrap();
             assert!(nearest <= 40, "{pixel:?} is {nearest} away");
         }
+    }
+
+    fn gray(level: u8) -> Rgba<u8> {
+        Rgba([level, level, level, 255])
+    }
+
+    fn grays(levels: &[u8]) -> Palette {
+        Palette::new(levels.iter().map(|&level| gray(level)).collect())
+    }
+
+    #[test]
+    fn the_transparent_entry_paints_with_no_color() {
+        let mut palette = grays(&[10, 20]);
+        palette.transparent = Some(1);
+        assert_eq!(palette.color(0), gray(10));
+        assert_eq!(palette.color(1), Rgba([20, 20, 20, 0]));
+    }
+
+    #[test]
+    fn the_transparent_index_follows_its_entry() {
+        let mut palette = grays(&[0, 1, 2, 3, 4]);
+        palette.transparent = Some(3);
+        palette.insert(1, gray(9));
+        assert_eq!(palette.transparent, Some(4));
+        palette.insert(5, gray(9));
+        assert_eq!(palette.transparent, Some(4));
+        palette.remove(0..=1);
+        assert_eq!(palette.transparent, Some(2));
+        assert_eq!(palette.color(2), Rgba([3, 3, 3, 0]));
+        palette.remove(3..=3);
+        assert_eq!(palette.transparent, Some(2));
+        palette.remove(1..=2);
+        assert_eq!(palette.transparent, None);
+    }
+
+    #[test]
+    fn resizing_adds_black_entries_or_cuts_the_last_ones() {
+        let mut palette = grays(&[10, 20, 30]);
+        palette.transparent = Some(2);
+        palette.resize(5);
+        assert_eq!(palette, Palette { transparent: Some(2), ..grays(&[10, 20, 30, 0, 0]) });
+        palette.resize(2);
+        assert_eq!(palette, grays(&[10, 20]));
+        palette.resize(1000);
+        assert_eq!(palette.len(), MAX_PALETTE_SIZE);
+    }
+
+    #[test]
+    fn a_ramp_spaces_the_colors_between_its_ends_evenly() {
+        let mut palette = grays(&[7, 0, 10, 0, 0, 50, 7]);
+        palette.colors[5][3] = 0;
+        palette.ramp(2..=5);
+        assert_eq!(palette.colors[..2], grays(&[7, 0]).colors);
+        assert_eq!(palette.colors[2..6], [gray(10), Rgba([23, 23, 23, 170]), Rgba([37, 37, 37, 85]), Rgba([50, 50, 50, 0])]);
+        assert_eq!(palette.colors[6], gray(7));
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod layer_commands;
 mod layer_properties;
 mod layers_panel;
 mod navigator;
+mod palette_editor;
 mod palette_panel;
 mod resample_preview;
 mod settings;
@@ -51,7 +52,7 @@ use composite::{Composite, Gpu};
 use grid::{Cells, Grid};
 use power_paint_core::{
     Affine, Document, Effect, FloatingPixels, GradientKind, GradientMode, adjust, Interpolation, MAX_SPRAY_SIZE, MAX_TIP_SIZE, OPEN_EXTENSIONS, Overlaps, PixelRect,
-    RgbaImage, SAVE_EXTENSIONS, SelectionMask, SelectionMode, ShapeKind, Turn, apply_effect, is_savable, keeps_layers, thumbnail,
+    PALETTE_EXTENSIONS, Palette, RgbaImage, SAVE_EXTENSIONS, load_palette, save_palette, SelectionMask, SelectionMode, ShapeKind, Turn, apply_effect, is_savable, keeps_layers, thumbnail,
 };
 use icons::{ICON_SIZE, Icon, Icons};
 use lasso::{Lasso, LassoKind, PolygonEdit};
@@ -512,6 +513,8 @@ struct App {
     size_dialog: Option<image_size::Dialog>,
     /// Set while the grid's settings are being changed.
     grid_dialog: Option<grid_settings::Dialog>,
+    /// Set while an image's palette is being edited.
+    palette_dialog: Option<palette_editor::Dialog>,
     /// Set while the checkerboard behind the image is being changed.
     checkerboard_dialog: Option<checkerboard::Dialog>,
     /// Set while the settings of an adjustment or an effect are being tried out.
@@ -556,6 +559,7 @@ impl App {
             layer_dialog: None,
             size_dialog: None,
             grid_dialog: None,
+            palette_dialog: None,
             checkerboard_dialog: None,
             adjustment_dialog: None,
             last_adjustments: LastSettings::default(),
@@ -691,6 +695,83 @@ impl App {
         path.push(".");
         path.push(extension);
         Some(PathBuf::from(path))
+    }
+
+    /// Shows the palette editor, putting the palette in place of the image's, as a
+    /// step, once it is accepted.
+    fn palette_dialog(&mut self, ctx: &egui::Context) {
+        let primary = self.tools.colors.primary;
+        let Some(outcome) = self.palette_dialog.as_mut().and_then(|dialog| dialog.show(ctx, primary)) else {
+            return;
+        };
+        match outcome {
+            palette_editor::Outcome::Load => {
+                if let Some(palette) = self.load_palette_file() {
+                    self.palette_dialog.as_mut().unwrap().load(palette);
+                }
+            }
+            palette_editor::Outcome::Save => {
+                let dialog = self.palette_dialog.as_ref().unwrap();
+                let (image, palette) = (dialog.image, dialog.palette().clone());
+                self.save_palette_file(image, &palette);
+            }
+            palette_editor::Outcome::Accepted(palette) => {
+                let dialog = self.palette_dialog.take().unwrap();
+                let document = &mut self.images[dialog.image].document;
+                if document.palette != palette {
+                    document.palette = palette;
+                    document.commit("Edit Palette", None);
+                }
+            }
+            palette_editor::Outcome::Canceled => self.palette_dialog = None,
+        }
+    }
+
+    /// A file dialog for palettes, starting in the folder last used.
+    fn palette_file_dialog(&self) -> rfd::FileDialog {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Palettes", PALETTE_EXTENSIONS)
+            .add_filter("GIMP", &["gpl"])
+            .add_filter("JASC or RIFF", &["pal"])
+            .add_filter("Adobe Color Table", &["act"])
+            .add_filter("Adobe Swatch Exchange", &["ase"]);
+        if let Some(dir) = self.settings.last_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog
+    }
+
+    /// Reads a palette from a file the user picks.
+    fn load_palette_file(&mut self) -> Option<Palette> {
+        let path = self.palette_file_dialog().pick_file()?;
+        if let Some(dir) = path.parent() {
+            self.settings.set_last_dir(dir);
+        }
+        load_palette(&path).map_err(|error| self.open_errors.push(format!("{}: {error}", path.display()))).ok()
+    }
+
+    /// Saves `palette`, of the image, to a file the user picks, a GIMP palette if its
+    /// name has no palette extension.
+    fn save_palette_file(&mut self, image: usize, palette: &Palette) {
+        let name = self.images[image].document.name();
+        let stem = Path::new(&name).file_stem().map_or(name.clone(), |stem| stem.to_string_lossy().into_owned());
+        let Some(mut path) = self.palette_file_dialog().set_file_name(format!("{stem}.gpl")).save_file() else {
+            return;
+        };
+        let known = path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+            PALETTE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        });
+        if !known {
+            let mut with_extension = path.into_os_string();
+            with_extension.push(".gpl");
+            path = PathBuf::from(with_extension);
+        }
+        if let Err(error) = save_palette(&path, palette) {
+            self.save_errors.push(format!("{}: {error}", path.display()));
+        }
+        if let Some(dir) = path.parent() {
+            self.settings.set_last_dir(dir);
+        }
     }
 
     /// Closes the image, first asking whether to save its changes if it has any.
@@ -1353,6 +1434,7 @@ impl App {
         self.layer_dialog.is_some()
             || self.size_dialog.is_some()
             || self.grid_dialog.is_some()
+            || self.palette_dialog.is_some()
             || self.checkerboard_dialog.is_some()
             || self.adjustment_dialog.is_some()
     }
@@ -2493,6 +2575,7 @@ impl eframe::App for App {
         // There is nothing for the dock to work on without an image.
         if let Some(current) = self.current {
             let (mut tools_action, mut history_action, mut layers_action, mut navigated) = (None, None, None, None);
+            let mut edit_palette = false;
             let tool = self.tools.tool;
             let busy = self.is_dragging() || self.has_dialog();
             let image = &self.images[current];
@@ -2507,7 +2590,8 @@ impl eframe::App for App {
                     tools_action = tools_action.take().or(action);
                 }
                 Section::Palette => {
-                    flow.part(|ui, tallest| palette_panel::show(ui, tallest, &image.document.palette, colors));
+                    let palette = &image.document.palette;
+                    edit_palette = flow.part(|ui, tallest| palette_panel::show(ui, tallest, palette, colors, !busy));
                 }
                 Section::Colors => colors.show(flow, right_click),
                 Section::History => {
@@ -2532,6 +2616,9 @@ impl eframe::App for App {
                 Some(tools_panel::Action::Select(tool)) => self.set_tool(tool),
                 Some(tools_panel::Action::Reorder(order)) => self.settings.set_tool_order(order),
                 None => {}
+            }
+            if edit_palette {
+                self.palette_dialog = Some(palette_editor::Dialog::new(current, self.images[current].document.palette.clone()));
             }
             if let Some(index) = history_action {
                 self.go_to_step(&ctx, index);
@@ -2581,6 +2668,7 @@ impl eframe::App for App {
             self.cancel_layer_dialog();
             self.size_dialog = None;
             self.grid_dialog = None;
+            self.palette_dialog = None;
             self.checkerboard_dialog = None;
             self.cancel_adjustment_dialog();
         }
@@ -2588,6 +2676,7 @@ impl eframe::App for App {
         self.adjustment_dialog(&ctx);
         self.size_dialog(&ctx);
         self.grid_dialog(&ctx);
+        self.palette_dialog(&ctx);
         self.checkerboard_dialog(&ctx);
         self.unsaved_prompt(&ctx);
         self.flatten_prompt(&ctx);
