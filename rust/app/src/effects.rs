@@ -179,49 +179,33 @@ const SHARPEN: [Setting; 3] = [
 ];
 
 impl EffectKind {
-    /// The menus of the Filters menu, each with its effects.
-    pub const MENUS: [(&str, &[Self]); 4] = [
+    /// The menus of the Filters menu, each with its effects, then the niche ones it keeps
+    /// in a More menu at its end.
+    pub const MENUS: [(&str, &[Self], &[Self]); 4] = [
         (
             "Artistic",
-            &[
-                ApplyCanvas,
-                Cartoon,
-                Clothify,
-                Cubism,
-                GlassTile,
-                Glow,
-                InkSketch,
-                OilPainting,
-                PencilSketch,
-                Photocopy,
-                Predator,
-                Slic,
-                VanGogh,
-                Waterpixels,
-                Weave,
-            ],
+            &[ApplyCanvas, Cartoon, GlassTile, Glow, InkSketch, OilPainting, PencilSketch, Photocopy, VanGogh],
+            &[Clothify, Cubism, Predator, Slic, Waterpixels, Weave],
         ),
         (
             "Blurs",
             &[
                 BokehBlur,
                 FocusBlur,
-                FragmentBlur,
                 GaussianBlur,
-                MeanCurvatureBlur,
                 MedianBlur,
                 MotionBlur,
                 RadialBlur,
-                SketchBlur,
                 SquareBlur,
                 SurfaceBlur,
                 TileableBlur,
                 VariableBlur,
                 ZoomBlur,
             ],
+            &[FragmentBlur, MeanCurvatureBlur, SketchBlur],
         ),
-        ("Map", &[Offset]),
-        ("Photo", &[Sharpen]),
+        ("Map", &[Offset], &[]),
+        ("Photo", &[Sharpen], &[]),
     ];
 
     /// Its name, which its undo step is called as well.

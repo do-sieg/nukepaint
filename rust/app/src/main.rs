@@ -1340,16 +1340,28 @@ impl App {
     fn filters_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.menu_button("Filters", |ui| {
-            for (name, kinds) in EffectKind::MENUS {
+            for (name, kinds, more) in EffectKind::MENUS {
                 ui.menu_button(name, |ui| {
                     for &kind in kinds {
-                        if ui.add_enabled(self.can_adjust(), egui::Button::new(format!("{}…", kind.name()))).clicked() {
-                            self.adjust(&ctx, FilterKind::Effect(kind));
-                        }
+                        self.effect_button(ui, &ctx, kind);
+                    }
+                    if !more.is_empty() {
+                        ui.separator();
+                        ui.menu_button("More", |ui| {
+                            for &kind in more {
+                                self.effect_button(ui, &ctx, kind);
+                            }
+                        });
                     }
                 });
             }
         });
+    }
+
+    fn effect_button(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, kind: EffectKind) {
+        if ui.add_enabled(self.can_adjust(), egui::Button::new(format!("{}…", kind.name()))).clicked() {
+            self.adjust(ctx, FilterKind::Effect(kind));
+        }
     }
 
     fn can_adjust(&self) -> bool {
