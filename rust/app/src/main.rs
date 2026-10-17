@@ -1227,7 +1227,12 @@ impl App {
         image.transform = None;
         if command.run(&mut image.document) {
             image.document.commit(command.step_name(&image.document), command.icon().map(Icon::name));
-            image.refresh_layers(ctx);
+            // Only which layers show changed.
+            if command == LayerCommand::ShowOnly {
+                image.refresh_image();
+            } else {
+                image.refresh_layers(ctx);
+            }
         }
     }
 

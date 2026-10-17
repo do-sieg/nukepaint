@@ -36,6 +36,7 @@ pub enum LayerCommand {
     MoveUp,
     MoveDown,
     MoveToBottom,
+    ShowOnly,
     Properties,
 }
 
@@ -48,7 +49,7 @@ impl LayerCommand {
         &[FlipHorizontal, FlipVertical, RotateClockwise, RotateCounterClockwise, Rotate180, RotateZoom, Transform3d],
         &[GoToTop, GoToAbove, GoToBelow, GoToBottom],
         &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
-        &[Properties],
+        &[ShowOnly, Properties],
     ];
     /// The Image menu.
     pub const IMAGE_MENU: [&[Self]; 3] = [
@@ -62,7 +63,7 @@ impl LayerCommand {
         &[Add, Delete, Duplicate, MergeDown, Flatten],
         &[FlipHorizontal, FlipVertical, RotateClockwise, RotateCounterClockwise, Rotate180, RotateZoom, Transform3d],
         &[MoveToTop, MoveUp, MoveDown, MoveToBottom],
-        &[Properties],
+        &[ShowOnly, Properties],
     ];
     /// The buttons under the layers list, which show their icon.
     pub const BUTTONS: [Self; 7] = [Add, Delete, Duplicate, MergeDown, MoveUp, MoveDown, Properties];
@@ -92,7 +93,17 @@ impl LayerCommand {
             MoveUp => "Move Layer Up",
             MoveDown => "Move Layer Down",
             MoveToBottom => "Move Layer to Bottom",
+            ShowOnly => "Show Only Active Layer",
             Properties => "Layer Properties…",
+        }
+    }
+
+    /// The label in the menu of a layer in the layers list, which names the layer right
+    /// clicked rather than the active one, though it is the same.
+    pub fn context_label(self) -> &'static str {
+        match self {
+            ShowOnly => "Show Only This Layer",
+            _ => self.label(),
         }
     }
 
@@ -155,18 +166,21 @@ impl LayerCommand {
             MoveUp => icons::LAYER_UP,
             MoveDown => icons::LAYER_DOWN,
             Properties => icons::LAYER_PROPERTIES,
+            ShowOnly => icons::LAYERS,
             _ => return None,
         })
     }
 
     /// Whether the command has anything to do on the document.
     pub fn can_run(self, document: &Document) -> bool {
-        let has_above = document.active_layer + 1 < document.layers.len();
-        let has_below = document.active_layer > 0;
+        let active = document.active_layer;
+        let has_above = active + 1 < document.layers.len();
+        let has_below = active > 0;
         match self {
             Delete => document.layers.len() > 1,
             CropToSelection => !document.selection.is_empty(),
             Flatten => !document.is_flat(),
+            ShowOnly => document.layers.iter().enumerate().any(|(index, layer)| layer.visible != (index == active)),
             GoToTop | GoToAbove | MoveToTop | MoveUp => has_above,
             MergeDown | GoToBottom | GoToBelow | MoveToBottom | MoveDown => has_below,
             Add | Duplicate | Resize | CanvasSize | RotateZoom | Transform3d | Properties => true,
@@ -226,6 +240,11 @@ impl LayerCommand {
             MoveUp => return document.move_layer(active, active + 1),
             MoveDown => return document.move_layer(active, active.saturating_sub(1)),
             MoveToBottom => return document.move_layer(active, 0),
+            ShowOnly => {
+                for (index, layer) in document.layers.iter_mut().enumerate() {
+                    layer.visible = index == active;
+                }
+            }
             Resize | CanvasSize | RotateZoom | Transform3d | Properties => return false,
         }
         true

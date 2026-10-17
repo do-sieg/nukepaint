@@ -172,7 +172,7 @@ fn context_menu(ui: &mut egui::Ui, enabled: &impl Fn(LayerCommand) -> bool) -> O
             ui.separator();
         }
         for &command in *commands {
-            let mut button = egui::Button::new(command.label());
+            let mut button = egui::Button::new(command.context_label());
             if let Some(shortcut) = command.shortcut() {
                 button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
             }
