@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use power_paint_core::{
-    BlendMode, CellStyle, Effect, FocusShape, FractalKind, Interpolation, Layer, NewsprintScreen, Noise, NoiseKind, OffsetEdges, Turn,
+    BlendMode, CellStyle, EdgeAlgorithm, Effect, FocusShape, FractalKind, Interpolation, Layer, NewsprintScreen, Noise, NoiseKind, OffsetEdges, Turn,
     WaveShape, WindDirection,
 };
 
@@ -66,6 +66,10 @@ pub enum EffectKind {
     Grid,
     Maze,
     SpeedLines,
+    EdgeDetect,
+    Emboss,
+    Outline,
+    Relief,
     Offset,
     RotateZoom,
     Transform3d,
@@ -370,11 +374,30 @@ const SPEED_LINES: [Setting; 8] = [
     SEED,
     color("Color:", PRIMARY),
 ];
+/// The names of [`EdgeAlgorithm::ALL`].
+const EDGE_ALGORITHMS: [&str; 3] = ["Sobel", "Laplace", "Difference of Gaussians"];
+const EDGE_DETECT: [Setting; 8] = [
+    choice("Algorithm:", &EDGE_ALGORITHMS, 0),
+    check("Horizontal", true).enabled_when(0, 0.0),
+    check("Vertical", true).enabled_when(0, 0.0),
+    slider("Radius 1:", 0.0, 50.0, 1.0, 1.0, " px").enabled_when(0, 2.0),
+    slider("Radius 2:", 0.0, 50.0, 1.0, 3.0, " px").enabled_when(0, 2.0),
+    check("Normalize", true),
+    slider("Amount:", 0.0, 1000.0, 1.0, 100.0, " %").enabled_when(5, 0.0),
+    check("Invert", false),
+];
+/// The settings of the Emboss and the Relief.
+const RELIEF: [Setting; 3] = [
+    slider("Azimuth:", 0.0, 360.0, 1.0, 135.0, "°"),
+    slider("Elevation:", 0.0, 90.0, 1.0, 45.0, "°"),
+    slider("Depth:", 1.0, 50.0, 1.0, 3.0, ""),
+];
+const OUTLINE: [Setting; 2] = [slider("Thickness:", 1.0, 50.0, 1.0, 3.0, " px"), slider("Intensity:", 0.0, 100.0, 1.0, 50.0, " %")];
 
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects, then the niche ones it keeps
     /// in a More menu at its end.
-    pub const MENUS: [(&str, &[Self], &[Self]); 7] = [
+    pub const MENUS: [(&str, &[Self], &[Self]); 8] = [
         (
             "Artistic",
             &[ApplyCanvas, Cartoon, GlassTile, Glow, InkSketch, OilPainting, PencilSketch, Photocopy, VanGogh],
@@ -406,6 +429,7 @@ impl EffectKind {
         ("Map", &[Offset], &[]),
         ("Photo", &[Sharpen], &[]),
         ("Render", &[CloudsAndNoise, FractalExplorer, Checkerboard, Grid, Maze, SpeedLines], &[BayerMatrix]),
+        ("Stylize", &[EdgeDetect, Emboss, Outline, Relief], &[]),
     ];
 
     /// Its name, which its undo step is called as well.
@@ -466,6 +490,10 @@ impl EffectKind {
             Grid => "Grid",
             Maze => "Maze",
             SpeedLines => "Speed Lines",
+            EdgeDetect => "Edge Detect",
+            Emboss => "Emboss",
+            Outline => "Outline",
+            Relief => "Relief",
             Offset => "Offset",
             RotateZoom => "Rotate / Zoom",
             Transform3d => "3D Transform",
@@ -530,6 +558,9 @@ impl EffectKind {
             Grid => &GRID,
             Maze => &MAZE,
             SpeedLines => &SPEED_LINES,
+            EdgeDetect => &EDGE_DETECT,
+            Emboss | Relief => &RELIEF,
+            Outline => &OUTLINE,
             Offset => &OFFSET,
             RotateZoom => &ROTATE_ZOOM,
             Transform3d => &TRANSFORM_3D,
@@ -690,6 +721,18 @@ impl EffectKind {
                 seed: value(6) as u32,
                 color: unpack_color(values[7]),
             },
+            EdgeDetect => Effect::EdgeDetect {
+                algorithm: EdgeAlgorithm::ALL[pick(0, EdgeAlgorithm::ALL.len())],
+                horizontal: values[1] != 0.0,
+                vertical: values[2] != 0.0,
+                radii: [value(3), value(4)],
+                normalize: values[5] != 0.0,
+                amount: value(6),
+                invert: values[7] != 0.0,
+            },
+            Emboss => Effect::Emboss { azimuth: value(0), elevation: value(1), depth: value(2) },
+            Relief => Effect::Relief { azimuth: value(0), elevation: value(1), depth: value(2) },
+            Outline => Effect::Outline { thickness: value(0), intensity: value(1) },
             Offset => Effect::Offset {
                 x: values[0] as i32,
                 y: values[1] as i32,

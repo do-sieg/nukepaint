@@ -10,6 +10,7 @@ mod artistic;
 mod distort;
 mod enhance;
 mod render;
+mod stylize;
 
 use std::{
     f32::consts::TAU,
@@ -26,6 +27,7 @@ use image::{Rgba, RgbaImage};
 pub use distort::{NewsprintScreen, WaveShape, WindDirection};
 pub use enhance::wavelet_decompose;
 pub use render::{CellStyle, FractalKind, Noise, NoiseKind};
+pub use stylize::EdgeAlgorithm;
 pub(crate) use enhance::GRAIN_MIDDLE;
 
 use crate::{BlendMode, Interpolation, PixelRect, SelectionMask, Turn, turn_pixels};
@@ -208,6 +210,21 @@ pub enum Effect {
     /// by more than `threshold` percent, the way of `direction`, fading out, or as long
     /// as half that without fading if a blast.
     Wind { strength: f32, threshold: f32, direction: WindDirection, blast: bool },
+    /// The edges, as bright as red, green and blue each change there, `amount` percent
+    /// as much, or as much as makes the strongest full if `normalize`, on black, or dark
+    /// on white if inverted. The algorithm measures the change across if `horizontal`
+    /// and down if `vertical` for the Sobel, or between the image blurred by either of
+    /// `radii` for the Difference of Gaussians.
+    EdgeDetect { algorithm: EdgeAlgorithm, horizontal: bool, vertical: bool, radii: [f32; 2], amount: f32, normalize: bool, invert: bool },
+    /// The image as a grey relief, standing out as light as it is, `depth` times as
+    /// much, lit from `azimuth` and `elevation`, in degrees: flat ground middle grey.
+    Emboss { azimuth: f32, elevation: f32, depth: f32 },
+    /// The image's own colours lit as the Emboss lights its relief: flat ground as it was.
+    Relief { azimuth: f32, elevation: f32, depth: f32 },
+    /// Lines along the edges, `thickness` wide on either side, each pixel in its own
+    /// colour as much as the colours change around it, the more so the more
+    /// `intensity`, from 0 to 100, and white elsewhere.
+    Outline { thickness: f32, intensity: f32 },
     /// Draws the noise, from the first of `colors` where there is none to the second
     /// where it is full, blended over the image in `blend_mode`: the Difference one
     /// gives Difference Clouds. The Plasma draws red, green and blue each a noise of
@@ -552,6 +569,9 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         | Effect::Ripple { .. }
         | Effect::Waves { .. }
         | Effect::Wind { .. } => distort::render(source, effect, stop),
+        Effect::EdgeDetect { .. } | Effect::Emboss { .. } | Effect::Relief { .. } | Effect::Outline { .. } => {
+            stylize::render(source, effect, stop)
+        }
         Effect::Sharpen { radius, amount, threshold } => {
             let blurred = if radius < 1.0 { None } else { Some(blur(source, Weighing::Gaussian, radius, 1.0, stop)?) };
             let blurred = blurred.as_ref().unwrap_or(source);
@@ -1193,6 +1213,27 @@ mod tests {
         effects
     }
 
+    /// One of each effect of the Stylize menu, and each edge algorithm.
+    fn stylizing() -> Vec<Effect> {
+        let mut effects: Vec<Effect> = EdgeAlgorithm::ALL.into_iter().map(edges).collect();
+        effects.extend([
+            Effect::Emboss { azimuth: 135.0, elevation: 45.0, depth: 3.0 },
+            Effect::Relief { azimuth: 135.0, elevation: 45.0, depth: 3.0 },
+            Effect::Outline { thickness: 3.0, intensity: 50.0 },
+        ]);
+        effects
+    }
+
+    /// An Edge Detect with the algorithm, both ways and two radii, not normalized.
+    fn edges(algorithm: EdgeAlgorithm) -> Effect {
+        edge_detect(algorithm, [true, true], false, false)
+    }
+
+    /// An Edge Detect with the algorithm, across and down as `ways` says, and two radii.
+    fn edge_detect(algorithm: EdgeAlgorithm, [horizontal, vertical]: [bool; 2], normalize: bool, invert: bool) -> Effect {
+        Effect::EdgeDetect { algorithm, horizontal, vertical, radii: [1.0, 3.0], amount: 100.0, normalize, invert }
+    }
+
     fn noise(kind: NoiseKind) -> Noise {
         Noise { kind, scale: 40.0, detail: 4, roughness: 50.0, seed: 3, cells: CellStyle::Edges, jitter: 100.0 }
     }
@@ -1215,7 +1256,8 @@ mod tests {
     #[test]
     fn an_even_colour_stays_as_it_is() {
         for pixels in [RgbaImage::from_pixel(40, 30, Rgba([200, 100, 50, 180])), RgbaImage::new(40, 30)] {
-            for effect in &[all(), distorting()].concat() {
+            let relief = Effect::Relief { azimuth: 135.0, elevation: 45.0, depth: 3.0 };
+            for effect in &[all(), distorting(), vec![relief]].concat() {
                 assert_eq!(apply(&pixels, effect), pixels, "{effect:?}");
             }
         }
@@ -1313,7 +1355,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing()].concat() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -1323,7 +1365,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing()].concat() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -1819,5 +1861,58 @@ mod tests {
             assert_eq!(drawn[(30, 30)].0, colors[0]);
             assert_ne!(drawn[(0, 0)].0, colors[0]);
         }
+    }
+
+    /// A black square in the middle of white.
+    fn square() -> RgbaImage {
+        RgbaImage::from_fn(30, 30, |x, y| {
+            if (10..20).contains(&x) && (10..20).contains(&y) { Rgba([0, 0, 0, 255]) } else { Rgba([255, 255, 255, 255]) }
+        })
+    }
+
+    #[test]
+    fn edges_show_only_where_the_colours_change() {
+        for algorithm in EdgeAlgorithm::ALL {
+            let found = apply(&square(), &edges(algorithm));
+            assert_eq!(found[(3, 3)], Rgba([0, 0, 0, 255]), "{algorithm:?}");
+            assert_eq!(found[(15, 15)], Rgba([0, 0, 0, 255]), "{algorithm:?}");
+            assert!(found[(10, 15)][0] > 0 || found[(9, 15)][0] > 0, "{algorithm:?}");
+            let inverted = apply(&square(), &edge_detect(algorithm, [true, true], true, true));
+            assert_eq!(inverted[(3, 3)], Rgba([255, 255, 255, 255]), "{algorithm:?}");
+            assert_eq!(inverted.pixels().map(|pixel| pixel[0]).min(), Some(0), "{algorithm:?} normalized");
+        }
+        let see_through = RgbaImage::from_pixel(10, 10, Rgba([50, 60, 70, 100]));
+        assert_eq!(apply(&see_through, &edges(EdgeAlgorithm::Sobel)), RgbaImage::from_pixel(10, 10, Rgba([0, 0, 0, 100])));
+    }
+
+    #[test]
+    fn a_sobel_measures_only_the_ways_it_is_asked_to() {
+        let across = edge_detect(EdgeAlgorithm::Sobel, [true, false], false, false);
+        let found = apply(&square(), &across);
+        assert_eq!(found[(10, 15)][0], 255, "the left side");
+        assert_eq!(found[(15, 10)][0], 0, "not the top");
+        let neither = edge_detect(EdgeAlgorithm::Sobel, [false, false], false, false);
+        assert!(apply(&square(), &neither).pixels().all(|pixel| pixel[0] == 0));
+    }
+
+    #[test]
+    fn an_emboss_lights_the_sides_facing_the_light() {
+        // Lit from the left: the square is a dip, so its right side faces the light.
+        let embossed = apply(&square(), &Effect::Emboss { azimuth: 180.0, elevation: 45.0, depth: 3.0 });
+        assert_eq!(embossed[(3, 3)], Rgba([128, 128, 128, 255]));
+        assert_eq!(embossed[(15, 15)], Rgba([128, 128, 128, 255]));
+        assert!(embossed[(19, 15)][0] > 128 && embossed[(10, 15)][0] < 128);
+        let relief = apply(&square(), &Effect::Relief { azimuth: 180.0, elevation: 45.0, depth: 3.0 });
+        assert_eq!(relief[(3, 3)], Rgba([255, 255, 255, 255]));
+        assert!(relief[(10, 15)][0] < 255 || relief[(9, 15)][0] < 255);
+    }
+
+    #[test]
+    fn an_outline_draws_lines_as_thick_as_asked_along_edges() {
+        let outlined = apply(&square(), &Effect::Outline { thickness: 3.0, intensity: 50.0 });
+        assert_eq!(outlined[(15, 15)], Rgba([255, 255, 255, 255]), "the middle of the square is flat");
+        assert_eq!(outlined[(3, 3)], Rgba([255, 255, 255, 255]));
+        assert_eq!(outlined[(12, 15)], Rgba([0, 0, 0, 255]), "within the thickness of the edge");
+        assert_eq!(outlined[(13, 15)], Rgba([255, 255, 255, 255]), "past it");
     }
 }

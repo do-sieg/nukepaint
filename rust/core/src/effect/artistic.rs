@@ -570,24 +570,39 @@ fn weave(source: &Buffer, width: f32, spacing: f32, darkness: f32, depth: f32, t
 /// times as much, lit from `azimuth` degrees anticlockwise from the right and
 /// `elevation` degrees up: lighter where it faces the light, darker where it faces
 /// away, flat ground as it was.
-fn emboss(source: &Buffer, heights: &[f32], azimuth: f32, elevation: f32, depth: f32, stop: &AtomicBool) -> Option<Buffer> {
-    let (width, height) = (source.width, source.height);
-    let (azimuth, elevation) = (azimuth.to_radians(), elevation.clamp(0.0, 90.0).to_radians());
-    let light = [azimuth.cos() * elevation.cos(), -azimuth.sin() * elevation.cos(), elevation.sin()];
+pub(super) fn emboss(source: &Buffer, heights: &[f32], azimuth: f32, elevation: f32, depth: f32, stop: &AtomicBool) -> Option<Buffer> {
+    let lit = lighting(heights, source.width, source.height, azimuth, elevation, depth);
     each_pixel(source, stop, |x, y| {
-        let at = |x: isize, y: isize| heights[clamped(x, y, width, height)];
-        let (x, y) = (x as isize, y as isize);
-        let dx = (at(x + 1, y) - at(x - 1, y)) * depth / 2.0;
-        let dy = (at(x, y + 1) - at(x, y - 1)) * depth / 2.0;
-        let lit = (light[2] - dx * light[0] - dy * light[1]) / (dx * dx + dy * dy + 1.0).sqrt() - light[2];
-        let [r, g, b, alpha] = source.pixels[y as usize * width + x as usize];
+        let lit = lit(x, y);
+        let [r, g, b, alpha] = source.pixels[y * source.width + x];
         let shaded = |channel: f32| (channel + lit * alpha).clamp(0.0, alpha);
         [shaded(r), shaded(g), shaded(b), alpha]
     })
 }
 
+/// How much lighter, or darker below zero, the pixel at `x` and `y` is lit than flat
+/// ground, as [`emboss`] lights it, of an image `width` wide and `height` high.
+pub(super) fn lighting(
+    heights: &[f32],
+    width: usize,
+    height: usize,
+    azimuth: f32,
+    elevation: f32,
+    depth: f32,
+) -> impl Fn(usize, usize) -> f32 + Sync + '_ {
+    let (azimuth, elevation) = (azimuth.to_radians(), elevation.clamp(0.0, 90.0).to_radians());
+    let light = [azimuth.cos() * elevation.cos(), -azimuth.sin() * elevation.cos(), elevation.sin()];
+    move |x, y| {
+        let at = |x: isize, y: isize| heights[clamped(x, y, width, height)];
+        let (x, y) = (x as isize, y as isize);
+        let dx = (at(x + 1, y) - at(x - 1, y)) * depth / 2.0;
+        let dy = (at(x, y + 1) - at(x, y - 1)) * depth / 2.0;
+        (light[2] - dx * light[0] - dy * light[1]) / (dx * dx + dy * dy + 1.0).sqrt() - light[2]
+    }
+}
+
 /// Works out each pixel from where it is, across and down.
-fn each_pixel(source: &Buffer, stop: &AtomicBool, color: impl Fn(usize, usize) -> [f32; 4] + Sync) -> Option<Buffer> {
+pub(super) fn each_pixel(source: &Buffer, stop: &AtomicBool, color: impl Fn(usize, usize) -> [f32; 4] + Sync) -> Option<Buffer> {
     let mut pixels = vec![[0.0; 4]; source.pixels.len()];
     let done = fill_rows(&mut pixels, source.width, stop, |y, row| {
         for (x, out) in row.iter_mut().enumerate() {
@@ -625,12 +640,12 @@ fn slope(at: impl Fn(isize, isize) -> f32, x: isize, y: isize) -> [f32; 2] {
 }
 
 /// The index of the pixel at `x` and `y`, or the one at the edge nearest past it.
-fn clamped(x: isize, y: isize, width: usize, height: usize) -> usize {
+pub(super) fn clamped(x: isize, y: isize, width: usize, height: usize) -> usize {
     y.clamp(0, height as isize - 1) as usize * width + x.clamp(0, width as isize - 1) as usize
 }
 
 /// How light each pixel's colour looks, from 0 to 1, however opaque it is.
-fn lightness(source: &Buffer) -> Vec<f32> {
+pub(super) fn lightness(source: &Buffer) -> Vec<f32> {
     source.pixels.iter().map(|&color| luma(straight(color))).collect()
 }
 
@@ -639,7 +654,7 @@ fn luma([r, g, b, _]: [f32; 4]) -> f32 {
 }
 
 /// The colour divided by how opaque it is again, or none for one that is see-through.
-fn straight([r, g, b, a]: [f32; 4]) -> [f32; 4] {
+pub(super) fn straight([r, g, b, a]: [f32; 4]) -> [f32; 4] {
     if a >= MIN_ALPHA { [r / a, g / a, b / a, a] } else { [0.0; 4] }
 }
 
