@@ -28,7 +28,10 @@ pub use affine::{Affine, Projective};
 pub use blend::{blend_layer, composite, composite_area};
 pub use document::Document;
 pub(crate) use effect::GRAIN_MIDDLE;
-pub use effect::{Effect, FocusShape, NewsprintScreen, OffsetEdges, WaveShape, WindDirection, apply_effect, wavelet_decompose};
+pub use effect::{
+    CellStyle, Effect, FocusShape, FractalKind, NewsprintScreen, Noise, NoiseKind, OffsetEdges, WaveShape, WindDirection, apply_effect,
+    wavelet_decompose,
+};
 pub use files::{OPEN_EXTENSIONS, OpenError, SAVE_EXTENSIONS, is_savable, keeps_layers, load_image, render_svg, render_svg_to_width, save_image};
 pub use floating::FloatingPixels;
 pub use flood_fill::FloodFill;

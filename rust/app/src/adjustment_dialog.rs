@@ -1,6 +1,6 @@
 //! Asks for the settings of an adjustment or an effect: each a number on a slider, a
-//! box to check, a choice from a list or one of the image's layers, as its kind lists
-//! them, or the curves of Curves. The image shows
+//! box to check, a choice from a list, one of the image's layers or a colour, as its
+//! kind lists them, or the curves of Curves. The image shows
 //! each change as it is made; Cancel, or Escape, puts the layer back as it was.
 
 use std::{
@@ -13,7 +13,7 @@ use std::{
 };
 
 use eframe::egui::{self, Color32, Key};
-use power_paint_core::{Curves, Effect, OffsetEdges, RgbaImage, SelectionMask, apply_effect};
+use power_paint_core::{Curves, Effect, OffsetEdges, Rgba, RgbaImage, SelectionMask, apply_effect};
 
 use crate::{adjustments::AdjustmentKind, curve_editor::CurveEditor, dialog, effects::EffectKind, slider_field::SliderField};
 
@@ -23,9 +23,15 @@ const CHANNEL_NAMES: [&str; 3] = ["Red", "Green", "Blue"];
 const CHANNEL_COLORS: [Color32; 3] =
     [Color32::from_rgb(255, 77, 77), Color32::from_rgb(77, 255, 77), Color32::from_rgb(102, 128, 255)];
 
+/// What a colour setting starts as: the primary colour or the secondary one, as the
+/// dialog opens, rather than one of its own.
+pub const PRIMARY: f64 = -1.0;
+pub const SECONDARY: f64 = -2.0;
+
 /// A number a dialog asks for, as `input` says, on a slider from `min` to `max`,
-/// going up and down by `step`, with `suffix` shown after it, which can be changed
-/// only while the box to check at `enabled_by`, if any, is checked.
+/// going up and down by `step`, logarithmic or not, with `suffix` shown after it,
+/// which can be changed only while the setting at `enabled_by`, if any, is
+/// `enabled_value`, or for none, is a checked box.
 pub struct Setting {
     pub label: &'static str,
     pub min: f64,
@@ -35,12 +41,28 @@ pub struct Setting {
     pub suffix: &'static str,
     pub input: Input,
     pub enabled_by: Option<usize>,
+    pub enabled_value: Option<f64>,
+    pub logarithmic: bool,
 }
 
 impl Setting {
+    const fn new(label: &'static str, min: f64, max: f64, default: f64, input: Input) -> Self {
+        Self { label, min, max, step: 1.0, default, suffix: "", input, enabled_by: None, enabled_value: None, logarithmic: false }
+    }
+
     /// The same, which can be changed only while the box to check at `index` is checked.
     pub const fn enabled_by(self, index: usize) -> Self {
         Self { enabled_by: Some(index), ..self }
+    }
+
+    /// The same, which can be changed only while the setting at `index` is `value`.
+    pub const fn enabled_when(self, index: usize, value: f64) -> Self {
+        Self { enabled_by: Some(index), enabled_value: Some(value), ..self }
+    }
+
+    /// The same on a logarithmic slider.
+    pub const fn logarithmic(self) -> Self {
+        Self { logarithmic: true, ..self }
     }
 }
 
@@ -55,24 +77,45 @@ pub enum Input {
     /// One of the image's layers, by its index, bottom first. Below zero, it is the one
     /// above the layer being changed, or that one if it is the top one.
     Layer,
+    /// A colour, as [`pack_color`] makes it a number, or [`PRIMARY`] or [`SECONDARY`].
+    Color,
 }
 
 pub const fn slider(label: &'static str, min: f64, max: f64, step: f64, default: f64, suffix: &'static str) -> Setting {
-    Setting { label, min, max, step, default, suffix, input: Input::Slider, enabled_by: None }
+    Setting { step, suffix, ..Setting::new(label, min, max, default, Input::Slider) }
 }
 
 pub const fn check(label: &'static str, default: bool) -> Setting {
-    let default = if default { 1.0 } else { 0.0 };
-    Setting { label, min: 0.0, max: 1.0, step: 1.0, default, suffix: "", input: Input::Check, enabled_by: None }
+    Setting::new(label, 0.0, 1.0, if default { 1.0 } else { 0.0 }, Input::Check)
 }
 
 pub const fn choice(label: &'static str, choices: &'static [&'static str], default: usize) -> Setting {
-    let max = choices.len() as f64 - 1.0;
-    Setting { label, min: 0.0, max, step: 1.0, default: default as f64, suffix: "", input: Input::Choice(choices), enabled_by: None }
+    Setting::new(label, 0.0, choices.len() as f64 - 1.0, default as f64, Input::Choice(choices))
 }
 
 pub const fn layer(label: &'static str) -> Setting {
-    Setting { label, min: 0.0, max: 0.0, step: 1.0, default: -1.0, suffix: "", input: Input::Layer, enabled_by: None }
+    Setting::new(label, 0.0, 0.0, -1.0, Input::Layer)
+}
+
+/// A colour, starting as `default`: [`PRIMARY`], [`SECONDARY`] or one [`pack_color`]
+/// makes.
+pub const fn color(label: &'static str, default: f64) -> Setting {
+    Setting::new(label, 0.0, 0.0, default, Input::Color)
+}
+
+/// A straight RGBA colour as a number, which holds it exactly.
+pub const fn pack_color(color: [u8; 4]) -> f64 {
+    u32::from_be_bytes(color) as f64
+}
+
+/// The colour a colour setting holds, or black for the primary colour and white for the
+/// secondary one, which the dialog sets it to as it opens.
+pub fn unpack_color(value: f64) -> [u8; 4] {
+    match value {
+        PRIMARY => [0, 0, 0, 255],
+        SECONDARY => [255, 255, 255, 255],
+        _ => (value as u32).to_be_bytes(),
+    }
 }
 
 /// What a dialog asks the settings of: an adjustment of the Colors menu or an effect
@@ -165,13 +208,16 @@ pub struct Dialog {
     offset_area: (u32, u32),
     /// The names of the image's layers, bottom first, to pick one from.
     layer_names: Vec<String>,
+    /// The primary and secondary colours, which colour settings start as.
+    palette: [Rgba<u8>; 2],
 }
 
 impl Dialog {
     /// The dialog for `kind` on a layer of an image `size` pixels across and down, with
     /// layers named as `layer_names` says, bottom first, starting from `values`, or for
     /// the Offset, from half of what it moves the pixels within: the rectangle around
-    /// those `mask` holds, if there is one, or the image.
+    /// those `mask` holds, if there is one, or the image. The colours start as `palette`,
+    /// the primary and secondary colours, says, unless they have been set.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         image: usize,
@@ -182,6 +228,7 @@ impl Dialog {
         mask: Option<SelectionMask>,
         size: (u32, u32),
         layer_names: Vec<String>,
+        palette: [Rgba<u8>; 2],
     ) -> Self {
         let offset_area = mask.as_ref().and_then(SelectionMask::bounds).map_or(size, |area| {
             (area.width() as u32, area.height() as u32)
@@ -200,12 +247,24 @@ impl Dialog {
             job: None,
             offset_area,
             layer_names,
+            palette,
         };
         if dialog.is_offset() {
             dialog.offset_by_half();
         }
         dialog.pick_layers();
+        dialog.pick_colors();
         dialog
+    }
+
+    /// Sets each colour setting that starts as the primary or the secondary colour to it.
+    fn pick_colors(&mut self) {
+        for (setting, value) in self.kind.settings().iter().zip(&mut self.values) {
+            if setting.input == Input::Color && *value < 0.0 {
+                let [primary, secondary] = self.palette;
+                *value = pack_color(if *value == PRIMARY { primary.0 } else { secondary.0 });
+            }
+        }
     }
 
     /// Picks the layer above the one being changed, or that one if it is the top one,
@@ -270,8 +329,15 @@ impl Dialog {
     fn settings_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut edited = false;
         let settings = self.kind.settings();
-        let enabled: Vec<bool> =
-            settings.iter().map(|setting| setting.enabled_by.is_none_or(|index| self.values[index] != 0.0)).collect();
+        let enabled: Vec<bool> = settings
+            .iter()
+            .map(|setting| {
+                setting.enabled_by.is_none_or(|index| match setting.enabled_value {
+                    Some(value) => self.values[index] == value,
+                    None => self.values[index] != 0.0,
+                })
+            })
+            .collect();
         egui::Grid::new("adjustment_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
             for ((setting, value), enabled) in settings.iter().zip(&mut self.values).zip(enabled) {
                 // A box to check shows its label beside it instead.
@@ -299,8 +365,20 @@ impl Dialog {
                         ui.end_row();
                         continue;
                     }
+                    Input::Color => {
+                        let mut color = unpack_color(*value);
+                        if ui.add_enabled_ui(enabled, |ui| ui.color_edit_button_srgba_unmultiplied(&mut color)).inner.changed() {
+                            *value = pack_color(color);
+                            edited = true;
+                        }
+                        ui.end_row();
+                        continue;
+                    }
                 }
-                let field = SliderField::new(value, setting.min..=setting.max).step(setting.step).suffix(setting.suffix);
+                let mut field = SliderField::new(value, setting.min..=setting.max).step(setting.step).suffix(setting.suffix);
+                if setting.logarithmic {
+                    field = field.logarithmic();
+                }
                 edited |= ui.add_enabled(enabled, field.slider_width(SLIDER_WIDTH)).changed();
                 ui.end_row();
             }
@@ -384,6 +462,7 @@ impl Dialog {
             self.offset_by_half();
         }
         self.pick_layers();
+        self.pick_colors();
     }
 }
 

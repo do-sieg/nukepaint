@@ -1469,7 +1469,8 @@ impl App {
         let curves = self.last_adjustments.curves.clone();
         let (layer, size) = (document.active_layer, document.size());
         let names = document.layers.iter().map(|layer| layer.name.clone()).collect();
-        let dialog = adjustment_dialog::Dialog::new(current, layer, kind, values, curves, mask, size, names);
+        let palette = [self.tools.colors.primary, self.tools.colors.secondary];
+        let dialog = adjustment_dialog::Dialog::new(current, layer, kind, values, curves, mask, size, names, palette);
         self.adjustment_dialog = Some(dialog);
         self.preview_adjustment();
     }

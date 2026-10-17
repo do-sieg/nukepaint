@@ -9,6 +9,7 @@
 mod artistic;
 mod distort;
 mod enhance;
+mod render;
 
 use std::{
     f32::consts::TAU,
@@ -24,9 +25,10 @@ use image::{Rgba, RgbaImage};
 
 pub use distort::{NewsprintScreen, WaveShape, WindDirection};
 pub use enhance::wavelet_decompose;
+pub use render::{CellStyle, FractalKind, Noise, NoiseKind};
 pub(crate) use enhance::GRAIN_MIDDLE;
 
-use crate::{Interpolation, PixelRect, SelectionMask, Turn, turn_pixels};
+use crate::{BlendMode, Interpolation, PixelRect, SelectionMask, Turn, turn_pixels};
 
 /// Fewest pixels worth sharing between threads.
 const PARALLEL_PIXELS: usize = 1 << 14;
@@ -206,6 +208,44 @@ pub enum Effect {
     /// by more than `threshold` percent, the way of `direction`, fading out, or as long
     /// as half that without fading if a blast.
     Wind { strength: f32, threshold: f32, direction: WindDirection, blast: bool },
+    /// Draws the noise, from the first of `colors` where there is none to the second
+    /// where it is full, blended over the image in `blend_mode`: the Difference one
+    /// gives Difference Clouds. The Plasma draws red, green and blue each a noise of
+    /// their own instead with `plasma_colors`.
+    CloudsAndNoise { noise: Noise, colors: [[u8; 4]; 2], blend_mode: BlendMode, plasma_colors: bool },
+    /// Draws the Mandelbrot set or a Julia set, that of `julia`, as many `iterations`
+    /// deep, `zoom` percent large, around `center` away from the middle of the set: the
+    /// set in the first of `colors`, and around it, going round the rainbow, or from the
+    /// second colour far from it towards the first nearer it. With `antialias`, each
+    /// pixel averages four points.
+    Fractal {
+        kind: FractalKind,
+        iterations: u32,
+        zoom: f64,
+        center: [f64; 2],
+        julia: [f64; 2],
+        rainbow: bool,
+        colors: [[u8; 4]; 2],
+        antialias: bool,
+    },
+    /// Fills the image with a Bayer matrix as wide as `1 << level` squares, each
+    /// `pixel_size` wide, as ordered dithering uses, the first square in the first of
+    /// `colors` and the last in the second.
+    BayerMatrix { level: u32, pixel_size: u32, colors: [[u8; 4]; 2] },
+    /// Fills the image with squares `size` wide, of either colour in turn, the first
+    /// at the top left.
+    Checkerboard { size: u32, colors: [[u8; 4]; 2] },
+    /// Draws lines `line` wide, `width` apart down the image and `height` apart across
+    /// it, moved by `offset`.
+    Grid { width: u32, height: u32, line: u32, offset: [i32; 2], color: [u8; 4] },
+    /// Fills the image with a maze, its corridors `size` wide in the second of
+    /// `colors` and its walls in the first, branching often, or winding.
+    Maze { size: u32, seed: u32, branching: bool, colors: [[u8; 4]; 2] },
+    /// Draws `count` lines radiating from the centre, narrowing to a point, as comics
+    /// show speed or focus with: each `thickness` percent of the room between two at the
+    /// furthest corner, starting `clear` percent of the way there. The more random, the
+    /// more their places, widths and starts change.
+    SpeedLines { count: u32, thickness: f32, clear: f32, randomness: f32, center: [f32; 2], seed: u32, color: [u8; 4] },
 }
 
 /// How the Focus Blur measures how far a pixel is from the centre, which gives the
@@ -271,6 +311,16 @@ pub fn apply_effect(pixels: &RgbaImage, effect: &Effect, mask: Option<&Selection
         Effect::Turn { turn, interpolation } => return Some(turn_pixels(pixels, mask, &turn, interpolation)),
         Effect::TileableBlur { radius } if radius < 1.0 => return Some(pixels.clone()),
         Effect::TileableBlur { radius } => tileable(pixels, radius, mask, stop)?,
+        Effect::CloudsAndNoise { .. }
+        | Effect::Fractal { .. }
+        | Effect::BayerMatrix { .. }
+        | Effect::Checkerboard { .. }
+        | Effect::Grid { .. }
+        | Effect::Maze { .. }
+        | Effect::SpeedLines { .. } => {
+            let whole = PixelRect { left: 0, top: 0, right: pixels.width() as i32, bottom: pixels.height() as i32 };
+            render::render(pixels, effect, mask.and_then(SelectionMask::bounds).unwrap_or(whole), stop)?
+        }
         _ => match render(&Buffer::premultiplied(pixels), effect, stop)? {
             Some(buffer) => buffer.to_image(),
             None => return Some(pixels.clone()),
@@ -385,7 +435,14 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         Effect::GaussianBlur { radius } => blur(source, Weighing::Gaussian, radius, 1.0, stop),
         Effect::MeanCurvatureBlur { iterations: 0 } => return Some(None),
         Effect::MeanCurvatureBlur { iterations } => mean_curvature(source, iterations, stop),
-        Effect::MedianBlur { .. } => unreachable!("worked out on the bytes"),
+        Effect::MedianBlur { .. }
+        | Effect::CloudsAndNoise { .. }
+        | Effect::Fractal { .. }
+        | Effect::BayerMatrix { .. }
+        | Effect::Checkerboard { .. }
+        | Effect::Grid { .. }
+        | Effect::Maze { .. }
+        | Effect::SpeedLines { .. } => unreachable!("worked out on the bytes"),
         Effect::MotionBlur { angle, distance, centered } => {
             let angle = angle.to_radians();
             let direction = [angle.cos(), -angle.sin()];
@@ -1109,6 +1166,37 @@ mod tests {
         ]
     }
 
+    /// One of each effect of the Render menu.
+    fn rendering() -> Vec<Effect> {
+        let colors = [[0, 0, 0, 255], [255, 255, 255, 255]];
+        let mut effects: Vec<Effect> = NoiseKind::ALL
+            .into_iter()
+            .map(|kind| Effect::CloudsAndNoise { noise: noise(kind), colors, blend_mode: BlendMode::Difference, plasma_colors: true })
+            .collect();
+        effects.extend([
+            Effect::Fractal {
+                kind: FractalKind::Julia,
+                iterations: 50,
+                zoom: 100.0,
+                center: [0.0, 0.0],
+                julia: [-0.8, 0.156],
+                rainbow: true,
+                colors,
+                antialias: true,
+            },
+            Effect::BayerMatrix { level: 3, pixel_size: 2, colors },
+            Effect::Checkerboard { size: 8, colors },
+            Effect::Grid { width: 10, height: 12, line: 2, offset: [3, 0], color: [255, 0, 0, 255] },
+            Effect::Maze { size: 3, seed: 1, branching: false, colors },
+            Effect::SpeedLines { count: 60, thickness: 40.0, clear: 30.0, randomness: 50.0, center: [0.0, 0.0], seed: 1, color: colors[0] },
+        ]);
+        effects
+    }
+
+    fn noise(kind: NoiseKind) -> Noise {
+        Noise { kind, scale: 40.0, detail: 4, roughness: 50.0, seed: 3, cells: CellStyle::Edges, jitter: 100.0 }
+    }
+
     fn white_map(width: u32, height: u32) -> Arc<RgbaImage> {
         Arc::new(RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255])))
     }
@@ -1225,7 +1313,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering()].concat() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -1235,7 +1323,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering()].concat() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -1596,5 +1684,140 @@ mod tests {
         let printed = apply(&grey, &Effect::Newsprint { size: 8.0, angle: 0.0, screen: NewsprintScreen::Black });
         let ink: f32 = printed.pixels().map(|pixel| 1.0 - pixel[0] as f32 / 255.0).sum::<f32>() / (64.0 * 64.0);
         assert!((ink - 0.5).abs() < 0.08, "{ink}");
+    }
+
+    #[test]
+    fn noise_stays_between_its_colours_and_changes_with_its_seed() {
+        let pixels = RgbaImage::from_pixel(64, 64, Rgba([10, 20, 30, 255]));
+        let colors = [[40, 40, 40, 255], [200, 200, 200, 255]];
+        for kind in NoiseKind::ALL {
+            let effect = |seed| Effect::CloudsAndNoise {
+                noise: Noise { seed, ..noise(kind) },
+                colors,
+                blend_mode: BlendMode::Normal,
+                plasma_colors: false,
+            };
+            let drawn = apply(&pixels, &effect(3));
+            assert!(drawn.pixels().all(|pixel| (40..=200).contains(&pixel[0]) && pixel[3] == 255), "{kind:?}");
+            let shades: std::collections::HashSet<u8> = drawn.pixels().map(|pixel| pixel[0]).collect();
+            assert!(shades.len() > 4, "{kind:?} has some features");
+            assert_eq!(drawn, apply(&pixels, &effect(3)), "{kind:?}");
+            assert_ne!(drawn, apply(&pixels, &effect(4)), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn difference_clouds_take_the_clouds_from_the_image() {
+        let white = RgbaImage::from_pixel(32, 32, Rgba([255, 255, 255, 255]));
+        let colors = [[0, 0, 0, 255], [255, 255, 255, 255]];
+        let clouds = |blend_mode| Effect::CloudsAndNoise { noise: noise(NoiseKind::Clouds), colors, blend_mode, plasma_colors: false };
+        let plain = apply(&white, &clouds(BlendMode::Normal));
+        let difference = apply(&white, &clouds(BlendMode::Difference));
+        for (plain, difference) in plain.pixels().zip(difference.pixels()) {
+            assert_eq!(plain[0], 255 - difference[0]);
+        }
+    }
+
+    #[test]
+    fn a_checkerboard_alternates_its_squares() {
+        let board = apply(&RgbaImage::new(8, 8), &Effect::Checkerboard { size: 2, colors: [[255, 0, 0, 255], [0, 0, 255, 255]] });
+        assert_eq!(board[(0, 0)], Rgba([255, 0, 0, 255]));
+        assert_eq!(board[(1, 1)], Rgba([255, 0, 0, 255]));
+        assert_eq!(board[(2, 0)], Rgba([0, 0, 255, 255]));
+        assert_eq!(board[(2, 2)], Rgba([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn a_grid_leaves_its_cells_as_they_are() {
+        let pixels = RgbaImage::from_pixel(20, 20, Rgba([0, 255, 0, 255]));
+        let grid = apply(&pixels, &Effect::Grid { width: 10, height: 5, line: 1, offset: [2, 0], color: [255, 0, 0, 255] });
+        assert_eq!(grid[(2, 3)], Rgba([255, 0, 0, 255]));
+        assert_eq!(grid[(12, 3)], Rgba([255, 0, 0, 255]));
+        assert_eq!(grid[(4, 5)], Rgba([255, 0, 0, 255]));
+        assert_eq!(grid[(4, 3)], pixels[(4, 3)]);
+    }
+
+    #[test]
+    fn a_bayer_matrix_spreads_its_shades_out() {
+        let colors = [[0, 0, 0, 255], [255, 255, 255, 255]];
+        let matrix = apply(&RgbaImage::new(4, 4), &Effect::BayerMatrix { level: 1, pixel_size: 1, colors });
+        let shades: Vec<u8> = [(0, 0), (1, 0), (0, 1), (1, 1), (2, 2)].iter().map(|&at| matrix[at][0]).collect();
+        assert_eq!(shades, [0, 170, 255, 85, 0]);
+    }
+
+    #[test]
+    fn a_maze_joins_every_corridor() {
+        let colors = [[0, 0, 0, 255], [255, 255, 255, 255]];
+        for branching in [false, true] {
+            let maze = apply(&RgbaImage::new(41, 31), &Effect::Maze { size: 1, seed: 5, branching, colors });
+            let open = |x: u32, y: u32| maze[(x, y)][0] == 255;
+            assert!(open(0, 1) && open(40, 29), "a way in and out");
+            assert!(!open(0, 0) && !open(2, 2), "walls");
+            // Everything open can be reached from the way in.
+            let mut reached = vec![false; 41 * 31];
+            let mut next = vec![(0u32, 1u32)];
+            reached[41] = true;
+            while let Some((x, y)) = next.pop() {
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let (x, y) = (x as i32 + dx, y as i32 + dy);
+                    if (0..41).contains(&x) && (0..31).contains(&y) && open(x as u32, y as u32) && !reached[(y * 41 + x) as usize] {
+                        reached[(y * 41 + x) as usize] = true;
+                        next.push((x as u32, y as u32));
+                    }
+                }
+            }
+            assert!(maze.enumerate_pixels().all(|(x, y, pixel)| pixel[0] == 0 || reached[(y * 41 + x) as usize]), "{branching}");
+            // A tree: as many corridors between the cells as cells less one, and the two ways out.
+            let count = maze.pixels().filter(|pixel| pixel[0] == 255).count();
+            assert_eq!(count, 20 * 15 * 2 - 1 + 2, "{branching}");
+        }
+    }
+
+    #[test]
+    fn speed_lines_keep_their_middle_clear() {
+        let pixels = RgbaImage::from_pixel(100, 100, Rgba([255, 255, 255, 255]));
+        let effect =
+            Effect::SpeedLines { count: 40, thickness: 50.0, clear: 40.0, randomness: 0.0, center: [0.0, 0.0], seed: 1, color: [0, 0, 0, 255] };
+        let lines = apply(&pixels, &effect);
+        assert!((40..60).all(|x| lines[(x, 50)] == pixels[(x, 50)]));
+        assert!((0..100).any(|y| lines[(1, y)][0] < 128), "lines reach the edges");
+        assert!((0..100).any(|y| lines[(1, y)][0] == 255), "with room between them");
+    }
+
+    #[test]
+    fn speed_lines_radiate_from_the_middle_of_the_selection() {
+        let pixels = RgbaImage::from_pixel(200, 100, Rgba([255, 255, 255, 255]));
+        let selection = Selection::rect(PixelRect { left: 120, top: 10, right: 200, bottom: 90 });
+        let mask = SelectionMask::of(&selection, 200, 100).unwrap();
+        let effect =
+            Effect::SpeedLines { count: 40, thickness: 50.0, clear: 40.0, randomness: 0.0, center: [0.0, 0.0], seed: 1, color: [0, 0, 0, 255] };
+        let lines = apply_effect(&pixels, &effect, Some(&mask), &AtomicBool::new(false)).unwrap();
+        assert!((150..170).all(|x| lines[(x, 50)] == pixels[(x, 50)]), "clear around the selection's middle");
+        let inked = |points: Vec<(u32, u32)>| points.into_iter().any(|(x, y)| lines[(x, y)][0] < 128);
+        assert!(inked((10..90).map(|y| (120, y)).collect()), "on the left side");
+        assert!(inked((10..90).map(|y| (199, y)).collect()), "on the right side");
+        assert!(inked((120..200).map(|x| (x, 10)).collect()), "on the top side");
+        assert!(inked((120..200).map(|x| (x, 89)).collect()), "on the bottom side");
+    }
+
+    #[test]
+    fn the_mandelbrot_set_is_drawn_in_the_first_colour() {
+        let colors = [[10, 20, 30, 255], [250, 250, 250, 255]];
+        let fractal = |rainbow| Effect::Fractal {
+            kind: FractalKind::Mandelbrot,
+            iterations: 100,
+            zoom: 100.0,
+            center: [0.0, 0.0],
+            julia: [0.0, 0.0],
+            rainbow,
+            colors,
+            antialias: false,
+        };
+        for rainbow in [false, true] {
+            let drawn = apply(&RgbaImage::new(60, 60), &fractal(rainbow));
+            // The middle of the view is at -0.75, inside the set; the corners are far out.
+            assert_eq!(drawn[(30, 30)].0, colors[0]);
+            assert_ne!(drawn[(0, 0)].0, colors[0]);
+        }
     }
 }

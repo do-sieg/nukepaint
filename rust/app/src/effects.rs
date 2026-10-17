@@ -2,9 +2,12 @@
 
 use std::sync::Arc;
 
-use power_paint_core::{Effect, FocusShape, Interpolation, Layer, NewsprintScreen, OffsetEdges, Turn, WaveShape, WindDirection};
+use power_paint_core::{
+    BlendMode, CellStyle, Effect, FocusShape, FractalKind, Interpolation, Layer, NewsprintScreen, Noise, NoiseKind, OffsetEdges, Turn,
+    WaveShape, WindDirection,
+};
 
-use crate::adjustment_dialog::{Setting, check, choice, layer, slider};
+use crate::adjustment_dialog::{PRIMARY, SECONDARY, Setting, check, choice, color, layer, slider, unpack_color};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EffectKind {
@@ -56,6 +59,13 @@ pub enum EffectKind {
     ReduceNoise,
     WaveletDecompose,
     Sharpen,
+    CloudsAndNoise,
+    FractalExplorer,
+    BayerMatrix,
+    Checkerboard,
+    Grid,
+    Maze,
+    SpeedLines,
     Offset,
     RotateZoom,
     Transform3d,
@@ -273,11 +283,98 @@ const SHARPEN: [Setting; 3] = [
     slider("Amount:", 0.0, 300.0, 1.0, 50.0, " %"),
     slider("Threshold:", 0.0, 100.0, 1.0, 0.0, " %"),
 ];
+/// The names of [`NoiseKind::ALL`].
+const NOISE_KINDS: [&str; 6] = ["Clouds", "Perlin", "Simplex", "Turbulence", "Cell Noise", "Plasma"];
+/// The names of [`CellStyle::ALL`].
+const CELL_STYLES: [&str; 3] = ["Distance", "Edges", "Flat"];
+/// The names of [`BlendMode::ALL`].
+const BLEND_MODES: [&str; 15] = [
+    "Normal",
+    "Multiply",
+    "Additive",
+    "Color Burn",
+    "Color Dodge",
+    "Reflect",
+    "Glow",
+    "Overlay",
+    "Difference",
+    "Negation",
+    "Lighten",
+    "Darken",
+    "Screen",
+    "Xor",
+    "Grain Merge",
+];
+const SEED: Setting = slider("Seed:", 0.0, 9999.0, 1.0, 0.0, "");
+const CLOUDS: [Setting; 11] = [
+    choice("Type:", &NOISE_KINDS, 0),
+    slider("Scale:", 2.0, 1000.0, 1.0, 250.0, " px").logarithmic(),
+    slider("Detail:", 1.0, 10.0, 1.0, 6.0, ""),
+    slider("Roughness:", 0.0, 100.0, 1.0, 50.0, " %"),
+    SEED,
+    color("Color 1:", PRIMARY),
+    color("Color 2:", SECONDARY),
+    choice("Blend Mode:", &BLEND_MODES, 0),
+    check("Plasma Colors", true).enabled_when(0, 5.0),
+    choice("Cells:", &CELL_STYLES, 0).enabled_when(0, 4.0),
+    slider("Jitter:", 0.0, 100.0, 1.0, 100.0, " %").enabled_when(0, 4.0),
+];
+const FRACTAL_KINDS: [&str; 2] = ["Mandelbrot", "Julia"];
+const FRACTAL_COLORINGS: [&str; 2] = ["Gradient", "Rainbow"];
+const FRACTAL: [Setting; 11] = [
+    choice("Type:", &FRACTAL_KINDS, 0),
+    slider("Iterations:", 10.0, 5000.0, 1.0, 200.0, "").logarithmic(),
+    slider("Zoom:", 10.0, 10_000_000.0, 1.0, 100.0, " %").logarithmic(),
+    slider("Center X:", -2.0, 2.0, 0.0001, 0.0, ""),
+    slider("Center Y:", -2.0, 2.0, 0.0001, 0.0, ""),
+    slider("Julia Real:", -2.0, 2.0, 0.001, -0.8, "").enabled_when(0, 1.0),
+    slider("Julia Imaginary:", -2.0, 2.0, 0.001, 0.156, "").enabled_when(0, 1.0),
+    choice("Coloring:", &FRACTAL_COLORINGS, 0),
+    color("Set Color:", PRIMARY),
+    color("Outside Color:", SECONDARY).enabled_when(7, 0.0),
+    check("Antialias", true),
+];
+/// The widths of the Bayer matrices, as powers of 2 from 1.
+const BAYER_SIZES: [&str; 8] = ["2 × 2", "4 × 4", "8 × 8", "16 × 16", "32 × 32", "64 × 64", "128 × 128", "256 × 256"];
+const BAYER: [Setting; 4] = [
+    choice("Matrix:", &BAYER_SIZES, 2),
+    slider("Pixel Size:", 1.0, 64.0, 1.0, 1.0, " px"),
+    color("Color 1:", PRIMARY),
+    color("Color 2:", SECONDARY),
+];
+const CHECKERBOARD: [Setting; 3] =
+    [slider("Size:", 1.0, 500.0, 1.0, 16.0, " px"), color("Color 1:", PRIMARY), color("Color 2:", SECONDARY)];
+const GRID: [Setting; 6] = [
+    slider("Cell Width:", 2.0, 500.0, 1.0, 32.0, " px"),
+    slider("Cell Height:", 2.0, 500.0, 1.0, 32.0, " px"),
+    slider("Line Width:", 1.0, 50.0, 1.0, 1.0, " px"),
+    slider("Offset X:", 0.0, 500.0, 1.0, 0.0, " px"),
+    slider("Offset Y:", 0.0, 500.0, 1.0, 0.0, " px"),
+    color("Color:", PRIMARY),
+];
+const MAZE_STYLES: [&str; 2] = ["Winding", "Branching"];
+const MAZE: [Setting; 5] = [
+    slider("Corridor Width:", 1.0, 100.0, 1.0, 8.0, " px"),
+    choice("Style:", &MAZE_STYLES, 0),
+    SEED,
+    color("Wall Color:", PRIMARY),
+    color("Corridor Color:", SECONDARY),
+];
+const SPEED_LINES: [Setting; 8] = [
+    slider("Lines:", 3.0, 1000.0, 1.0, 120.0, "").logarithmic(),
+    slider("Thickness:", 1.0, 100.0, 1.0, 40.0, " %"),
+    slider("Clear Area:", 0.0, 100.0, 1.0, 35.0, " %"),
+    slider("Randomness:", 0.0, 100.0, 1.0, 60.0, " %"),
+    slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+    SEED,
+    color("Color:", PRIMARY),
+];
 
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects, then the niche ones it keeps
     /// in a More menu at its end.
-    pub const MENUS: [(&str, &[Self], &[Self]); 6] = [
+    pub const MENUS: [(&str, &[Self], &[Self]); 7] = [
         (
             "Artistic",
             &[ApplyCanvas, Cartoon, GlassTile, Glow, InkSketch, OilPainting, PencilSketch, Photocopy, VanGogh],
@@ -308,6 +405,7 @@ impl EffectKind {
         ("Enhance", &[Antialias, HighPass, RedEyeRemoval, ReduceNoise], &[Deinterlace, WaveletDecompose]),
         ("Map", &[Offset], &[]),
         ("Photo", &[Sharpen], &[]),
+        ("Render", &[CloudsAndNoise, FractalExplorer, Checkerboard, Grid, Maze, SpeedLines], &[BayerMatrix]),
     ];
 
     /// Its name, which its undo step is called as well.
@@ -361,6 +459,13 @@ impl EffectKind {
             ReduceNoise => "Reduce Noise",
             WaveletDecompose => "Wavelet-decompose",
             Sharpen => "Sharpen",
+            CloudsAndNoise => "Clouds & Noise",
+            FractalExplorer => "Fractal Explorer",
+            BayerMatrix => "Bayer Matrix",
+            Checkerboard => "Checkerboard",
+            Grid => "Grid",
+            Maze => "Maze",
+            SpeedLines => "Speed Lines",
             Offset => "Offset",
             RotateZoom => "Rotate / Zoom",
             Transform3d => "3D Transform",
@@ -418,6 +523,13 @@ impl EffectKind {
             ReduceNoise => &REDUCE_NOISE,
             WaveletDecompose => &WAVELET,
             Sharpen => &SHARPEN,
+            CloudsAndNoise => &CLOUDS,
+            FractalExplorer => &FRACTAL,
+            BayerMatrix => &BAYER,
+            Checkerboard => &CHECKERBOARD,
+            Grid => &GRID,
+            Maze => &MAZE,
+            SpeedLines => &SPEED_LINES,
             Offset => &OFFSET,
             RotateZoom => &ROTATE_ZOOM,
             Transform3d => &TRANSFORM_3D,
@@ -435,6 +547,16 @@ impl EffectKind {
     pub fn effect(self, values: &[f64], layers: &[Layer]) -> Effect {
         let value = |index: usize| values[index] as f32;
         let pick = |index: usize, count: usize| (values[index] as usize).min(count - 1);
+        let colors = |index: usize| [unpack_color(values[index]), unpack_color(values[index + 1])];
+        let noise = |kind, first: usize| Noise {
+            kind,
+            scale: value(first),
+            detail: value(first + 1) as u32,
+            roughness: value(first + 2),
+            seed: value(first + 3) as u32,
+            cells: CellStyle::Distance,
+            jitter: 100.0,
+        };
         match self {
             ApplyCanvas => Effect::ApplyCanvas { azimuth: CANVAS_LIGHTS[pick(0, CANVAS_LIGHTS.len())], depth: value(1) },
             Cartoon => Effect::Cartoon { radius: value(0), black: value(1) },
@@ -522,6 +644,52 @@ impl EffectKind {
             ReduceNoise => Effect::ReduceNoise { radius: value(0), strength: value(1) },
             WaveletDecompose => unreachable!("makes layers"),
             Sharpen => Effect::Sharpen { radius: value(0), amount: value(1), threshold: value(2) },
+            CloudsAndNoise => Effect::CloudsAndNoise {
+                noise: Noise {
+                    cells: CellStyle::ALL[pick(9, CellStyle::ALL.len())],
+                    jitter: value(10),
+                    ..noise(NoiseKind::ALL[pick(0, NoiseKind::ALL.len())], 1)
+                },
+                colors: colors(5),
+                blend_mode: BlendMode::ALL[pick(7, BlendMode::ALL.len())],
+                plasma_colors: values[8] != 0.0,
+            },
+            FractalExplorer => Effect::Fractal {
+                kind: FractalKind::ALL[pick(0, FractalKind::ALL.len())],
+                iterations: value(1) as u32,
+                zoom: values[2],
+                center: [values[3], values[4]],
+                julia: [values[5], values[6]],
+                rainbow: pick(7, FRACTAL_COLORINGS.len()) == 1,
+                colors: colors(8),
+                antialias: values[10] != 0.0,
+            },
+            BayerMatrix => {
+                Effect::BayerMatrix { level: pick(0, BAYER_SIZES.len()) as u32 + 1, pixel_size: value(1) as u32, colors: colors(2) }
+            }
+            Checkerboard => Effect::Checkerboard { size: value(0) as u32, colors: colors(1) },
+            Grid => Effect::Grid {
+                width: value(0) as u32,
+                height: value(1) as u32,
+                line: value(2) as u32,
+                offset: [values[3] as i32, values[4] as i32],
+                color: unpack_color(values[5]),
+            },
+            Maze => Effect::Maze {
+                size: value(0) as u32,
+                seed: value(2) as u32,
+                branching: pick(1, MAZE_STYLES.len()) == 1,
+                colors: colors(3),
+            },
+            SpeedLines => Effect::SpeedLines {
+                count: value(0) as u32,
+                thickness: value(1),
+                clear: value(2),
+                randomness: value(3),
+                center: [value(4), value(5)],
+                seed: value(6) as u32,
+                color: unpack_color(values[7]),
+            },
             Offset => Effect::Offset {
                 x: values[0] as i32,
                 y: values[1] as i32,
