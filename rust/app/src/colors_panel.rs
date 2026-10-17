@@ -1,6 +1,8 @@
 //! The Colors section of the dock: the primary colour, which the tools draw with, and
 //! the secondary one. A click on either swatch picks which one the wheel edits; More
-//! shows sliders and fields to set it to the exact value. A click on the palette sets the primary
+//! shows sliders and fields to set it to the exact value. Along the top or bottom,
+//! the palette goes under the swatches and the sliders and fields are always shown,
+//! a column each with the wheel. A click on the palette sets the primary
 //! colour, a right click the secondary one. The section also says what the right button
 //! does with the tools that draw in a colour.
 
@@ -11,7 +13,7 @@ use eframe::egui::{
 };
 use power_paint_core::Rgba;
 
-use crate::tools::RightClick;
+use crate::{dock::Flow, tools::RightClick};
 
 pub const SWAP_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::X);
 pub const RESET_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::D);
@@ -29,6 +31,9 @@ const PALETTE: [u32; 48] = [
 const PALETTE_COLUMNS: usize = 16;
 const PALETTE_CELL_HEIGHT: f32 = 16.0;
 const PALETTE_GAP: f32 = 1.0;
+
+/// Room around each part of the section, in points.
+const PADDING: f32 = 6.0;
 
 const SWATCHES_SIZE: f32 = 44.0;
 /// How much of the swatches' side each square takes.
@@ -186,29 +191,38 @@ impl Colors {
 
     /// Shows the section, with `right_click`, what the right button does with the tools
     /// that draw in a colour.
-    pub fn show(&mut self, ui: &mut egui::Ui, right_click: &mut RightClick) {
+    pub fn show(&mut self, flow: &mut Flow, right_click: &mut RightClick) {
         self.follow_edited();
-        ui.horizontal(|ui| {
-            self.swatches(ui);
-            ui.vertical(|ui| {
-                let ctx = ui.ctx().clone();
-                let shortcut = |shortcut| ctx.format_shortcut(&shortcut);
-                let swap = format!("Swap the primary and secondary colors ({})", shortcut(SWAP_KEY));
-                if ui.button("Swap").on_hover_text(swap).clicked() {
-                    self.swap();
-                }
-                let reset = format!("Back to black and white ({})", shortcut(RESET_KEY));
-                if ui.button("Reset").on_hover_text(reset).clicked() {
-                    self.reset();
-                }
+        padded(flow, |ui, _| {
+            ui.horizontal(|ui| {
+                self.swatches(ui);
+                ui.vertical(|ui| {
+                    let ctx = ui.ctx().clone();
+                    let shortcut = |shortcut| ctx.format_shortcut(&shortcut);
+                    let swap = format!("Swap the primary and secondary colors ({})", shortcut(SWAP_KEY));
+                    if ui.button("Swap").on_hover_text(swap).clicked() {
+                        self.swap();
+                    }
+                    let reset = format!("Back to black and white ({})", shortcut(RESET_KEY));
+                    if ui.button("Reset").on_hover_text(reset).clicked() {
+                        self.reset();
+                    }
+                });
             });
+            right_click_option(ui, right_click);
         });
-        right_click_option(ui, right_click);
         self.follow_edited();
-        self.wheel(ui);
-        self.palette(ui);
-        self.follow_edited();
-        egui::CollapsingHeader::new("More").id_salt("colors_more").show(ui, |ui| self.fields(ui));
+        if flow.is_along_end() {
+            padded(flow, |ui, _| self.palette(ui));
+            self.follow_edited();
+            padded(flow, |ui, tallest| self.wheel(ui, tallest));
+            padded(flow, |ui, _| self.fields(ui));
+        } else {
+            padded(flow, |ui, tallest| self.wheel(ui, tallest));
+            padded(flow, |ui, _| self.palette(ui));
+            self.follow_edited();
+            padded(flow, |ui, _| egui::CollapsingHeader::new("More").id_salt("colors_more").show(ui, |ui| self.fields(ui)));
+        }
         self.follow_edited();
     }
 
@@ -241,9 +255,13 @@ impl Colors {
     }
 
     /// A ring of hues around a square of the saturations, left to right, and values,
-    /// bottom to top, of the hue chosen.
-    fn wheel(&mut self, ui: &mut egui::Ui) {
-        let size = ui.available_width().min(MAX_WHEEL_SIZE);
+    /// bottom to top, of the hue chosen. No taller than `tallest`.
+    fn wheel(&mut self, ui: &mut egui::Ui, tallest: f32) {
+        let size = ui.available_width().min(tallest).min(MAX_WHEEL_SIZE);
+        // In a column of its own, along an end, no wider than it is.
+        if tallest.is_finite() {
+            ui.set_max_width(size);
+        }
         // Sensing only drags, a drag begins as soon as the button is pressed.
         let (rect, response) =
             ui.vertical_centered(|ui| ui.allocate_exact_size(Vec2::splat(size), Sense::drag())).inner;
@@ -510,6 +528,13 @@ fn slider_row(
         changed
     })
     .inner
+}
+
+/// Adds a part to `flow` with [`PADDING`] around it, and the tallest it should get inside it.
+fn padded<R>(flow: &mut Flow, add: impl FnOnce(&mut egui::Ui, f32) -> R) -> R {
+    flow.part(|ui, tallest| {
+        egui::Frame::NONE.inner_margin(PADDING).show(ui, |ui| add(ui, tallest - PADDING * 2.0)).inner
+    })
 }
 
 /// What the right button does with the tools that draw in a colour.

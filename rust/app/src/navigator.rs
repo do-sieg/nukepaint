@@ -18,6 +18,8 @@ use crate::{
 
 /// Tallest the picture gets, in points: a tall image is narrower than the section.
 const MAX_HEIGHT: f32 = 200.0;
+/// Shortest it gets in a short dock.
+const MIN_PICTURE_HEIGHT: f32 = 32.0;
 const CHECKER_CELL: f32 = 4.0;
 const DIM: Color32 = Color32::from_black_alpha(110);
 /// The frame around the part in view: a light line in a dark one, seen on any image.
@@ -36,10 +38,12 @@ pub enum Action {
     ZoomTo(f32),
 }
 
-/// Shows the picture and the zoom under it.
-pub fn show(ui: &mut egui::Ui, image: &OpenImage, checker: &TextureHandle) -> Option<Action> {
+/// Shows the picture and the zoom under it, no taller than `tallest` together.
+pub fn show(ui: &mut egui::Ui, tallest: f32, image: &OpenImage, checker: &TextureHandle) -> Option<Action> {
     let top = ui.cursor().min;
-    let centered = picture(ui, image, checker).map(Action::CenterOn);
+    let zoom_room = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let tallest = MAX_HEIGHT.min(tallest - zoom_room).max(MIN_PICTURE_HEIGHT);
+    let centered = picture(ui, tallest, image, checker).map(Action::CenterOn);
     let zoomed = zoom_row(ui, image.view.zoom);
     // Rather than scroll the dock.
     let area = Rect::from_min_max(top, ui.min_rect().max);
@@ -81,12 +85,13 @@ fn zoom_row(ui: &mut egui::Ui, zoom: f32) -> Option<Action> {
     .inner
 }
 
-/// The whole image, with the part in view framed. Returns the point of the image,
-/// in pixels, to scroll the view to while it is being clicked or dragged.
-fn picture(ui: &mut egui::Ui, image: &OpenImage, checker: &TextureHandle) -> Option<Pos2> {
+/// The whole image, no taller than `tallest`, with the part in view framed. Returns
+/// the point of the image, in pixels, to scroll the view to while it is being clicked
+/// or dragged.
+fn picture(ui: &mut egui::Ui, tallest: f32, image: &OpenImage, checker: &TextureHandle) -> Option<Pos2> {
     let image_size = image.texture.size();
     let width = ui.available_width();
-    let scale = (width / image_size.x).min(MAX_HEIGHT / image_size.y);
+    let scale = (width / image_size.x).min(tallest / image_size.y);
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(width, (image_size.y * scale).round()), Sense::click_and_drag());
     let picture = canvas::fit(image_size, rect);

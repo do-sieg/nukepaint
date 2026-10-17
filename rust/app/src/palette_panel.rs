@@ -16,15 +16,15 @@ const MAX_HEIGHT: f32 = 200.0;
 /// How far the outlines of the primary and secondary colours' entries go past them.
 const OUTLINE_ROOM: f32 = 3.0;
 
-/// Shows the entries of `palette`, setting `colors` from the one clicked.
-pub fn show(ui: &mut egui::Ui, palette: &[Rgba<u8>], colors: &mut Colors) {
+/// Shows the entries of `palette`, no taller than `tallest`, setting `colors` from the one clicked.
+pub fn show(ui: &mut egui::Ui, tallest: f32, palette: &[Rgba<u8>], colors: &mut Colors) {
     if palette.is_empty() {
         ui.weak("The palette is empty");
         return;
     }
     egui::ScrollArea::vertical()
         .id_salt("palette")
-        .max_height(MAX_HEIGHT)
+        .max_height(MAX_HEIGHT.min(tallest - OUTLINE_ROOM * 2.0))
         .auto_shrink([false, true])
         .show(ui, |ui| {
             // Room for the outlines of the entries along the edges, which the scrolling would cut off.

@@ -1,16 +1,21 @@
 //! The docks: panels along the edges of the window that hold the sections, each
-//! under a header that folds it away when clicked. Down the left or right side they
-//! go one above the other; along the top or bottom, one beside the other, each with
-//! its own scroll. Only the edges with sections shown have a dock. A section hidden
-//! from the View menu keeps its place for when it is shown again.
+//! with a header that folds it away when clicked. Down the left or right side they
+//! go one above the other, each under its header; along the top or bottom, one
+//! beside the other, each after its header, which runs down its side. Only the edges
+//! with sections shown have a dock. A section hidden from the View menu keeps its
+//! place for when it is shown again, and a folded one stays folded, across sessions.
+//!
+//! A section is made of parts, which go one under the other down a side. Along an
+//! end they go down columns as tall as the dock, as many as they take, so the section
+//! is as wide as its parts need, and scrolls on its own if one is taller than the dock.
 //!
 //! A section is moved by dragging its header: into a dock, among its sections, or
 //! anywhere else, to the edge of the drawing area it is let go nearest to. Each dock
 //! can be made wider or narrower from its inner edge.
 
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, Id, LayerId, Order, PanelState, Pos2, Rect, Sense, Stroke, StrokeKind,
-    TextStyle, Vec2, collapsing_header::CollapsingState,
+    self, Align, Align2, Color32, CursorIcon, Id, LayerId, Layout, Order, PanelState, Pos2, Rect, Sense, Stroke,
+    StrokeKind, TextStyle, UiBuilder, Vec2, collapsing_header::CollapsingState, epaint::TextShape,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -20,8 +25,8 @@ const DEFAULT_WIDTH: f32 = 240.0;
 const MIN_WIDTH: f32 = 180.0;
 const DEFAULT_HEIGHT: f32 = 240.0;
 const MIN_HEIGHT: f32 = 64.0;
-/// How wide each section is when they go one beside the other.
-const SECTION_WIDTH: f32 = 240.0;
+/// Widest a part of a section gets in a column along an end.
+const COLUMN_WIDTH: f32 = 220.0;
 /// The dots at the end of a header, which say it can be dragged: across and down,
 /// and their room.
 const GRIP_DOTS: (usize, usize) = (2, 3);
@@ -125,6 +130,9 @@ pub struct DockLayout {
     /// The sections turned off from the View menu, which keep their place in their dock.
     #[serde(deserialize_with = "saved_sections")]
     hidden: Vec<Section>,
+    /// The sections folded away under their headers.
+    #[serde(deserialize_with = "saved_sections")]
+    folded: Vec<Section>,
     sizes: DockSizes,
 }
 
@@ -160,6 +168,7 @@ impl Default for DockLayout {
             top: Vec::new(),
             bottom: Vec::new(),
             hidden: vec![Section::Palette],
+            folded: Vec::new(),
             sizes: DockSizes::default(),
         }
     }
@@ -265,6 +274,17 @@ impl DockLayout {
         }
     }
 
+    pub fn is_folded(&self, section: Section) -> bool {
+        self.folded.contains(&section)
+    }
+
+    pub fn set_folded(&mut self, section: Section, folded: bool) {
+        self.folded.retain(|&other| other != section);
+        if folded {
+            self.folded.push(section);
+        }
+    }
+
     pub fn show_all(&mut self) {
         self.hidden.clear();
     }
@@ -292,6 +312,111 @@ struct Placement {
     sections: Vec<(DockSide, Section, Rect)>,
     /// The section whose header is being dragged, and whether it was just let go.
     dragged: Option<(Section, bool)>,
+    /// The section whose header was clicked, to be folded or unfolded.
+    toggled: Option<Section>,
+}
+
+/// Where the parts of a section go: one under the other down a side, and along an
+/// end, down columns as tall as the dock.
+pub struct Flow<'a> {
+    ui: &'a mut egui::Ui,
+    columns: Option<Columns>,
+    /// What the parts' ids are made from, the same whatever is around the section.
+    id: Id,
+    /// How many parts have been added.
+    count: usize,
+}
+
+impl<'a> Flow<'a> {
+    fn down(ui: &'a mut egui::Ui) -> Self {
+        let id = ui.id();
+        Self { ui, columns: None, id, count: 0 }
+    }
+
+    fn across(ui: &'a mut egui::Ui, section: Section, height: f32) -> Self {
+        let columns = Columns::new(ui.cursor().min, height);
+        Self { ui, columns: Some(columns), id: Id::new(("dock_section_parts", section)), count: 0 }
+    }
+
+    /// Whether the parts go in columns, along an end, rather than one under the other.
+    pub fn is_along_end(&self) -> bool {
+        self.columns.is_some()
+    }
+
+    /// Adds a part, with the tallest it should get: as tall as the dock along an end,
+    /// as tall as it likes down a side.
+    pub fn part<R>(&mut self, add: impl FnOnce(&mut egui::Ui, f32) -> R) -> R {
+        let Some(columns) = &mut self.columns else {
+            return add(self.ui, f32::INFINITY);
+        };
+        // Where it goes depends on how tall it was last time, kept under an id that
+        // does not change with what was shown before it, such as a tooltip.
+        let id = self.id.with(self.count);
+        self.count += 1;
+        let height: f32 = self.ui.data(|data| data.get_temp(id)).unwrap_or(0.0);
+        let spacing = self.ui.spacing().item_spacing;
+        let at = columns.place(height, spacing);
+        let room = Rect::from_min_size(at, Vec2::new(COLUMN_WIDTH, columns.height));
+        let builder = UiBuilder::new().id(id).max_rect(room).layout(Layout::top_down(Align::Min));
+        let mut ui = self.ui.new_child(builder);
+        let inner = add(&mut ui, columns.height);
+        let used = ui.min_rect();
+        columns.add(used, spacing);
+        if (used.height() - height).abs() >= 0.5 {
+            self.ui.data_mut(|data| data.insert_temp(id, used.height()));
+            self.ui.ctx().request_discard("a part of a dock section changed height");
+        }
+        inner
+    }
+
+    /// Makes room for the parts added along an end. Returns how wide they are.
+    fn finish(self) -> f32 {
+        let Some(columns) = self.columns else {
+            return self.ui.min_rect().width();
+        };
+        if columns.used.is_positive() {
+            self.ui.advance_cursor_after_rect(columns.used);
+        }
+        columns.used.width().max(0.0)
+    }
+}
+
+/// Where the parts of a section along an end have gone so far.
+#[derive(Debug)]
+struct Columns {
+    /// Where the first column starts, and how tall each can be.
+    top: f32,
+    height: f32,
+    /// The left of the column being filled, how wide it is so far, and where its next part goes.
+    left: f32,
+    width: f32,
+    next: f32,
+    /// What all the parts take.
+    used: Rect,
+}
+
+impl Columns {
+    fn new(top_left: Pos2, height: f32) -> Self {
+        Self { top: top_left.y, height, left: top_left.x, width: 0.0, next: top_left.y, used: Rect::NOTHING }
+    }
+
+    /// Where a part `height` tall goes: under the last one, or at the top of a new
+    /// column if it would go past the bottom of this one, unless it is the first.
+    fn place(&mut self, height: f32, spacing: Vec2) -> Pos2 {
+        if self.next > self.top && self.next + height > self.top + self.height {
+            self.left += self.width + spacing.x;
+            self.width = 0.0;
+            self.next = self.top;
+        }
+        Pos2::new(self.left, self.next)
+    }
+
+    /// Notes what a part took.
+    fn add(&mut self, rect: Rect, spacing: Vec2) {
+        self.next = rect.bottom() + spacing.y;
+        self.width = self.width.max(rect.right() - self.left);
+        self.used = self.used.union(rect);
+    }
 }
 
 /// Shows the docks for `layout`, with what `add_section` puts in each of their
@@ -300,7 +425,7 @@ struct Placement {
 pub fn show(
     ui: &mut egui::Ui,
     layout: &DockLayout,
-    mut add_section: impl FnMut(&mut egui::Ui, Section),
+    mut add_section: impl FnMut(&mut Flow, Section),
 ) -> Option<DockLayout> {
     let mut placement = Placement::default();
     let mut resized: Option<DockLayout> = None;
@@ -317,17 +442,19 @@ pub fn show(
             DockSide::Bottom => egui::Panel::bottom(id),
         };
         let min_size = if side.is_side() { MIN_WIDTH } else { MIN_HEIGHT };
-        let mut add_sections = |ui: &mut egui::Ui| {
+        let mut add_sections = |ui: &mut egui::Ui, height: f32| {
             for &section in &sections {
-                show_section(ui, side, section, &mut placement, |ui| add_section(ui, section));
+                let folded = layout.is_folded(section);
+                show_section(ui, side, section, folded, height, &mut placement, |flow| add_section(flow, section));
             }
         };
         let response = panel.resizable(true).default_size(layout.size(side)).min_size(min_size).show(ui, |ui| {
             if side.is_side() {
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, add_sections);
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| add_sections(ui, f32::INFINITY));
             } else {
+                let height = ui.available_height();
                 egui::ScrollArea::horizontal().auto_shrink(false).show(ui, |ui| {
-                    ui.horizontal_top(|ui| add_sections(ui));
+                    ui.horizontal_top(|ui| add_sections(ui, height));
                 });
             }
         });
@@ -343,8 +470,15 @@ pub fn show(
         }
     }
 
-    let moved = drag_section(ui, resized.as_ref().unwrap_or(layout), &placement);
-    moved.or(resized)
+    let changed = resized.as_ref().unwrap_or(layout);
+    let folded = placement.toggled.map(|section| {
+        let mut folded = changed.clone();
+        folded.set_folded(section, !changed.is_folded(section));
+        folded
+    });
+    let changed = folded.as_ref().unwrap_or(changed);
+    let moved = drag_section(ui, changed, &placement);
+    moved.or(folded).or(resized)
 }
 
 /// Marks where the section being dragged would go. Returns the layout with it there once it is let go.
@@ -381,47 +515,81 @@ fn drag_section(ui: &egui::Ui, layout: &DockLayout, placement: &Placement) -> Op
     None
 }
 
-/// A section under its header, which folds it away when clicked and moves it when dragged.
+/// A section with its header, which folds it away when clicked and moves it when
+/// dragged: above it down a side, beside it along an end, as tall as the dock, `height`.
 fn show_section(
     ui: &mut egui::Ui,
     side: DockSide,
     section: Section,
+    folded: bool,
+    height: f32,
     placement: &mut Placement,
-    add_contents: impl FnOnce(&mut egui::Ui),
+    add_contents: impl FnOnce(&mut Flow),
 ) {
-    let add_section = |ui: &mut egui::Ui| {
-        // The same wherever the section is, so it stays folded or not as it moves.
-        let id = Id::new(("dock_section", section));
-        let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, true);
-        let header = header(ui, section, state.openness(ui.ctx()));
+    let mut follow_header = |header: &egui::Response| {
         if header.clicked() {
-            state.toggle(ui);
+            placement.toggled = Some(section);
         }
         if header.drag_stopped() {
             placement.dragged = Some((section, true));
         } else if header.dragged() {
             placement.dragged = Some((section, false));
         }
-        state.show_body_indented(&header, ui, add_contents);
     };
     let rect = if side.is_side() {
-        ui.vertical(add_section).response.rect
-    } else {
-        // Beside the others: a column of its own, which scrolls on its own. It can be
-        // as short as the dock: the dock keeps the height of what it holds once
-        // resized, so a column taller than the dock would make it spring back.
         ui.vertical(|ui| {
-            ui.set_width(SECTION_WIDTH);
-            egui::ScrollArea::vertical()
-                .id_salt(section)
-                .min_scrolled_height(0.0)
-                .auto_shrink([false, false])
-                .show(ui, add_section);
+            // The same wherever the section is, so it folds smoothly as it moves.
+            let id = Id::new(("dock_section", section));
+            let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, !folded);
+            state.set_open(!folded);
+            let header = header(ui, section, state.openness(ui.ctx()));
+            follow_header(&header);
+            state.show_body_indented(&header, ui, |ui| add_contents(&mut Flow::down(ui)));
+        })
+        .response
+        .rect
+    } else {
+        ui.horizontal_top(|ui| {
+            let header = side_header(ui, section, !folded, height);
+            follow_header(&header);
+            if !folded {
+                show_columns(ui, section, height, add_contents);
+            }
         })
         .response
         .rect
     };
     placement.sections.push((side, section, rect));
+}
+
+/// The parts of a section along an end, in columns as tall as the dock, `height`, as
+/// wide as they were last time. The dock gives no more room than it has to what it
+/// holds, so it takes being told how wide they are to scroll past the others.
+fn show_columns(ui: &mut egui::Ui, section: Section, height: f32, add_contents: impl FnOnce(&mut Flow)) {
+    let width_id = Id::new(("dock_section_width", section));
+    let width: f32 = ui.data(|data| data.get_temp(width_id)).unwrap_or(COLUMN_WIDTH);
+    let used = ui
+        .allocate_ui(Vec2::new(width, height), |ui| {
+            ui.set_width(width);
+            // It can be as short as the dock: the dock keeps the height of what it
+            // holds once resized, so a section taller than it would make it spring back.
+            egui::ScrollArea::vertical()
+                .id_salt(section)
+                .max_height(height)
+                .min_scrolled_height(0.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let mut flow = Flow::across(ui, section, height);
+                    add_contents(&mut flow);
+                    flow.finish()
+                })
+                .inner
+        })
+        .inner;
+    if (used - width).abs() >= 0.5 {
+        ui.data_mut(|data| data.insert_temp(width_id, used));
+        ui.ctx().request_discard("a dock section changed width");
+    }
 }
 
 /// The header of a section: the arrow that says whether it is open, its title, and
@@ -458,6 +626,54 @@ fn header(ui: &mut egui::Ui, section: Section, openness: f32) -> egui::Response 
             ui.painter().circle_filled(center, GRIP_DOT_RADIUS, visuals.fg_stroke.color);
         }
     }
+    response
+}
+
+/// The header of a section along an end, down its side, `height` tall: the arrow
+/// that says whether it is open, its title going up, and dots at the bottom that say
+/// it can be dragged.
+fn side_header(ui: &mut egui::Ui, section: Section, open: bool, height: f32) -> egui::Response {
+    let width = ui.spacing().interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+    let response = response.on_hover_text("Click to fold or unfold, drag to move");
+    if response.dragged() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grab);
+    }
+    let visuals = *ui.style().interact(&response);
+    ui.painter().rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+
+    let indent = ui.spacing().indent;
+    let icon_width = ui.spacing().icon_width;
+    let icon_rect = Rect::from_center_size(
+        Pos2::new(rect.center().x, rect.top() + indent / 2.0),
+        Vec2::splat(icon_width * 0.5),
+    );
+    let openness = if open { 1.0 } else { 0.0 };
+    egui::collapsing_header::paint_default_icon(ui, openness, &response.clone().with_new_rect(icon_rect));
+
+    let (across, down) = GRIP_DOTS;
+    // Turned with the title: as many down as there were across.
+    let span = Vec2::new((down - 1) as f32, (across - 1) as f32) * GRIP_DOT_SPACING;
+    let first = Pos2::new(rect.center().x, rect.bottom() - indent / 2.0) - span / 2.0;
+    for x in 0..down {
+        for y in 0..across {
+            let center = first + Vec2::new(x as f32, y as f32) * GRIP_DOT_SPACING;
+            ui.painter().circle_filled(center, GRIP_DOT_RADIUS, visuals.fg_stroke.color);
+        }
+    }
+
+    // Between the arrow and the dots, cut short if there is not room for all of it.
+    let font = TextStyle::Button.resolve(ui.style());
+    let room = (rect.height() - indent * 2.0).max(0.0);
+    let mut job = egui::text::LayoutJob::simple_singleline(section.title().to_owned(), font, visuals.text_color());
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+    let galley = ui.painter().layout_job(job);
+    let center = Pos2::new(rect.center().x, rect.top() + indent + galley.size().x / 2.0);
+    let text = TextShape::new(center - galley.size() / 2.0, galley, visuals.text_color())
+        .with_angle_and_anchor(-std::f32::consts::FRAC_PI_2, Align2::CENTER_CENTER);
+    ui.painter().add(text);
     response
 }
 
@@ -583,6 +799,37 @@ mod tests {
         let mut right = Group::ALL.map(Tools).to_vec();
         right.push(Layers);
         assert_eq!(layout.sections(DockSide::Right), right);
+    }
+
+    #[test]
+    fn folded_sections_go_through_toml() {
+        let mut layout = DockLayout::default();
+        layout.set_folded(Colors, true);
+        layout.set_folded(History, true);
+        layout.set_folded(History, false);
+        assert!(layout.is_folded(Colors) && !layout.is_folded(History));
+        let text = toml::to_string(&layout).unwrap();
+        assert_eq!(toml::from_str::<DockLayout>(&text).unwrap(), layout);
+        // Saved before sections could be folded.
+        assert!(!toml::from_str::<DockLayout>("left = [\"Colors\"]").unwrap().is_folded(Colors));
+    }
+
+    #[test]
+    fn parts_go_down_columns_as_tall_as_the_dock() {
+        let spacing = Vec2::splat(4.0);
+        let mut columns = Columns::new(Pos2::ZERO, 100.0);
+        let mut add = |width: f32, height: f32| {
+            let at = columns.place(height, spacing);
+            columns.add(Rect::from_min_size(at, Vec2::new(width, height)), spacing);
+            at
+        };
+        assert_eq!(add(50.0, 40.0), Pos2::new(0.0, 0.0));
+        assert_eq!(add(80.0, 40.0), Pos2::new(0.0, 44.0));
+        // Past the bottom: in a column after the widest of the first.
+        assert_eq!(add(30.0, 40.0), Pos2::new(84.0, 0.0));
+        // Taller than the dock: at the top of a column of its own, past the bottom.
+        assert_eq!(add(30.0, 150.0), Pos2::new(118.0, 0.0));
+        assert_eq!(columns.used, Rect::from_min_max(Pos2::ZERO, Pos2::new(148.0, 150.0)));
     }
 
     #[test]

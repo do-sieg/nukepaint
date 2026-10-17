@@ -2500,23 +2500,27 @@ impl eframe::App for App {
             let (colors, right_click) = (&mut self.tools.colors, &mut self.tools.right_click);
             let right_click_before = *right_click;
             let tool_order = self.settings.tool_order();
-            let moved = dock::show(ui, self.settings.dock(), |ui, section| match section {
+            let moved = dock::show(ui, self.settings.dock(), |flow, section| match section {
                 // Each group's section is shown in turn, and only one of them is acted on.
                 Section::Tools(group) => {
-                    let action = tools_panel::show(ui, icons, tool, tool_order, group);
+                    let action = tools_panel::show(flow, icons, tool, tool_order, group);
                     tools_action = tools_action.take().or(action);
                 }
-                Section::Palette => palette_panel::show(ui, &image.document.palette, colors),
-                Section::Colors => colors.show(ui, right_click),
+                Section::Palette => {
+                    flow.part(|ui, tallest| palette_panel::show(ui, tallest, &image.document.palette, colors));
+                }
+                Section::Colors => colors.show(flow, right_click),
                 Section::History => {
                     let document = &image.document;
-                    history_action = history_panel::show(ui, document, icons, !busy, scroll_to_current);
+                    history_action = flow.part(|ui, tallest| {
+                        history_panel::show(ui, tallest, document, icons, !busy, scroll_to_current)
+                    });
                 }
                 Section::Layers => {
                     let enabled = |command: LayerCommand| !busy && command.can_run(&image.document);
-                    layers_action = layers_panel::show(ui, image, checker, icons, enabled);
+                    layers_action = layers_panel::show(flow, image, checker, icons, enabled);
                 }
-                Section::Navigator => navigated = navigator::show(ui, image, checker),
+                Section::Navigator => navigated = flow.part(|ui, tallest| navigator::show(ui, tallest, image, checker)),
             });
             if self.tools.right_click != right_click_before {
                 self.settings.set_right_click(self.tools.right_click);

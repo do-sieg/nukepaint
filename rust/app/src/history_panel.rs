@@ -15,10 +15,12 @@ const LIST_MAX_HEIGHT: f32 = 200.0;
 /// How much of their colour the undone steps keep.
 const UNDONE_OPACITY: f32 = 0.4;
 
-/// Shows the list, which does nothing unless `enabled`. The current step is brought
-/// into view when it changes, and with `image_changed`. Returns the step clicked.
+/// Shows the list, no taller than `tallest`, which does nothing unless `enabled`. The
+/// current step is brought into view when it changes, and with `image_changed`.
+/// Returns the step clicked.
 pub fn show(
     ui: &mut egui::Ui,
+    tallest: f32,
     document: &Document,
     icons: &mut Icons,
     enabled: bool,
@@ -27,7 +29,7 @@ pub fn show(
     let mut clicked = None;
     egui::ScrollArea::vertical()
         .id_salt("history")
-        .max_height(LIST_MAX_HEIGHT)
+        .max_height(LIST_MAX_HEIGHT.min(tallest))
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.add_enabled_ui(enabled, |ui| clicked = list(ui, document, icons, image_changed));

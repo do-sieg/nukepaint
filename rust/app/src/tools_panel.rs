@@ -1,11 +1,11 @@
 //! The tools of a group, as a button each, which wrap onto as many rows as the
-//! dock's width needs. A button dragged moves its tool among those of its group.
+//! dock's width needs, or along an end, as few columns as its height allows. A button dragged moves its tool among those of its group.
 //! The current tool's stands out.
 
 use eframe::egui::{self, CursorIcon, Id, LayerId, Order, Rect, Sense, Stroke};
 use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 
-use crate::dock::{self, INSERT_LINE_WIDTH};
+use crate::dock::{self, Flow, INSERT_LINE_WIDTH};
 use crate::icons::{ICON_SIZE, Icons};
 use crate::tools::{Group, Tool};
 
@@ -81,7 +81,26 @@ pub enum Action {
 }
 
 /// Shows the buttons of the tools in `group`, in `order`, with `current` as the tool in use.
-pub fn show(ui: &mut egui::Ui, icons: &mut Icons, current: Tool, order: &ToolOrder, group: Group) -> Option<Action> {
+pub fn show(flow: &mut Flow, icons: &mut Icons, current: Tool, order: &ToolOrder, group: Group) -> Option<Action> {
+    flow.part(|ui, tallest| {
+        if tallest.is_finite() {
+            ui.set_max_width(width_for(ui, order.tools_in(group).count(), tallest));
+        }
+        buttons(ui, icons, current, order, group)
+    })
+}
+
+/// How wide the buttons of `count` tools are in as few columns as fit them in `height`.
+fn width_for(ui: &egui::Ui, count: usize, height: f32) -> f32 {
+    let button = ICON_SIZE + ui.spacing().button_padding * 2.0;
+    let spacing = ui.spacing().item_spacing;
+    let rows = ((height + spacing.y) / (button.y + spacing.y)).floor() as usize;
+    let columns = count.div_ceil(rows.clamp(1, count.max(1))).max(1);
+    // With a little to spare, so the last one does not wrap for a rounding.
+    columns as f32 * (button.x + spacing.x) - spacing.x + 0.5
+}
+
+fn buttons(ui: &mut egui::Ui, icons: &mut Icons, current: Tool, order: &ToolOrder, group: Group) -> Option<Action> {
     let mut clicked = None;
     // Where the buttons were shown, and the tool being dragged and whether it was just let go.
     let mut buttons: Vec<(Tool, Rect)> = Vec::new();

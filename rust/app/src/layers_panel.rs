@@ -2,7 +2,8 @@
 //! hides it, a small picture of it and its name. A click on a layer makes it the
 //! active one, a double click asks for its properties, a right click makes it active
 //! and shows a menu of what can be done with it, and dragging it moves it up or down
-//! the list. Buttons under the list run the layer commands that have an icon.
+//! the list. Buttons under the list, or beside it in a short dock, run the layer
+//! commands that have an icon.
 
 use eframe::egui::{
     self, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, TextStyle, TextWrapMode, TextureHandle, Vec2,
@@ -12,6 +13,7 @@ use power_paint_core::{BlendMode, Layer, MAX_OPACITY};
 
 use crate::{
     OpenImage, canvas,
+    dock::Flow,
     icons::{ICON_SIZE, Icons},
     layer_commands::LayerCommand,
 };
@@ -36,20 +38,21 @@ pub enum Action {
     Run(LayerCommand),
 }
 
-/// Shows the list and the buttons under it. `enabled` says which commands can run.
+/// Shows the list and the buttons after it. `enabled` says which commands can run.
 pub fn show(
-    ui: &mut egui::Ui,
+    flow: &mut Flow,
     image: &OpenImage,
     checker: &TextureHandle,
     icons: &mut Icons,
     enabled: impl Fn(LayerCommand) -> bool,
 ) -> Option<Action> {
-    let mut action = None;
-    egui::ScrollArea::vertical().max_height(LIST_MAX_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
-        action = list(ui, image, checker, &enabled);
+    let mut action = flow.part(|ui, tallest| {
+        let scroll = egui::ScrollArea::vertical().max_height(LIST_MAX_HEIGHT.min(tallest)).auto_shrink([false, true]);
+        let action = scroll.show(ui, |ui| list(ui, image, checker, &enabled)).inner;
+        ui.add_space(ROW_MARGIN);
+        action
     });
-    ui.add_space(ROW_MARGIN);
-    ui.horizontal_wrapped(|ui| {
+    flow.part(|ui, _| ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         let tint = ui.visuals().strong_text_color();
         for command in LayerCommand::BUTTONS {
@@ -66,7 +69,7 @@ pub fn show(
                 action = Some(Action::Run(command));
             }
         }
-    });
+    }));
     action
 }
 
