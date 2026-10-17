@@ -618,7 +618,7 @@ fn field(source: &Buffer, value: impl Fn(usize, usize) -> f32) -> Vec<f32> {
 }
 
 /// `values`, one for each pixel, Gaussian blurred.
-fn gaussian(values: &[f32], width: usize, height: usize, radius: f32, stop: &AtomicBool) -> Option<Vec<f32>> {
+pub(super) fn gaussian(values: &[f32], width: usize, height: usize, radius: f32, stop: &AtomicBool) -> Option<Vec<f32>> {
     if radius < 1.0 {
         return Some(values.to_vec());
     }

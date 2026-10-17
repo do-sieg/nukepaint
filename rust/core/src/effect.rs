@@ -10,6 +10,7 @@ mod artistic;
 mod decor;
 mod distort;
 mod enhance;
+mod light;
 mod noise;
 mod photo;
 mod render;
@@ -29,6 +30,7 @@ use image::{Rgba, RgbaImage};
 
 pub use distort::{NewsprintScreen, WaveShape, WindDirection};
 pub use enhance::wavelet_decompose;
+pub use light::LightSource;
 pub use noise::NoiseColorSpace;
 pub use render::{CellStyle, FractalKind, Noise, NoiseKind};
 pub use stylize::EdgeAlgorithm;
@@ -127,6 +129,43 @@ pub enum Effect {
     /// Makes the corners of the rectangle around the selected pixels, or of the whole
     /// image, see-through outside quarter circles of the radius.
     RoundCorners { radius: f32 },
+    /// Lays a shadow of the pixels that can be seen under them, in the colour,
+    /// `opacity` percent as dark, moved `distance` towards `angle` and blurred by `blur`.
+    DropShadow { angle: f32, distance: f32, blur: f32, opacity: f32, color: [u8; 4] },
+    /// Lays a shadow of the pixels that can be seen under them, drawn out `length`
+    /// towards `angle`, as flat designs do, in the colour, `opacity` percent as dark,
+    /// and if `fade`, fading out along its length.
+    LongShadow { angle: f32, length: f32, opacity: f32, color: [u8; 4], fade: bool },
+    /// Takes the colours towards `color`, by up to `amount` percent, the further from the
+    /// centre: not within `radius` percent of the way to the corners, less `softness`
+    /// percent of that, and all the way past it. How opaque each pixel is stays the same.
+    Vignette { amount: f32, radius: f32, softness: f32, center: [f32; 2], color: [u8; 4] },
+    /// Light shining into a camera from the centre: a glow `size` wide with a halo
+    /// around it, `brightness` percent as bright, `rays` of light out of it if any, and
+    /// if `ghosts`, rings of light along the line through the middle of the image, as
+    /// lenses reflect it. Laid over the image as a screen does.
+    LensFlare { center: [f32; 2], size: f32, brightness: f32, rays: u32, ghosts: bool },
+    /// Lights the image with a light in the colour, from a lamp above the centre,
+    /// `height` percent of the image's longer side up, or from `azimuth` and `elevation`,
+    /// as `light` says: lighter the more it faces it, by `intensity` percent, shining as
+    /// much as `shine` says, with `ambient` percent of its own colours where unlit. It
+    /// stands out as light as it is, `bumps` times as much.
+    LightingEffects {
+        light: LightSource,
+        center: [f32; 2],
+        height: f32,
+        azimuth: f32,
+        elevation: f32,
+        intensity: f32,
+        ambient: f32,
+        shine: f32,
+        bumps: f32,
+        color: [u8; 4],
+    },
+    /// Glints on the spots at least `threshold` percent light: stars of `points` rays,
+    /// the first turned by `angle` from straight up, up to `size` long, at most one in
+    /// each square that wide, and `amount` percent of those, picked as the seed says.
+    Sparkle { threshold: f32, size: f32, points: u32, angle: f32, amount: f32, seed: u32 },
     /// Lays the image on woven canvas, lit from `azimuth`, which stands out by `depth`.
     ApplyCanvas { azimuth: f32, depth: f32 },
     /// Darkens what is darker than around it, `radius` away, as the outlines of a
@@ -636,6 +675,17 @@ fn render(source: &Buffer, effect: &Effect, stop: &AtomicBool) -> Option<Option<
         Effect::AddNoise { .. } | Effect::Spread { .. } => noise::render(source, effect, stop),
         Effect::SoftenPortrait { softness, lighting, warmth } if softness < 1.0 && lighting == 0.0 && warmth <= 0.0 => return Some(None),
         Effect::SoftenPortrait { .. } => photo::render(source, effect, stop),
+        Effect::DropShadow { opacity, .. } | Effect::LongShadow { opacity, .. } if opacity <= 0.0 => return Some(None),
+        Effect::LongShadow { length, .. } if length < 1.0 => return Some(None),
+        Effect::Vignette { amount, color, .. } if amount <= 0.0 || color[3] == 0 => return Some(None),
+        Effect::LensFlare { brightness, .. } if brightness <= 0.0 => return Some(None),
+        Effect::Sparkle { amount, size, .. } if amount <= 0.0 || size < 1.0 => return Some(None),
+        Effect::DropShadow { .. }
+        | Effect::LongShadow { .. }
+        | Effect::Vignette { .. }
+        | Effect::LensFlare { .. }
+        | Effect::LightingEffects { .. }
+        | Effect::Sparkle { .. } => light::render(source, effect, stop),
         Effect::Sharpen { radius, amount, threshold } => {
             let blurred = if radius < 1.0 { None } else { Some(blur(source, Weighing::Gaussian, radius, 1.0, stop)?) };
             let blurred = blurred.as_ref().unwrap_or(source);
@@ -1310,6 +1360,36 @@ mod tests {
         ]
     }
 
+    /// One of each effect of the Light menu.
+    fn lights() -> Vec<Effect> {
+        let black = [0, 0, 0, 255];
+        vec![
+            Effect::DropShadow { angle: 315.0, distance: 4.0, blur: 3.0, opacity: 60.0, color: black },
+            Effect::LongShadow { angle: 315.0, length: 20.0, opacity: 40.0, color: black, fade: true },
+            Effect::Vignette { amount: 60.0, radius: 100.0, softness: 60.0, center: [0.0, 0.0], color: black },
+            Effect::LensFlare { center: [-50.0, -50.0], size: 20.0, brightness: 100.0, rays: 6, ghosts: true },
+            lighting(LightSource::Spotlight, 0.0),
+            lighting(LightSource::Directional, 5.0),
+            Effect::Sparkle { threshold: 0.0, size: 6.0, points: 4, angle: 0.0, amount: 100.0, seed: 1 },
+        ]
+    }
+
+    /// A white Lighting Effects from the light source, with these bumps.
+    fn lighting(light: LightSource, bumps: f32) -> Effect {
+        Effect::LightingEffects {
+            light,
+            center: [0.0, 0.0],
+            height: 50.0,
+            azimuth: 135.0,
+            elevation: 45.0,
+            intensity: 100.0,
+            ambient: 20.0,
+            shine: 20.0,
+            bumps,
+            color: [255, 255, 255, 255],
+        }
+    }
+
     /// An Add Noise in the colour space, half saturated, over `coverage` percent of the pixels.
     fn add_noise(color_space: NoiseColorSpace, coverage: f32, seed: u32) -> Effect {
         Effect::AddNoise { intensity: 64.0, saturation: 50.0, coverage, color_space, seed }
@@ -1380,6 +1460,10 @@ mod tests {
             Effect::SoftenPortrait { softness: 0.0, lighting: 0.0, warmth: 0.0 },
             Effect::Straighten { angle: 0.0, fill: true, interpolation: Interpolation::Bilinear },
             Effect::AddBevel { width: 5.0, depth: 0.0, azimuth: 135.0 },
+            Effect::DropShadow { angle: 0.0, distance: 5.0, blur: 2.0, opacity: 0.0, color: [0, 0, 0, 255] },
+            Effect::Vignette { amount: 0.0, radius: 100.0, softness: 50.0, center: [0.0, 0.0], color: [0, 0, 0, 255] },
+            Effect::LensFlare { center: [0.0, 0.0], size: 50.0, brightness: 0.0, rays: 4, ghosts: true },
+            Effect::Sparkle { threshold: 50.0, size: 10.0, points: 4, angle: 0.0, amount: 0.0, seed: 0 },
         ];
         for effect in unchanged {
             assert_eq!(apply(&pixels, &effect), pixels, "{effect:?}");
@@ -1457,7 +1541,7 @@ mod tests {
         let pixels = RgbaImage::from_fn(200, 200, |x, y| Rgba([(x % 2 * 255) as u8, (y % 2 * 255) as u8, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 150, right: 20, bottom: 160 });
         let mask = SelectionMask::of(&selection, 200, 200).unwrap();
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy(), decorating()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy(), decorating(), lights()].concat() {
             let changed = apply_effect(&pixels, effect, Some(&mask), &AtomicBool::new(false)).unwrap();
             assert_eq!(changed[(5, 155)], pixels[(5, 155)], "{effect:?}");
             assert_eq!(changed[(15, 100)], pixels[(15, 100)], "{effect:?}");
@@ -1467,7 +1551,7 @@ mod tests {
     #[test]
     fn gives_up_once_stopped() {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([1, 2, 3, 255]));
-        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy(), decorating()].concat() {
+        for effect in &[all(), artistic(), enhancing(), distorting(), reshaping(), rendering(), stylizing(), noisy(), decorating(), lights()].concat() {
             assert!(apply_effect(&pixels, effect, None, &AtomicBool::new(true)).is_none(), "{effect:?}");
         }
     }
@@ -2142,5 +2226,95 @@ mod tests {
         let within = apply_effect(&pixels, &Effect::RoundCorners { radius: 4.0 }, Some(&mask), &AtomicBool::new(false)).unwrap();
         assert_eq!(within[(10, 5)][3], 0);
         assert_eq!(within[(0, 0)], pixels[(0, 0)]);
+    }
+
+    /// A grey square from 10 to 20 across and down on a see-through layer 40 wide.
+    fn grey_square() -> RgbaImage {
+        RgbaImage::from_fn(40, 40, |x, y| if (10..20).contains(&x) && (10..20).contains(&y) { Rgba([128, 128, 128, 255]) } else { Rgba([0; 4]) })
+    }
+
+    #[test]
+    fn a_drop_shadow_falls_behind_away_from_the_light() {
+        let pixels = grey_square();
+        let shadowed = apply(&pixels, &Effect::DropShadow { angle: 315.0, distance: 5.0, blur: 0.0, opacity: 50.0, color: [0, 0, 0, 255] });
+        assert_eq!(shadowed[(22, 22)], Rgba([0, 0, 0, 128]), "down and right");
+        assert_eq!(shadowed[(8, 8)][3], 0, "not up and left");
+        assert_eq!(shadowed[(15, 15)], pixels[(15, 15)], "under the square");
+        let blurred = apply(&pixels, &Effect::DropShadow { angle: 315.0, distance: 5.0, blur: 4.0, opacity: 100.0, color: [0, 0, 0, 255] });
+        let edge = blurred[(25, 20)][3];
+        assert!(edge > 0 && edge < 200, "soft edge: {edge}");
+    }
+
+    #[test]
+    fn a_long_shadow_reaches_far_and_fades() {
+        let pixels = grey_square();
+        let shadow = |fade| apply(&pixels, &Effect::LongShadow { angle: 315.0, length: 15.0, opacity: 100.0, color: [0, 0, 0, 255], fade });
+        let (flat, fading) = (shadow(false), shadow(true));
+        assert_eq!(flat[(28, 28)][3], 255, "as long as it is");
+        assert_eq!(flat[(36, 36)][3], 0, "and no longer");
+        assert_eq!(flat[(34, 20)][3], 0, "only down the way it goes");
+        assert!(fading[(21, 21)][3] > fading[(28, 28)][3] && fading[(28, 28)][3] > 0);
+        assert_eq!(flat[(15, 15)], pixels[(15, 15)]);
+    }
+
+    #[test]
+    fn a_vignette_darkens_towards_the_corners() {
+        let pixels = RgbaImage::from_pixel(41, 41, Rgba([200, 200, 200, 255]));
+        let vignetted = apply(&pixels, &Effect::Vignette { amount: 100.0, radius: 100.0, softness: 50.0, center: [0.0, 0.0], color: [0, 0, 0, 255] });
+        assert_eq!(vignetted[(20, 20)], pixels[(20, 20)], "the middle stays");
+        assert_eq!(vignetted[(0, 0)][0], 1, "the corners all the way");
+        assert!(vignetted[(0, 20)][0] < 200 && vignetted[(0, 20)][0] > vignetted[(0, 0)][0]);
+        let moved = apply(&pixels, &Effect::Vignette { amount: 100.0, radius: 100.0, softness: 50.0, center: [-100.0, -100.0], color: [0, 0, 0, 255] });
+        assert_eq!(moved[(0, 0)], pixels[(0, 0)], "around the centre wherever it is");
+    }
+
+    #[test]
+    fn a_lens_flare_lights_around_its_centre_and_along_its_rays() {
+        let pixels = RgbaImage::from_pixel(101, 101, Rgba([0, 0, 0, 255]));
+        let flare = |rays| apply(&pixels, &Effect::LensFlare { center: [0.0, 0.0], size: 10.0, brightness: 100.0, rays, ghosts: false });
+        let plain = flare(0);
+        assert_eq!(plain[(50, 50)][0], 255);
+        assert!(plain[(50, 50)][0] > plain[(70, 50)][0] && plain[(70, 50)][0] > plain[(95, 50)][0]);
+        let rayed = flare(4);
+        assert!(rayed[(50, 20)][0] > plain[(50, 20)][0] + 20, "a ray straight up");
+        assert!(rayed[(72, 28)][0] <= plain[(72, 28)][0] + 2, "none between them");
+        let ghosts = apply(&pixels, &Effect::LensFlare { center: [-80.0, -80.0], size: 10.0, brightness: 100.0, rays: 0, ghosts: true });
+        let lone = apply(&pixels, &Effect::LensFlare { center: [-80.0, -80.0], size: 10.0, brightness: 100.0, rays: 0, ghosts: false });
+        assert!(ghosts[(61, 61)][0] > lone[(61, 61)][0], "a ghost past the middle");
+        let clear = apply(&RgbaImage::new(101, 101), &Effect::LensFlare { center: [0.0, 0.0], size: 10.0, brightness: 100.0, rays: 0, ghosts: false });
+        assert_eq!(clear[(50, 50)], Rgba([255, 255, 255, 255]), "shows on a see-through layer");
+        assert_eq!(clear[(0, 0)][3], 0);
+    }
+
+    #[test]
+    fn lighting_effects_light_most_under_the_lamp_and_what_faces_the_sun() {
+        let pixels = RgbaImage::from_pixel(60, 60, Rgba([100, 100, 100, 255]));
+        let lit = apply(&pixels, &lighting(LightSource::Spotlight, 0.0));
+        assert!(lit[(30, 30)][0] > 100, "{:?}", lit[(30, 30)]);
+        assert!(lit[(30, 30)][0] > lit[(5, 5)][0]);
+        assert!(lit[(0, 0)][0] >= 20, "ambient light everywhere");
+        // A ridge down the middle, lit from the top left: its left side faces the light.
+        let ridge = RgbaImage::from_fn(60, 60, |x, _| {
+            let height = (255 - (x as i32 - 30).abs() * 8).max(0) as u8;
+            Rgba([height, height, height, 255])
+        });
+        let flat = apply(&ridge, &lighting(LightSource::Directional, 0.0));
+        let bumpy = apply(&ridge, &lighting(LightSource::Directional, 30.0));
+        let gain = |at: (u32, u32)| bumpy[at][0] as i32 - flat[at][0] as i32;
+        assert!(gain((25, 30)) > 0 && gain((35, 30)) < 0, "{} {}", gain((25, 30)), gain((35, 30)));
+    }
+
+    #[test]
+    fn sparkles_glint_on_the_bright_spots() {
+        let mut pixels = RgbaImage::from_pixel(41, 41, Rgba([20, 20, 20, 255]));
+        pixels.put_pixel(20, 20, Rgba([255, 255, 255, 255]));
+        let sparkle = |angle| apply(&pixels, &Effect::Sparkle { threshold: 50.0, size: 10.0, points: 4, angle, amount: 100.0, seed: 0 });
+        let upright = sparkle(0.0);
+        assert!(upright[(20, 14)][0] > 60 && upright[(26, 20)][0] > 60, "rays up and across");
+        assert!(upright[(24, 16)][0] < 40, "none between: {:?}", upright[(24, 16)]);
+        let turned = sparkle(45.0);
+        assert!(turned[(24, 16)][0] > 60 && turned[(20, 14)][0] < 40);
+        let dull = RgbaImage::from_pixel(41, 41, Rgba([100, 100, 100, 255]));
+        assert_eq!(apply(&dull, &Effect::Sparkle { threshold: 50.0, size: 10.0, points: 4, angle: 0.0, amount: 100.0, seed: 0 }), dull);
     }
 }

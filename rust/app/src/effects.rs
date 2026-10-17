@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use power_paint_core::{
-    BlendMode, CellStyle, EdgeAlgorithm, Effect, FocusShape, FractalKind, Interpolation, Layer, NewsprintScreen, Noise, NoiseColorSpace, NoiseKind, OffsetEdges, Turn,
+    BlendMode, CellStyle, EdgeAlgorithm, Effect, FocusShape, FractalKind, Interpolation, Layer, LightSource, NewsprintScreen, Noise, NoiseColorSpace, NoiseKind, OffsetEdges, Turn,
     WaveShape, WindDirection,
 };
 
-use crate::adjustment_dialog::{PRIMARY, SECONDARY, Setting, check, choice, color, layer, slider, unpack_color};
+use crate::adjustment_dialog::{PRIMARY, SECONDARY, Setting, check, choice, color, layer, pack_color, slider, unpack_color};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EffectKind {
@@ -64,6 +64,12 @@ pub enum EffectKind {
     AddBevel,
     AddBorder,
     RoundCorners,
+    DropShadow,
+    LongShadow,
+    Vignette,
+    LensFlare,
+    LightingEffects,
+    Sparkle,
     CloudsAndNoise,
     FractalExplorer,
     BayerMatrix,
@@ -312,6 +318,61 @@ const BEVEL: [Setting; 3] = [
 const BORDER: [Setting; 3] =
     [slider("Size:", 1.0, 500.0, 1.0, 16.0, " px"), color("Color:", PRIMARY), slider("Shading:", 0.0, 100.0, 1.0, 25.0, " %")];
 const ROUND_CORNERS: [Setting; 1] = [slider("Radius:", 1.0, 1000.0, 1.0, 16.0, " px").logarithmic()];
+const BLACK: f64 = pack_color([0, 0, 0, 255]);
+const WHITE: f64 = pack_color([255, 255, 255, 255]);
+const DROP_SHADOW: [Setting; 5] = [
+    slider("Angle:", 0.0, 360.0, 1.0, 315.0, "°"),
+    slider("Distance:", 0.0, 200.0, 1.0, 8.0, " px"),
+    slider("Blur:", 0.0, 100.0, 1.0, 8.0, " px"),
+    slider("Opacity:", 0.0, 100.0, 1.0, 60.0, " %"),
+    color("Color:", BLACK),
+];
+const LONG_SHADOW: [Setting; 5] = [
+    slider("Angle:", 0.0, 360.0, 1.0, 315.0, "°"),
+    slider("Length:", 1.0, 2000.0, 1.0, 100.0, " px").logarithmic(),
+    slider("Opacity:", 0.0, 100.0, 1.0, 40.0, " %"),
+    check("Fade Out", true),
+    color("Color:", BLACK),
+];
+const VIGNETTE: [Setting; 6] = [
+    slider("Amount:", 0.0, 100.0, 1.0, 60.0, " %"),
+    slider("Radius:", 1.0, 200.0, 1.0, 100.0, " %"),
+    slider("Softness:", 0.0, 100.0, 1.0, 60.0, " %"),
+    slider("Center X:", -100.0, 100.0, 1.0, 0.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, 0.0, " %"),
+    color("Color:", BLACK),
+];
+const LENS_FLARE: [Setting; 6] = [
+    slider("Center X:", -100.0, 100.0, 1.0, -50.0, " %"),
+    slider("Center Y:", -100.0, 100.0, 1.0, -50.0, " %"),
+    slider("Size:", 2.0, 1000.0, 1.0, 60.0, " px").logarithmic(),
+    slider("Brightness:", 0.0, 200.0, 1.0, 100.0, " %"),
+    slider("Rays:", 0.0, 64.0, 1.0, 0.0, ""),
+    check("Ghosts", true),
+];
+/// The names of [`LightSource::ALL`].
+const LIGHT_SOURCES: [&str; 2] = ["Spotlight", "Directional"];
+const LIGHTING: [Setting; 11] = [
+    choice("Light:", &LIGHT_SOURCES, 0),
+    slider("Center X:", -100.0, 100.0, 1.0, -30.0, " %").enabled_when(0, 0.0),
+    slider("Center Y:", -100.0, 100.0, 1.0, -30.0, " %").enabled_when(0, 0.0),
+    slider("Height:", 1.0, 200.0, 1.0, 50.0, " %").enabled_when(0, 0.0),
+    slider("Azimuth:", 0.0, 360.0, 1.0, 135.0, "°").enabled_when(0, 1.0),
+    slider("Elevation:", 0.0, 90.0, 1.0, 45.0, "°").enabled_when(0, 1.0),
+    slider("Intensity:", 0.0, 300.0, 1.0, 100.0, " %"),
+    slider("Ambient:", 0.0, 100.0, 1.0, 20.0, " %"),
+    slider("Shine:", 0.0, 100.0, 1.0, 20.0, " %"),
+    slider("Bumps:", 0.0, 50.0, 1.0, 0.0, ""),
+    color("Color:", WHITE),
+];
+const SPARKLE: [Setting; 6] = [
+    slider("Threshold:", 0.0, 100.0, 1.0, 80.0, " %"),
+    slider("Size:", 2.0, 200.0, 1.0, 15.0, " px"),
+    slider("Points:", 2.0, 16.0, 1.0, 4.0, ""),
+    slider("Angle:", 0.0, 180.0, 1.0, 0.0, "°"),
+    slider("Amount:", 0.0, 100.0, 1.0, 50.0, " %"),
+    SEED,
+];
 /// The names of [`NoiseKind::ALL`].
 const NOISE_KINDS: [&str; 6] = ["Clouds", "Perlin", "Simplex", "Turbulence", "Cell Noise", "Plasma"];
 /// The names of [`CellStyle::ALL`].
@@ -436,7 +497,7 @@ const SPREAD: [Setting; 3] = [
 impl EffectKind {
     /// The menus of the Filters menu, each with its effects, then the niche ones it keeps
     /// in a More menu at its end.
-    pub const MENUS: [(&str, &[Self], &[Self]); 10] = [
+    pub const MENUS: [(&str, &[Self], &[Self]); 11] = [
         (
             "Artistic",
             &[ApplyCanvas, Cartoon, GlassTile, Glow, InkSketch, OilPainting, PencilSketch, Photocopy, VanGogh],
@@ -466,6 +527,7 @@ impl EffectKind {
             &[Kaleidoscope, Newsprint, TileReflection],
         ),
         ("Enhance", &[Antialias, HighPass, RedEyeRemoval, ReduceNoise], &[Deinterlace, WaveletDecompose]),
+        ("Light", &[DropShadow, LensFlare, LightingEffects, LongShadow, Sparkle, Vignette], &[]),
         ("Map", &[Offset], &[]),
         ("Noise", &[AddNoise, Spread], &[]),
         ("Photo", &[Sharpen, SoftenPortrait, Straighten], &[]),
@@ -529,6 +591,12 @@ impl EffectKind {
             AddBevel => "Add Bevel",
             AddBorder => "Add Border",
             RoundCorners => "Round Corners",
+            DropShadow => "Drop Shadow",
+            LongShadow => "Long Shadow",
+            Vignette => "Vignette",
+            LensFlare => "Lens Flare",
+            LightingEffects => "Lighting Effects",
+            Sparkle => "Sparkle",
             CloudsAndNoise => "Clouds & Noise",
             FractalExplorer => "Fractal Explorer",
             BayerMatrix => "Bayer Matrix",
@@ -604,6 +672,12 @@ impl EffectKind {
             AddBevel => &BEVEL,
             AddBorder => &BORDER,
             RoundCorners => &ROUND_CORNERS,
+            DropShadow => &DROP_SHADOW,
+            LongShadow => &LONG_SHADOW,
+            Vignette => &VIGNETTE,
+            LensFlare => &LENS_FLARE,
+            LightingEffects => &LIGHTING,
+            Sparkle => &SPARKLE,
             CloudsAndNoise => &CLOUDS,
             FractalExplorer => &FRACTAL,
             BayerMatrix => &BAYER,
@@ -739,6 +813,54 @@ impl EffectKind {
             AddBevel => Effect::AddBevel { width: value(0), depth: value(1), azimuth: value(2) },
             AddBorder => Effect::AddBorder { size: value(0), color: unpack_color(values[1]), shading: value(2) },
             RoundCorners => Effect::RoundCorners { radius: value(0) },
+            DropShadow => Effect::DropShadow {
+                angle: value(0),
+                distance: value(1),
+                blur: value(2),
+                opacity: value(3),
+                color: unpack_color(values[4]),
+            },
+            LongShadow => Effect::LongShadow {
+                angle: value(0),
+                length: value(1),
+                opacity: value(2),
+                fade: values[3] != 0.0,
+                color: unpack_color(values[4]),
+            },
+            Vignette => Effect::Vignette {
+                amount: value(0),
+                radius: value(1),
+                softness: value(2),
+                center: [value(3), value(4)],
+                color: unpack_color(values[5]),
+            },
+            LensFlare => Effect::LensFlare {
+                center: [value(0), value(1)],
+                size: value(2),
+                brightness: value(3),
+                rays: value(4) as u32,
+                ghosts: values[5] != 0.0,
+            },
+            LightingEffects => Effect::LightingEffects {
+                light: LightSource::ALL[pick(0, LightSource::ALL.len())],
+                center: [value(1), value(2)],
+                height: value(3),
+                azimuth: value(4),
+                elevation: value(5),
+                intensity: value(6),
+                ambient: value(7),
+                shine: value(8),
+                bumps: value(9),
+                color: unpack_color(values[10]),
+            },
+            Sparkle => Effect::Sparkle {
+                threshold: value(0),
+                size: value(1),
+                points: value(2) as u32,
+                angle: value(3),
+                amount: value(4),
+                seed: value(5) as u32,
+            },
             CloudsAndNoise => Effect::CloudsAndNoise {
                 noise: Noise {
                     cells: CellStyle::ALL[pick(9, CellStyle::ALL.len())],
