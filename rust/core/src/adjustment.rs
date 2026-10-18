@@ -1,6 +1,5 @@
 //! The adjustments of the Colors menu, which change the colours of each pixel on
-//! its own, as `adjustment.gdshader` does on the GPU in the Godot version: no pixel
-//! looks at any other, and how opaque each is stays as it was. Those that change each
+//! its own: no pixel looks at any other, and how opaque each is stays as it was. Those that change each
 //! channel on its own go through a table of what each byte becomes. Large images are
 //! cut into bands of rows, adjusted at the same time on as many threads as there are
 //! cores.

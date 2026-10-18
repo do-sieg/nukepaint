@@ -1,6 +1,5 @@
 //! The effects of the Filters menu, which, unlike the adjustments, look at
-//! the pixels around each one, as `effect.gdshader` does on the GPU in the Godot
-//! version. The colours are multiplied by how opaque they are while they are mixed, so
+//! the pixels around each one. The colours are multiplied by how opaque they are while they are mixed, so
 //! see-through pixels add nothing to those around them, and divided out again at the
 //! end. Past its edges, the image goes on as its edge pixels. Points between pixels are
 //! read between the four around them. Large images are cut into bands of rows, worked

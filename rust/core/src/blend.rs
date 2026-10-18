@@ -1,5 +1,4 @@
-//! Layers blended together, the way each says, as `layer_blend.gdshader` does on the
-//! GPU in the Godot version. Large images are cut into bands of rows, blended at the
+//! Layers blended together, the way each says. Large images are cut into bands of rows, blended at the
 //! same time on as many threads as there are cores.
 
 use std::{num::NonZero, thread};
