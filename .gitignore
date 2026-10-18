@@ -1,2 +1,5 @@
 # Rust
-/rust/target/
+/target/
+
+# Notes
+/TODO.md

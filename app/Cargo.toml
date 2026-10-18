@@ -1,0 +1,18 @@
+[package]
+name = "nukepaint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+directories = "6.0.0"
+eframe = "0.36.2"
+nukepaint-core = { path = "../core" }
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+pollster = "1.0.1"
