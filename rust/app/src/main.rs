@@ -924,11 +924,22 @@ impl App {
                 let on = self.is_on(command) == Some(true);
                 let tile = self.selection_rect().filter(|_| command == ViewCommand::TileSelection);
                 let view = self.current_view().unwrap();
+                let tiled = view.tile();
                 let tile = if on { None } else { Some(tile.unwrap_or(view.whole())) };
                 view.set_tile(tile);
-                // The selection that made the tile would only get in the way on it.
-                if command == ViewCommand::TileSelection && !on {
-                    self.change_selection(EditCommand::Deselect);
+                if command == ViewCommand::TileSelection {
+                    if on {
+                        // Back untiled, the tile is selected again, whatever became of
+                        // the selection that made it.
+                        let image = &mut self.images[self.current.unwrap()];
+                        if image.document.select_all(tiled) {
+                            commit_selection(&mut image.document, None, "Select Tile", icons::RECT_SELECT);
+                            image.transform = None;
+                        }
+                    } else {
+                        // The selection that made the tile would only get in the way on it.
+                        self.change_selection(EditCommand::Deselect);
+                    }
                 }
                 return;
             }
