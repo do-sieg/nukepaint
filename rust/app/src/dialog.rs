@@ -1,7 +1,8 @@
 //! What the dialogs have in common: a title bar they are dragged by, which keeps the rest
 //! of them free for their settings, with a button that closes them as Escape does, and
 //! a row of buttons at the bottom right. Each dialog opens where it was last dragged
-//! to, kept in the window.
+//! to, kept in the window. A click outside a dialog does nothing, and Enter only
+//! accepts it when no field is being typed in.
 
 use eframe::egui::{self, Align, Align2, Color32, CursorIcon, Layout, Rect, Sense, Stroke, Vec2};
 
@@ -12,8 +13,11 @@ const CLOSE_SIZE: f32 = 20.0;
 /// How far the cross of the close button is from its edges, in points.
 const CROSS_INSET: f32 = 6.0;
 
-/// What a dialog's contents returned, and whether it was closed: with its close button,
-/// Escape or a click outside it.
+/// Where it is kept, for the frame, whether Enter accepts the dialog.
+const ENTER_ID: &str = "dialog_enter";
+
+/// What a dialog's contents returned, and whether it was closed: with its close button
+/// or Escape.
 pub struct Response<R> {
     pub inner: R,
     closed: bool,
@@ -32,6 +36,10 @@ pub fn show<R>(ctx: &egui::Context, id: &str, title: &str, backdrop: Color32, co
     // How far from the middle of the window it was dragged.
     let offset_id = id.with("offset");
     let mut offset = ctx.data(|data| data.get_temp::<Vec2>(offset_id)).unwrap_or_default();
+    // Enter in a field that has the keyboard focus, being typed in, is for that field.
+    // The field lets go of the focus as it takes Enter, so this is known before it is shown.
+    let enter = ctx.input(|input| input.key_pressed(egui::Key::Enter)) && ctx.memory(|memory| memory.focused().is_none());
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(ENTER_ID), enter));
     let area = egui::Modal::default_area(id).anchor(Align2::CENTER_CENTER, offset);
     let response = egui::Modal::new(id).area(area).backdrop_color(backdrop).show(ctx, |ui| {
         // Room is kept on the right of the title for the close button.
@@ -63,7 +71,11 @@ pub fn show<R>(ctx: &egui::Context, id: &str, title: &str, backdrop: Color32, co
     offset.x += (window.left() - rect.left()).max(0.0) + (window.right() - rect.right()).min(0.0);
     offset.y += (window.top() - rect.top()).max(0.0) + (window.bottom() - rect.bottom()).min(0.0);
     ctx.data_mut(|data| data.insert_temp(offset_id, offset));
-    let closed = response.should_close() || response.inner.1;
+    // Not `should_close`, which a click on the backdrop sets too.
+    let escape = response.is_top_modal
+        && !response.any_popup_open
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    let closed = escape || response.response.should_close() || response.inner.1;
     Response { inner: response.inner.0, closed }
 }
 
@@ -82,6 +94,12 @@ fn close_button(ui: &mut egui::Ui, rect: Rect) -> bool {
     response.clicked()
 }
 
+/// Whether Enter was pressed to accept the dialog shown, and not to end typing in one
+/// of its fields.
+pub fn enter(ui: &egui::Ui) -> bool {
+    ui.data(|data| data.get_temp(egui::Id::new(ENTER_ID))).unwrap_or(false)
+}
+
 /// A row as wide as what the dialog shows above it, whose buttons are added from the
 /// right: the last one first.
 pub fn buttons<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -95,8 +113,7 @@ pub fn buttons<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R 
 pub fn ok_cancel(ui: &mut egui::Ui) -> Option<bool> {
     buttons(ui, |ui| {
         let cancel = ui.button("Cancel").clicked();
-        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let ok = ui.button("OK").clicked() || enter;
+        let ok = ui.button("OK").clicked() || enter(ui);
         ok.then_some(true).or(cancel.then_some(false))
     })
 }

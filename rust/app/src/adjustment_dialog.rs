@@ -12,7 +12,7 @@ use std::{
     thread,
 };
 
-use eframe::egui::{self, Color32, Key};
+use eframe::egui::{self, Color32};
 use power_paint_core::{Curves, Effect, OffsetEdges, Rgba, RgbaImage, SelectionMask, apply_effect};
 
 use crate::{adjustments::AdjustmentKind, curve_editor::CurveEditor, dialog, effects::EffectKind, slider_field::SliderField};
@@ -302,7 +302,7 @@ impl Dialog {
                 edited |= self.settings_ui(ui);
             }
             dialog::buttons(ui, |ui| {
-                let enter = ui.input(|input| input.key_pressed(Key::Enter));
+                let enter = dialog::enter(ui);
                 if ui.button("Cancel").clicked() {
                     return Some(Outcome::Canceled);
                 }
