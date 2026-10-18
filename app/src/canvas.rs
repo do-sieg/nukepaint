@@ -3,7 +3,9 @@
 //! or the left one with the Pan tool or while Space is held, drags the image around.
 //! The left button otherwise works the current tool: the selection tools select a
 //! rectangle or an ellipse, or move, resize and rotate the selected pixels from the
-//! selection's box, and Move Selection does the same to the selection alone. The Zoom
+//! selection's box, and Move Selection does the same to the selection alone. A right
+//! click on the box with them, or anywhere with Move Selection, opens the selection's
+//! menu. The Zoom
 //! tool zooms in on a left click or on the area a left drag frames, and out on a right
 //! click. The Paintbrush, the Pencil and the Eraser draw a line along a left drag, the
 //! Blur, the Sharpen and the Jumble retouch the pixels along it, and the Spray leaves
@@ -163,6 +165,8 @@ pub struct Output {
     pub tool_requested: Option<Tool>,
     /// Set when the Deselect button by the selection is clicked.
     pub deselect_requested: bool,
+    /// Set when the selection is right clicked, for its menu to open.
+    pub selection_menu_requested: bool,
 }
 
 /// Shows the image, and works the current tool on it.
@@ -237,6 +241,7 @@ pub fn show(
     let hand = space || tools.tool == Tool::Pan;
     // Where the pointer is over the image while it works a drawing tool, or the Color Picker.
     let (mut drawing_at, mut picking_at, mut filling_at, mut wand_at) = (None, None, None, None);
+    let mut selection_menu_requested = false;
     let panning = response.dragged_by(PointerButton::Middle)
         || (hand && response.dragged_by(PointerButton::Primary) && !busy);
     if panning {
@@ -261,7 +266,7 @@ pub fn show(
     } else if let Some(warp) = tools.tool.warp() {
         use_warp_tool(ui, &response, image, tools, pointer, space, warp);
     } else if tools.tool != Tool::Pan {
-        use_tool(ui, &response, image, tools, pointer, space);
+        selection_menu_requested = use_tool(ui, &response, image, tools, pointer, space);
     }
 
     let painter = ui.painter_at(viewport);
@@ -335,7 +340,7 @@ pub fn show(
         paint_cursor(ui, icons, icons::CURSOR_ROTATE, ROTATE_HOTSPOT, at);
     }
     let pointer_pixel = pointer.map(|pointer| image.view.wrap_pixel(image.view.pixel_at(pointer)));
-    Output { pointer_pixel, tool_requested, deselect_requested }
+    Output { pointer_pixel, tool_requested, deselect_requested, selection_menu_requested }
 }
 
 /// How far, on screen, the pixels a transform moves are drawn again from where they
@@ -394,10 +399,11 @@ fn box_state(image: &OpenImage, tools: &Tools) -> Option<BoxState> {
     }
 }
 
-/// Works the tool with the left button, and with the right one, which rotates the box.
-/// Polygon Select puts down a corner at each click instead, and once its outline is
-/// closed, a press on a corner moves it, one on an edge adds a corner there, and a
-/// right click on a corner removes it, before the box has the press.
+/// Works the tool with the left button. Polygon Select puts down a corner at each
+/// click instead, and once its outline is closed, a press on a corner moves it, one on
+/// an edge adds a corner there, and a right click on a corner removes it, before the
+/// box has the press. A right click on the selection's box, or anywhere with Move
+/// Selection, asks for the selection's menu, which this returns whether to open.
 fn use_tool(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -405,7 +411,10 @@ fn use_tool(
     tools: &mut Tools,
     pointer: Option<Pos2>,
     space: bool,
-) {
+) -> bool {
+    // Whether the right button went down where a click opens the selection's menu,
+    // which opens once it is let go, as the menu would otherwise close then.
+    let menu_id = Id::new("selection_menu_pressed");
     let (command, shift) = ui.input(|input| (input.modifiers.command, input.modifiers.shift));
     // An outline being drawn is given up once anything else changes the selection.
     if image.lasso.as_ref().is_some_and(|lasso| !lasso.is_current(&image.document)) {
@@ -467,14 +476,13 @@ fn use_tool(
         let on_handle = on_box.is_some_and(|kind| kind != DragKind::Move);
         let hit = polygon_hit(image, tools, press);
         let corner = corner_at(&image.view, press, tools.snap);
-        let kind = match button {
-            PointerButton::Primary => on_box,
-            // The right button rotates the box: anywhere with Move Selection, which has nothing else to do.
-            PointerButton::Secondary if on_box.is_some() || tools.tool == Tool::MoveSelection => {
-                box_state(image, tools).map(|_| DragKind::Rotate)
-            }
-            _ => None,
-        };
+        let kind = if button == PointerButton::Primary { on_box } else { None };
+        // Anywhere with Move Selection, which has nothing else to do with the right button.
+        let on_selection = !image.document.selection.is_empty()
+            && (tools.tool == Tool::MoveSelection
+                || box_drag_at(image, tools, press).is_some_and(|kind| kind != DragKind::Rotate));
+        let menu = button == PointerButton::Secondary && on_selection && hit.is_none() && !drawing_polygon;
+        ui.data_mut(|data| data.insert_temp(menu_id, menu));
         match (button, hit) {
             (PointerButton::Primary, _) if drawing_polygon => put_corner(image, tools, press),
             (PointerButton::Primary, Some(PolygonHit::Corner(index))) => {
@@ -585,6 +593,11 @@ fn use_tool(
     if let Some(cursor) = cursor {
         ui.ctx().set_cursor_icon(cursor);
     }
+    // A click, which a drag away from where the button went down is not.
+    let (released, clicked) = ui.input(|input| {
+        (input.pointer.button_released(PointerButton::Secondary), input.pointer.button_clicked(PointerButton::Secondary))
+    });
+    released && ui.data_mut(|data| data.remove_temp::<bool>(menu_id)).unwrap_or(false) && clicked
 }
 
 /// The corners Shear and Perspective show handles on: where the transform has taken

@@ -14,6 +14,7 @@ and wgpu.
 
 #### Files
 
+- New blank images (File > New, Ctrl+N), sized like the selection or else the clipboard image, on a white, transparent, primary or secondary color background.
 - Open PNG, JPEG, BMP, WebP, TGA, SVG and OpenRaster (.ora) images.
 - Save to PNG, JPEG, WebP, BMP, TGA and OpenRaster, with Save and Save As.
 - Unsaved changes marker, and prompts before closing or quitting with unsaved changes.
@@ -26,6 +27,7 @@ and wgpu.
 - Undo and redo, with a History panel.
 - Cut, Copy and Paste, using the system clipboard.
 - Crop, Resize Image and Canvas Size.
+- New Image from Selection, keeping the layers.
 - Flip, Rotate 90° and Rotate 180°, for the whole image or a layer, and aware of the selection.
 
 #### Layers
@@ -41,6 +43,7 @@ and wgpu.
 - Select All, Deselect and Invert Selection.
 - Move, resize and rotate the selection or its pixels, with a movable pivot, nudging and a choice of resampling.
 - Shear and Perspective tools.
+- Right-click menu on the selection: New Image from Selection, Crop, Cut, Copy, Erase, Deselect and Invert.
 - Drawing tools stay inside the selection.
 
 #### Drawing

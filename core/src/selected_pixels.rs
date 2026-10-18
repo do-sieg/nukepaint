@@ -42,7 +42,7 @@ pub fn erase_selected(image: &mut RgbaImage, selection: &Selection) -> bool {
 }
 
 /// The part of the image around the selection.
-fn area_on(image: &RgbaImage, selection: &Selection) -> Option<PixelRect> {
+pub(crate) fn area_on(image: &RgbaImage, selection: &Selection) -> Option<PixelRect> {
     let bounds = selection.bounds()?;
     let area = PixelRect {
         left: (bounds.left.floor() as i32).max(0),

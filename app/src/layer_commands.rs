@@ -13,6 +13,7 @@ pub enum LayerCommand {
     Duplicate,
     MergeDown,
     CropToSelection,
+    NewImageFromSelection,
     Resize,
     CanvasSize,
     Flatten,
@@ -53,7 +54,7 @@ impl LayerCommand {
     ];
     /// The Image menu.
     pub const IMAGE_MENU: [&[Self]; 3] = [
-        &[CropToSelection, Resize, CanvasSize],
+        &[CropToSelection, NewImageFromSelection, Resize, CanvasSize],
         &[FlipImageHorizontal, FlipImageVertical, RotateImageClockwise, RotateImageCounterClockwise, RotateImage180],
         &[Flatten],
     ];
@@ -75,6 +76,7 @@ impl LayerCommand {
             Duplicate => "Duplicate Layer",
             MergeDown => "Merge Layer Down",
             CropToSelection => "Crop to Selection",
+            NewImageFromSelection => "New Image from Selection",
             Resize => "Resize…",
             CanvasSize => "Canvas Size…",
             Flatten => "Flatten",
@@ -178,7 +180,7 @@ impl LayerCommand {
         let has_below = active > 0;
         match self {
             Delete => document.layers.len() > 1,
-            CropToSelection => !document.selection.is_empty(),
+            CropToSelection | NewImageFromSelection => !document.selection.is_empty(),
             Flatten => !document.is_flat(),
             ShowOnly => document.layers.iter().enumerate().any(|(index, layer)| layer.visible != (index == active)),
             GoToTop | GoToAbove | MoveToTop | MoveUp => has_above,
@@ -190,7 +192,8 @@ impl LayerCommand {
     }
 
     /// Runs the command on the document, but for those that ask the user first:
-    /// Resize, Canvas Size, Rotate / Zoom, 3D Transform and Properties. The layer's flips
+    /// Resize, Canvas Size, Rotate / Zoom, 3D Transform and Properties, and New Image
+    /// from Selection, which leaves it as it is. The layer's flips
     /// and rotations turn only the selected pixels while there is a selection, and its
     /// quarter turns lose what they carry off the layer. Returns whether the layers changed, rather
     /// than only which one is active.
@@ -245,7 +248,7 @@ impl LayerCommand {
                     layer.visible = index == active;
                 }
             }
-            Resize | CanvasSize | RotateZoom | Transform3d | Properties => return false,
+            NewImageFromSelection | Resize | CanvasSize | RotateZoom | Transform3d | Properties => return false,
         }
         true
     }

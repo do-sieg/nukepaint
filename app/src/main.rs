@@ -21,6 +21,7 @@ mod layer_commands;
 mod layer_properties;
 mod layers_panel;
 mod navigator;
+mod new_image;
 mod palette_editor;
 mod palette_panel;
 mod resample_preview;
@@ -65,6 +66,7 @@ use tools::{SampleSource, ShapeFill, Tool, Tools};
 use transform::Transform;
 use view::{View, ZOOM_LEVELS, format_zoom};
 
+const NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const SAVE_AS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
@@ -399,6 +401,7 @@ impl EditCommand {
 /// What a button of the toolbar does.
 #[derive(Clone, Copy)]
 enum ToolbarButton {
+    New,
     Open,
     Save,
     SaveAs,
@@ -411,7 +414,7 @@ enum ToolbarButton {
 const TOOLBAR: [&[ToolbarButton]; 7] = {
     use ToolbarButton::*;
     [
-        &[Open, Save, SaveAs],
+        &[New, Open, Save, SaveAs],
         &[Edit(EditCommand::Undo), Edit(EditCommand::Redo)],
         &[Edit(EditCommand::Cut), Edit(EditCommand::Copy), Edit(EditCommand::Paste), Edit(EditCommand::EraseSelection)],
         &[Edit(EditCommand::SelectAll), Edit(EditCommand::Deselect), Edit(EditCommand::InvertSelection)],
@@ -511,6 +514,10 @@ struct App {
     layer_dialog: Option<layer_properties::Dialog>,
     /// Set while asking for a new size of an image or its canvas.
     size_dialog: Option<image_size::Dialog>,
+    /// Set while asking for the size of a new image.
+    new_image_dialog: Option<new_image::Dialog>,
+    /// What the last new image was made with, which the next one starts with.
+    last_new_image: ([u32; 2], new_image::Background),
     /// Set while the grid's settings are being changed.
     grid_dialog: Option<grid_settings::Dialog>,
     /// Set while an image's palette is being edited.
@@ -558,6 +565,8 @@ impl App {
             clipboard: Clipboard::new(),
             layer_dialog: None,
             size_dialog: None,
+            new_image_dialog: None,
+            last_new_image: (new_image::DEFAULT_SIZE, new_image::Background::default()),
             grid_dialog: None,
             palette_dialog: None,
             checkerboard_dialog: None,
@@ -566,6 +575,38 @@ impl App {
             last_filter: None,
             last_adjustment: None,
         }
+    }
+
+    /// Asks for the size of a new image: that of the current image's selection, if
+    /// there is one, or of the pixels to paste, if there are some, or else that of the
+    /// last new image.
+    fn show_new_image_dialog(&mut self) {
+        let (last_size, background) = self.last_new_image;
+        let selected = self.current.and_then(|current| self.images[current].document.selection_area());
+        let size = match (selected, self.clipboard.image()) {
+            (Some(area), _) => [area.width() as u32, area.height() as u32],
+            (None, Some(pixels)) => [pixels.width(), pixels.height()],
+            (None, None) => last_size,
+        };
+        self.new_image_dialog = Some(new_image::Dialog::new(size, background));
+    }
+
+    /// Shows the dialog asking for the size of a new image while it is open, and adds
+    /// the image once the user agrees.
+    fn new_image_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.new_image_dialog else {
+            return;
+        };
+        let Some(outcome) = dialog.show(ctx) else {
+            return;
+        };
+        let dialog = self.new_image_dialog.take().unwrap();
+        if let new_image::Outcome::Canceled = outcome {
+            return;
+        }
+        self.last_new_image = (dialog.size, dialog.background);
+        let pixels = dialog.pixels([self.tools.colors.primary, self.tools.colors.secondary]);
+        self.add_image(ctx, Document::new(pixels));
     }
 
     fn show_open_dialog(&mut self, ctx: &egui::Context) {
@@ -819,6 +860,10 @@ impl App {
     fn file_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.menu_button("File", |ui| {
+            let new = egui::Button::new("New…").shortcut_text(ctx.format_shortcut(&NEW));
+            if ui.add_enabled(!self.has_dialog(), new).clicked() {
+                self.show_new_image_dialog();
+            }
             if ui.add(egui::Button::new("Open…").shortcut_text(ctx.format_shortcut(&OPEN))).clicked() {
                 self.show_open_dialog(&ctx);
             }
@@ -1030,6 +1075,7 @@ impl App {
                 }
                 for &button in *buttons {
                     let (icon, label, shortcut, enabled, on) = match button {
+                        ToolbarButton::New => (Some(icons::NEW), "New", Some(NEW), !self.has_dialog(), None),
                         ToolbarButton::Open => (Some(icons::OPEN), "Open", Some(OPEN), true, None),
                         ToolbarButton::Save => (Some(icons::SAVE), "Save", Some(SAVE), self.current.is_some(), None),
                         ToolbarButton::SaveAs => {
@@ -1066,6 +1112,7 @@ impl App {
             }
         });
         match clicked {
+            Some(ToolbarButton::New) => self.show_new_image_dialog(),
             Some(ToolbarButton::Open) => self.show_open_dialog(&ctx),
             Some(ToolbarButton::Save | ToolbarButton::SaveAs) if let Some(current) = self.current => {
                 self.save(current, matches!(clicked, Some(ToolbarButton::SaveAs)));
@@ -1254,6 +1301,50 @@ impl App {
         });
     }
 
+    /// The menu of the selection, opened by a right click on it, of what can be done
+    /// with the selected pixels or the selection itself.
+    fn selection_menu(&mut self, ui: &egui::Ui, open: bool) {
+        let ctx = ui.ctx().clone();
+        let id = egui::Id::new("selection_menu");
+        let popup = egui::Popup::new(id, ctx.clone(), egui::PopupAnchor::PointerFixed, ui.layer_id())
+            .kind(egui::PopupKind::Menu)
+            .layout(egui::Layout::top_down_justified(egui::Align::Min))
+            .style(egui::containers::menu::menu_style)
+            .open_memory(open.then_some(egui::SetOpenCommand::Bool(true)));
+        let chosen = popup.show(|ui| {
+            let mut chosen = None;
+            let layer_commands = [LayerCommand::NewImageFromSelection, LayerCommand::CropToSelection];
+            for command in layer_commands {
+                let mut button = egui::Button::new(command.label());
+                if let Some(shortcut) = command.shortcut() {
+                    button = button.shortcut_text(ctx.format_shortcut(&shortcut));
+                }
+                if ui.add_enabled(self.can_run_layer(command), button).clicked() {
+                    chosen = Some(Err(command));
+                }
+            }
+            let edit_commands: [&[EditCommand]; 2] = [
+                &[EditCommand::Cut, EditCommand::Copy, EditCommand::CopyMerged, EditCommand::EraseSelection],
+                &[EditCommand::Deselect, EditCommand::InvertSelection],
+            ];
+            for commands in edit_commands {
+                ui.separator();
+                for &command in commands {
+                    let button = egui::Button::new(command.label()).shortcut_text(ctx.format_shortcut(&command.shortcut()));
+                    if ui.add_enabled(self.can_edit(command), button).clicked() {
+                        chosen = Some(Ok(command));
+                    }
+                }
+            }
+            chosen
+        });
+        match chosen.and_then(|response| response.inner) {
+            Some(Ok(command)) => self.edit(&ctx, command),
+            Some(Err(command)) => self.run_layer(&ctx, command),
+            None => {}
+        }
+    }
+
     /// Whether the current image can be put back as it was after another of its steps.
     fn can_go_to_step(&self) -> bool {
         self.current.is_some() && !self.is_dragging() && !self.has_dialog()
@@ -1315,6 +1406,12 @@ impl App {
             LayerCommand::RotateZoom | LayerCommand::Transform3d => {
                 let kind = if command == LayerCommand::RotateZoom { EffectKind::RotateZoom } else { EffectKind::Transform3d };
                 self.adjust(ctx, FilterKind::Effect(kind));
+                return;
+            }
+            LayerCommand::NewImageFromSelection => {
+                if let Some(document) = self.images[current].document.from_selection() {
+                    self.add_image(ctx, document);
+                }
                 return;
             }
             LayerCommand::Resize => Some(image_size::Kind::Resize),
@@ -1444,6 +1541,7 @@ impl App {
     fn has_dialog(&self) -> bool {
         self.layer_dialog.is_some()
             || self.size_dialog.is_some()
+            || self.new_image_dialog.is_some()
             || self.grid_dialog.is_some()
             || self.palette_dialog.is_some()
             || self.checkerboard_dialog.is_some()
@@ -2232,6 +2330,11 @@ impl App {
                 }
             }
         }
+        // Only with Ctrl alone, as Add New Layer takes N with Ctrl and Shift, and there may
+        // be no image for it to go first.
+        if ctx.input_mut(|input| input.modifiers.matches_exact(NEW.modifiers) && input.consume_shortcut(&NEW)) {
+            self.show_new_image_dialog();
+        }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN)) {
             self.show_open_dialog(ctx);
         }
@@ -2678,6 +2781,7 @@ impl eframe::App for App {
                 if output.deselect_requested {
                     self.edit(&ctx, EditCommand::Deselect);
                 }
+                self.selection_menu(ui, output.selection_menu_requested);
             }
             None => {
                 self.pointer_pixel = None;
@@ -2689,6 +2793,7 @@ impl eframe::App for App {
         if self.closing.is_some() {
             self.cancel_layer_dialog();
             self.size_dialog = None;
+            self.new_image_dialog = None;
             self.grid_dialog = None;
             self.palette_dialog = None;
             self.checkerboard_dialog = None;
@@ -2697,6 +2802,7 @@ impl eframe::App for App {
         self.layer_dialog(&ctx);
         self.adjustment_dialog(&ctx);
         self.size_dialog(&ctx);
+        self.new_image_dialog(&ctx);
         self.grid_dialog(&ctx);
         self.palette_dialog(&ctx);
         self.checkerboard_dialog(&ctx);

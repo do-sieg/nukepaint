@@ -3,9 +3,9 @@
 //! outline alone.
 //!
 //! A press inside the box moves it, on an edge or corner resizes it, and just outside
-//! rotates it about its centre of rotation, as does the right button anywhere with
-//! Move Selection. That centre is the box's middle until its handle is dragged
-//! elsewhere; it snaps to the middle and to the handles of the edges and corners.
+//! rotates it about its centre of rotation. That centre is the box's middle until its
+//! handle is dragged elsewhere; it snaps to the middle and to the handles of the edges
+//! and corners.
 //! Shift keeps the box's proportions while resizing, and turns it in steps of 15°;
 //! Ctrl resizes it about its middle. While snapping to the grid, moving the box puts
 //! the top left corner of the rectangle around it on a corner of a cell, and resizing

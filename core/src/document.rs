@@ -8,7 +8,7 @@ use image::{RgbaImage, imageops};
 use crate::{
     Adjustment, Affine, BlendMode, FloatingPixels, Interpolation, Layer, MAX_OPACITY, OpenError, PixelRect, Selection, SelectionMask,
     SelectionMode, Step, DEFAULT_PALETTE, MAX_PALETTE_SIZE, Palette, blend_layer, palette_of, composite, composite_area, copy_selected, erase_selected, history::History,
-    adjust, load_image, open_raster, resize, save_image, wavelet_decompose,
+    adjust, selected_pixels::area_on, load_image, open_raster, resize, save_image, wavelet_decompose,
 };
 
 /// An image being edited: its layers, bottom first, its palette, the file it came
@@ -39,6 +39,28 @@ impl Document {
     /// A document of pasted pixels, which has changes to save as it is in no file.
     pub fn pasted(pixels: RgbaImage) -> Self {
         Self::with_first_step(vec![Layer::new("Background", pixels)], None, "Paste in to New Image", Some("paste"), false)
+    }
+
+    /// A new document of the selected pixels of every layer, in the smallest rectangle
+    /// around them, with the layers' names, opacities and blend modes, and the palette.
+    /// It has changes to save, as it is in no file. Nothing if none of the selection is
+    /// on the image.
+    pub fn from_selection(&self) -> Option<Self> {
+        let mut layers = Vec::with_capacity(self.layers.len());
+        for layer in &self.layers {
+            let (_, pixels) = copy_selected(&layer.pixels, &self.selection)?;
+            layers.push(Layer { pixels, ..layer.clone() });
+        }
+        let selection = Selection::default();
+        let step = Step { name: "New Image from Selection".to_owned(), icon: Some("crop") };
+        let history = History::new(step, &layers, self.active_layer, &selection, &self.palette, false);
+        Some(Self { path: None, layers, active_layer: self.active_layer, selection, palette: self.palette.clone(), history })
+    }
+
+    /// The smallest rectangle around the selected pixels on the image, if any of the
+    /// selection is on it.
+    pub fn selection_area(&self) -> Option<PixelRect> {
+        area_on(&self.layers[self.active_layer].pixels, &self.selection)
     }
 
     /// Reads a document from an image file: an OpenRaster file with its layers, any
@@ -548,6 +570,25 @@ mod tests {
         assert_eq!(document().palette.colors, DEFAULT_PALETTE);
         let pasted = Document::pasted(RgbaImage::from_pixel(1, 1, Rgba([255, 0, 0, 255])));
         assert_eq!(pasted.palette.colors, [Rgba([255, 0, 0, 255])]);
+    }
+
+    #[test]
+    fn a_new_document_from_the_selection_keeps_the_layers_cropped_to_it() {
+        let mut document = Document::new(RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255])));
+        document.add_layer();
+        document.layers[1].opacity = 100;
+        document.active_layer = 0;
+        assert!(document.from_selection().is_none());
+        document.selection = Selection::rect(PixelRect::from_corners((1, 1), (3, 4)));
+        assert_eq!(document.selection_area(), Some(PixelRect::from_corners((1, 1), (3, 4))));
+        let cropped = document.from_selection().unwrap();
+        assert_eq!(cropped.size(), (2, 3));
+        assert_eq!(cropped.layers.len(), 2);
+        assert_eq!(cropped.layers[1].opacity, 100);
+        assert_eq!(cropped.active_layer, 0);
+        assert!(cropped.selection.is_empty());
+        assert!(cropped.is_unsaved());
+        assert_eq!(cropped.steps().map(|step| step.name.as_str()).collect::<Vec<_>>(), ["New Image from Selection"]);
     }
 
     #[test]

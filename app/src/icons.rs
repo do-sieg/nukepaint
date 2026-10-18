@@ -80,6 +80,7 @@ pub const LAYER_PROPERTIES: Icon = icon!("layer_properties");
 pub const LAYERS: Icon = icon!("layers");
 pub const MOVE_PIXELS: Icon = icon!("move_pixels");
 pub const MOVE: Icon = icon!("move");
+pub const NEW: Icon = icon!("new");
 pub const OPEN: Icon = icon!("open");
 pub const CROP: Icon = icon!("crop");
 pub const CUT: Icon = icon!("cut");
