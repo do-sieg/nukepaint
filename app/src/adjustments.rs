@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
-use nukepaint_core::{Adjustment, AutoLevelMode, DesaturateMode, DitherMethod, InvertMode};
+use nukepaint_core::{Adjustment, AutoLevelMode, DesaturateMode, DitherMethod, InvertMode, Palette};
 
-use crate::adjustment_dialog::{FilterKind, Setting, check, choice, color, pack_color, slider, unpack_color};
+use crate::adjustment_dialog::{FilterKind, PRIMARY, SECONDARY, Setting, check, choice, color, pack_color, slider, unpack_color};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdjustmentKind {
@@ -20,13 +20,16 @@ pub enum AdjustmentKind {
     Dither,
     Equalize,
     Exposure,
+    GradientMap,
     HighlightsShadows,
     HueSaturation,
     Invert,
     InvertAlpha,
     InvertColors,
     Levels,
+    PaletteMap,
     Posterize,
+    ReplaceColor,
     Sepia,
     TemperatureTint,
     Threshold,
@@ -75,6 +78,8 @@ const DITHER: [Setting; 2] =
 const EQUALIZE_MODES: [&str; 2] = ["Each channel", "Lightness"];
 const EQUALIZE: [Setting; 1] = [choice("Mode:", &EQUALIZE_MODES, 0)];
 const EXPOSURE: [Setting; 1] = [slider("Exposure:", -5.0, 5.0, 0.01, 0.0, " EV")];
+/// From the primary colour to the secondary one, which starts as black to white.
+const GRADIENT_MAP: [Setting; 2] = [color("Dark:", PRIMARY), color("Light:", SECONDARY)];
 const HIGHLIGHTS_SHADOWS: [Setting; 2] = [
     slider("Shadows:", -100.0, 100.0, 1.0, 0.0, ""),
     slider("Highlights:", -100.0, 100.0, 1.0, 0.0, ""),
@@ -105,7 +110,14 @@ const LEVELS: [Setting; 8] = [
     check("Green", true),
     check("Blue", true),
 ];
+const PALETTE_MAP: [Setting; 2] = [check("Reverse", false), check("Smooth", false)];
 const POSTERIZE: [Setting; 1] = [slider("Levels:", 2.0, 256.0, 1.0, 4.0, "").logarithmic()];
+const REPLACE_COLOR: [Setting; 4] = [
+    color("Color:", PRIMARY),
+    color("Replace with:", SECONDARY),
+    slider("Tolerance:", 0.0, 100.0, 1.0, 0.0, " %"),
+    check("Keep shading", false),
+];
 const TEMPERATURE_TINT: [Setting; 2] = [
     slider("Temperature:", -100.0, 100.0, 1.0, 0.0, ""),
     slider("Tint:", -100.0, 100.0, 1.0, 0.0, ""),
@@ -115,11 +127,12 @@ const WHITE_BALANCE: [Setting; 1] = [slider("Strength:", 0.0, 100.0, 1.0, 100.0,
 
 impl AdjustmentKind {
     /// The Colors menu, in groups that separators keep apart: automatic, tone, colour,
-    /// monochrome, fewer levels, inversions and transparency.
-    pub const MENU: [&[Self]; 7] = [
+    /// mapping, monochrome, fewer levels, inversions and transparency.
+    pub const MENU: [&[Self]; 8] = [
         &[AutoLevel, Equalize, WhiteBalance],
         &[BrightnessContrast, Exposure, HighlightsShadows, Levels, Curves],
         &[HueSaturation, ColorBalance, TemperatureTint, Colorize],
+        &[ReplaceColor, GradientMap, PaletteMap],
         &[BlackAndWhite, Sepia, Threshold],
         &[Posterize, Dither],
         &[InvertColors, InvertAlpha, Invert],
@@ -139,13 +152,16 @@ impl AdjustmentKind {
             Dither => "Dither",
             Equalize => "Equalize",
             Exposure => "Exposure",
+            GradientMap => "Gradient Map",
             HighlightsShadows => "Highlights / Shadows",
             HueSaturation => "Hue / Saturation",
             Invert => "Invert",
             InvertAlpha => "Invert Alpha",
             InvertColors => "Invert Colors",
             Levels => "Levels",
+            PaletteMap => "Palette Map",
             Posterize => "Posterize",
+            ReplaceColor => "Replace Color",
             Sepia => "Sepia",
             TemperatureTint => "Temperature and Tint",
             Threshold => "Threshold",
@@ -185,11 +201,14 @@ impl AdjustmentKind {
             Dither => &DITHER,
             Equalize => &EQUALIZE,
             Exposure => &EXPOSURE,
+            GradientMap => &GRADIENT_MAP,
             HighlightsShadows => &HIGHLIGHTS_SHADOWS,
             HueSaturation => &HUE_SATURATION,
             Invert => &INVERT,
             Levels => &LEVELS,
+            PaletteMap => &PALETTE_MAP,
             Posterize => &POSTERIZE,
+            ReplaceColor => &REPLACE_COLOR,
             TemperatureTint => &TEMPERATURE_TINT,
             Threshold => &THRESHOLD,
             WhiteBalance => &WHITE_BALANCE,
@@ -202,10 +221,14 @@ impl AdjustmentKind {
     }
 
     /// The adjustment with these settings, in the order [`AdjustmentKind::settings`]
-    /// lists them, or these curves.
-    pub fn adjustment(self, values: &[f64], curves: &nukepaint_core::Curves) -> Adjustment {
+    /// lists them, or these curves, or the colours of this palette but its transparent one.
+    pub fn adjustment(self, values: &[f64], curves: &nukepaint_core::Curves, palette: &Palette) -> Adjustment {
         let value = |index: usize| values[index] as f32;
         let checked = |index: usize| values[index] != 0.0;
+        let rgb = |index: usize| {
+            let [r, g, b, _] = unpack_color(values[index]);
+            [r, g, b]
+        };
         match self {
             AutoLevel => {
                 let mode = [AutoLevelMode::Channels, AutoLevelMode::Together, AutoLevelMode::Hsv][values[0] as usize];
@@ -226,10 +249,7 @@ impl AdjustmentKind {
                 let range = |first: usize| [value(first), value(first + 1), value(first + 2)];
                 Adjustment::ColorBalance { shadows: range(1), midtones: range(4), highlights: range(7), preserve_luminosity: checked(10) }
             }
-            ColorToAlpha => {
-                let [r, g, b, _] = unpack_color(values[0]);
-                Adjustment::ColorToAlpha { color: [r, g, b], transparency: value(1), opacity: value(2) }
-            }
+            ColorToAlpha => Adjustment::ColorToAlpha { color: rgb(0), transparency: value(1), opacity: value(2) },
             Colorize => Adjustment::Colorize { hue: value(0), saturation: value(1), lightness: value(2) },
             Curves => Adjustment::Curves(curves.clone()),
             Dither => {
@@ -238,6 +258,7 @@ impl AdjustmentKind {
             }
             Equalize => Adjustment::Equalize { lightness: checked(0) },
             Exposure => Adjustment::Exposure { exposure: value(0) },
+            GradientMap => Adjustment::GradientMap { dark: rgb(0), light: rgb(1) },
             HighlightsShadows => Adjustment::HighlightsShadows { shadows: value(0), highlights: value(1) },
             HueSaturation => {
                 Adjustment::HueSaturation { hue: value(1), saturation: value(2), lightness: value(3), perceptual: checked(0) }
@@ -254,7 +275,15 @@ impl AdjustmentKind {
                 gamma: value(2),
                 output: [value(3), value(4)],
             },
+            PaletteMap => {
+                let colors = palette.colors.iter().enumerate().filter(|&(index, _)| palette.transparent != Some(index));
+                let colors = colors.map(|(_, color)| [color[0], color[1], color[2]]).collect();
+                Adjustment::PaletteMap { colors, reverse: checked(0), smooth: checked(1) }
+            }
             Posterize => Adjustment::Posterize { levels: values[0].round() as u32 },
+            ReplaceColor => {
+                Adjustment::ReplaceColor { from: rgb(0), to: rgb(1), tolerance: value(2), keep_shading: checked(3) }
+            }
             Sepia => Adjustment::Sepia,
             TemperatureTint => Adjustment::TemperatureTint { temperature: value(0), tint: value(1) },
             Threshold => Adjustment::Threshold { low: value(0), high: value(1) },

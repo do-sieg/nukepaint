@@ -1552,7 +1552,7 @@ impl App {
         if let FilterKind::Adjustment(kind) = kind
             && !kind.has_dialog()
         {
-            if document.adjust(&kind.adjustment(&[], &self.last_adjustments.curves)) {
+            if document.adjust(&kind.adjustment(&[], &self.last_adjustments.curves, &document.palette)) {
                 document.commit(kind.name(), None);
                 image.refresh(ctx);
             }
@@ -1592,7 +1592,8 @@ impl App {
         let pixels = &layers[layer].pixels;
         let changed = match kind {
             FilterKind::Adjustment(adjustment) => {
-                Some(adjust(pixels, &adjustment.adjustment(&values, &self.last_adjustments.curves), mask.as_ref()))
+                let adjustment = adjustment.adjustment(&values, &self.last_adjustments.curves, &image.document.palette);
+                Some(adjust(pixels, &adjustment, mask.as_ref()))
             }
             FilterKind::Effect(effect) if effect.makes_layers() => None,
             FilterKind::Effect(effect) => {
@@ -1663,7 +1664,8 @@ impl App {
         let pixels = &layers[dialog.layer].pixels;
         match dialog.kind {
             FilterKind::Adjustment(kind) => {
-                let preview = adjust(pixels, &kind.adjustment(&dialog.values, &dialog.curves), dialog.mask.as_ref());
+                let adjustment = kind.adjustment(&dialog.values, &dialog.curves, &image.document.palette);
+                let preview = adjust(pixels, &adjustment, dialog.mask.as_ref());
                 image.texture.show_layer_as(layers, dialog.layer, &preview, None);
                 dialog.preview = Some(preview);
             }

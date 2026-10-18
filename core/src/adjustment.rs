@@ -57,6 +57,8 @@ pub enum Adjustment {
     Equalize { lightness: bool },
     /// In stops: each doubles or halves the light.
     Exposure { exposure: f32 },
+    /// Gives each pixel the colour as far along from `dark` to `light` as it is light.
+    GradientMap { dark: [u8; 3], light: [u8; 3] },
     /// Each from -100, darker, to 100, lighter.
     HighlightsShadows { shadows: f32, highlights: f32 },
     /// The hue in degrees around the colour wheel, the saturation in percent, 0 for grey
@@ -71,8 +73,18 @@ pub enum Adjustment {
     /// `input`, black and white, from 0 to 255, to `output`, bending them by `gamma`
     /// on the way: above 1 lightens the midtones.
     Levels { channels: [bool; 3], input: [f32; 2], gamma: f32, output: [f32; 2] },
+    /// Gives each pixel the colour as far along `colors` as it is light, the first for
+    /// black and the last for white, or the other way round if `reverse`. If `smooth`,
+    /// the colours are blended between, as a gradient through them; if not, each takes
+    /// an even share of the levels. With no colours, nothing changes.
+    PaletteMap { colors: Vec<[u8; 3]>, reverse: bool, smooth: bool },
     /// Leaves each of red, green and blue `levels` levels, from 2 to 256.
     Posterize { levels: u32 },
+    /// Makes `to` each pixel whose colour is no further from `from` than `tolerance`
+    /// percent in any channel, the most a channel can be away being 100. If
+    /// `keep_shading`, each is moved by as much as `from` is to `to` instead, which
+    /// keeps how it differs from `from`.
+    ReplaceColor { from: [u8; 3], to: [u8; 3], tolerance: f32, keep_shading: bool },
     Sepia,
     /// Each from -100 to 100: from blue to yellow, and from green to magenta. How light
     /// each pixel looks stays about the same.
@@ -536,6 +548,13 @@ impl Mapping {
                 let scale = exposure.exp2();
                 Self::each_channel(|c| to_srgb(to_linear(c) * scale))
             }
+            Adjustment::GradientMap { dark, light } => {
+                let [dark, light] = [dark, light].map(|color| color.map(|channel| channel as f32 / 255.0));
+                Self::Colors(Box::new(move |c| {
+                    let l = luma(c);
+                    std::array::from_fn(|channel| dark[channel] + (light[channel] - dark[channel]) * l)
+                }))
+            }
             Adjustment::HighlightsShadows { shadows, highlights } => {
                 let (shadows, highlights) = (shadows / 100.0, highlights / 100.0);
                 // The shadows are moved most around a third of the way up from black, the
@@ -590,9 +609,42 @@ impl Mapping {
                 });
                 Self::Channels(Box::new(channels.map(|chosen| if chosen { leveled } else { same })))
             }
+            Adjustment::PaletteMap { ref colors, .. } if colors.is_empty() => Self::each_channel(|c| c),
+            Adjustment::PaletteMap { ref colors, reverse, smooth } => {
+                let mut colors: Vec<[f32; 3]> = colors.iter().map(|color| color.map(|channel| channel as f32 / 255.0)).collect();
+                if reverse {
+                    colors.reverse();
+                }
+                let last = colors.len() - 1;
+                Self::Colors(Box::new(move |c| {
+                    let l = luma(c).clamp(0.0, 1.0);
+                    if !smooth {
+                        return colors[((l * colors.len() as f32) as usize).min(last)];
+                    }
+                    let place = l * last as f32;
+                    let below = (place.floor() as usize).min(last);
+                    let above = (below + 1).min(last);
+                    let along = place - below as f32;
+                    std::array::from_fn(|channel| colors[below][channel] + (colors[above][channel] - colors[below][channel]) * along)
+                }))
+            }
             Adjustment::Posterize { levels } => {
                 let steps = (levels.clamp(2, 256) - 1) as f32;
                 Self::each_channel(move |c| (c * steps).round() / steps)
+            }
+            Adjustment::ReplaceColor { from, to, tolerance, keep_shading } => {
+                let reach = tolerance / 100.0;
+                let [from, to] = [from, to].map(|color| color.map(|channel| channel as f32 / 255.0));
+                Self::Colors(Box::new(move |c| {
+                    // A hair over, for colours exactly as far as the tolerance.
+                    if (0..3).any(|channel| (c[channel] - from[channel]).abs() > reach + 1e-4) {
+                        c
+                    } else if keep_shading {
+                        std::array::from_fn(|channel| c[channel] + to[channel] - from[channel])
+                    } else {
+                        to
+                    }
+                }))
             }
             Adjustment::Sepia => Self::Colors(Box::new(|c| SEPIA.map(|weights| dot(c, weights)))),
             Adjustment::TemperatureTint { temperature, tint } => {
@@ -824,6 +876,8 @@ mod tests {
             Adjustment::ColorToAlpha { color: [255; 3], transparency: 0.0, opacity: 0.0 },
             Adjustment::Dither { levels: 256, method: DitherMethod::FloydSteinberg },
             Adjustment::Dither { levels: 256, method: DitherMethod::Ordered },
+            Adjustment::PaletteMap { colors: Vec::new(), reverse: false, smooth: false },
+            Adjustment::ReplaceColor { from: [1, 2, 3], to: [200, 0, 0], tolerance: 0.0, keep_shading: false },
         ];
         for adjustment in unchanged {
             assert_eq!(adjust(&pixels, &adjustment, None), pixels, "{adjustment:?}");
@@ -1032,6 +1086,42 @@ mod tests {
         assert!(levels.windows(2).all(|pair| pair[0] <= pair[1] + 1e-6), "never goes back down");
         let straight = sample_curve(&Curves::STRAIGHT);
         assert!(straight.iter().enumerate().all(|(level, &y)| (y - level as f32 / 255.0).abs() < 1e-5));
+    }
+
+    #[test]
+    fn replace_color_swaps_the_colours_near_enough() {
+        let exact = Adjustment::ReplaceColor { from: [255, 0, 0], to: [0, 0, 255], tolerance: 0.0, keep_shading: false };
+        assert_eq!(one([255, 0, 0, 80], &exact), [0, 0, 255, 80], "the alpha is kept");
+        assert_eq!(one([254, 0, 0, 255], &exact), [254, 0, 0, 255]);
+        let near = Adjustment::ReplaceColor { from: [255, 0, 0], to: [0, 0, 255], tolerance: 10.0, keep_shading: false };
+        assert_eq!(one([230, 20, 0, 255], &near), [0, 0, 255, 255]);
+        assert_eq!(one([220, 0, 0, 255], &near), [220, 0, 0, 255]);
+        let shaded = Adjustment::ReplaceColor { from: [200, 0, 0], to: [0, 0, 200], tolerance: 10.0, keep_shading: true };
+        assert_eq!(one([180, 10, 0, 255], &shaded), [0, 10, 200, 255]);
+    }
+
+    #[test]
+    fn gradient_map_follows_how_light_each_pixel_is() {
+        let map = Adjustment::GradientMap { dark: [0, 0, 128], light: [255, 255, 0] };
+        assert_eq!(one([0, 0, 0, 7], &map), [0, 0, 128, 7]);
+        assert_eq!(one([255, 255, 255, 255], &map), [255, 255, 0, 255]);
+        assert_eq!(one([128, 128, 128, 255], &map), [128, 128, 64, 255]);
+        let grey = Adjustment::GradientMap { dark: [0; 3], light: [255; 3] };
+        assert_eq!(one([255, 0, 0, 255], &grey), [76, 76, 76, 255]);
+    }
+
+    #[test]
+    fn palette_map_picks_the_colours_in_order() {
+        let colors = vec![[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        let map = |reverse, smooth| Adjustment::PaletteMap { colors: colors.clone(), reverse, smooth };
+        assert_eq!(one([0, 0, 0, 255], &map(false, false)), [255, 0, 0, 255]);
+        assert_eq!(one([128, 128, 128, 255], &map(false, false)), [0, 255, 0, 255]);
+        assert_eq!(one([255, 255, 255, 9], &map(false, false)), [0, 0, 255, 9]);
+        assert_eq!(one([0, 0, 0, 255], &map(true, false)), [0, 0, 255, 255]);
+        assert_eq!(one([64, 64, 64, 255], &map(false, true)), [127, 128, 0, 255], "halfway from red to green");
+        assert_eq!(one([255, 255, 255, 255], &map(false, true)), [0, 0, 255, 255]);
+        let single = Adjustment::PaletteMap { colors: vec![[9, 8, 7]], reverse: false, smooth: true };
+        assert_eq!(one([100, 50, 0, 255], &single), [9, 8, 7, 255]);
     }
 
     #[test]

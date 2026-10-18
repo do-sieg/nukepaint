@@ -60,6 +60,7 @@ and wgpu.
   - Auto-Level, Equalize and White Balance.
   - Brightness / Contrast, Exposure, Highlights / Shadows, Levels and Curves, with a curve editor.
   - Hue / Saturation, Color Balance, Temperature / Tint and Colorize.
+  - Replace Color, Gradient Map and Palette Map (maps the image's lightness onto the document palette).
   - Black and White, Sepia and Threshold.
   - Posterize and Dither.
   - Invert Colors, Invert Alpha and Invert.
