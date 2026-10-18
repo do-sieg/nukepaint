@@ -86,7 +86,7 @@ const SELECT_ALL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, K
 const DESELECT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
 /// How many pixels the arrow keys nudge the selection's box by with Shift held.
 const NUDGE_SHIFT_STEP: i32 = 10;
-const INVERT_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
+const INVERT_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::I);
 const ZOOM_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
 /// Plus is a shifted key on most keyboards, so the key it shares counts as well.
 const ZOOM_IN_EQUALS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
@@ -2172,6 +2172,11 @@ impl App {
                 };
                 self.edit(ctx, command);
             }
+            // Before the adjustments, as Invert Colors takes I with Ctrl, which Invert
+            // Selection takes with Shift as well.
+            if ctx.input_mut(|input| input.consume_shortcut(&INVERT_SELECTION)) {
+                self.edit(ctx, EditCommand::InvertSelection);
+            }
             // Before the layer commands, as Merge Layer Down takes M with Ctrl, which Curves takes with Shift as well.
             for kind in AdjustmentKind::MENU {
                 if let Some(shortcut) = kind.shortcut()
@@ -2213,7 +2218,6 @@ impl App {
                 (ERASE_SELECTION, EditCommand::EraseSelection),
                 (SELECT_ALL, EditCommand::SelectAll),
                 (DESELECT, EditCommand::Deselect),
-                (INVERT_SELECTION, EditCommand::InvertSelection),
             ];
             for (shortcut, command) in edit_shortcuts {
                 if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {

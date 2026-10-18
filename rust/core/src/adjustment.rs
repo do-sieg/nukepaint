@@ -1,5 +1,6 @@
 //! The adjustments of the Colors menu, which change the colours of each pixel on
-//! its own: no pixel looks at any other, and how opaque each is stays as it was. Those that change each
+//! its own: no pixel looks at any other, and how opaque each is stays as it was, but
+//! for an inversion that turns it upside down as well. Those that change each
 //! channel on its own go through a table of what each byte becomes. Large images are
 //! cut into bands of rows, adjusted at the same time on as many threads as there are
 //! cores.
@@ -35,7 +36,29 @@ pub enum Adjustment {
     /// The hue in degrees around the colour wheel, the saturation in percent, 0 for grey
     /// and 100 for no change, and the lightness from -100, black, to 100, white.
     HueSaturation { hue: f32, saturation: f32, lightness: f32 },
+    /// Turns red, green and blue upside down, each that `channels` says, as `mode` says,
+    /// and how opaque each pixel is if `alpha`.
+    Invert { mode: InvertMode, channels: [bool; 3], alpha: bool },
     Sepia,
+}
+
+impl Adjustment {
+    /// Inverts the colours and keeps how opaque they are.
+    pub const INVERT_COLORS: Self = Self::Invert { mode: InvertMode::Normal, channels: [true; 3], alpha: false };
+    /// Inverts how opaque each pixel is and keeps its colour.
+    pub const INVERT_ALPHA: Self = Self::Invert { mode: InvertMode::Normal, channels: [false; 3], alpha: true };
+}
+
+/// How an inversion turns the colours upside down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvertMode {
+    /// Each channel's byte, from 255 down.
+    Normal,
+    /// Each channel's light, in linear light, which keeps darks dark and lights light longer.
+    Linear,
+    /// Only how bright each colour is, its value, which keeps its hue and how strong it is.
+    /// Each of red, green and blue is left to it.
+    Value,
 }
 
 /// Curves that map each level of a channel to the level it becomes: one for how light
@@ -70,10 +93,14 @@ pub fn adjust(pixels: &RgbaImage, adjustment: &Adjustment, mask: Option<&Selecti
     let row_pixels = pixels.width() as usize;
     let rows = pixels.height() as usize;
     let selected = mask.map(SelectionMask::flags);
+    let invert_alpha = matches!(adjustment, Adjustment::Invert { alpha: true, .. });
     let adjust_rows = |pixels: &mut [u8], selected: Option<&[bool]>| {
         for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             if selected.is_none_or(|selected| selected[index]) {
                 mapping.apply(pixel);
+                if invert_alpha {
+                    pixel[3] = 255 - pixel[3];
+                }
             }
         }
     };
@@ -208,6 +235,21 @@ impl Mapping {
                     c.map(|channel| lighten(channel, lightness))
                 }))
             }
+            Adjustment::Invert { mode: InvertMode::Value, .. } => {
+                Self::Colors(Box::new(|c| {
+                    let [h, s, v] = rgb_to_hsv(c);
+                    hsv_to_rgb([h, s, 1.0 - v])
+                }))
+            }
+            Adjustment::Invert { mode, channels, .. } => {
+                let invert: fn(f32) -> f32 = match mode {
+                    InvertMode::Linear => |c| to_srgb(1.0 - to_linear(c)),
+                    _ => |c| 1.0 - c,
+                };
+                let same: [u8; 256] = std::array::from_fn(|byte| byte as u8);
+                let inverted: [u8; 256] = std::array::from_fn(|byte| to_byte(invert(byte as f32 / 255.0)));
+                Self::Channels(Box::new(channels.map(|chosen| if chosen { inverted } else { same })))
+            }
             Adjustment::Sepia => Self::Colors(Box::new(|c| SEPIA.map(|weights| dot(c, weights)))),
         }
     }
@@ -315,6 +357,8 @@ mod tests {
             Adjustment::Exposure { exposure: 0.0 },
             Adjustment::HighlightsShadows { shadows: 0.0, highlights: 0.0 },
             Adjustment::HueSaturation { hue: 0.0, saturation: 100.0, lightness: 0.0 },
+            Adjustment::Invert { mode: InvertMode::Normal, channels: [false; 3], alpha: false },
+            Adjustment::Invert { mode: InvertMode::Linear, channels: [false; 3], alpha: false },
         ];
         for adjustment in unchanged {
             assert_eq!(adjust(&pixels, &adjustment, None), pixels, "{adjustment:?}");
@@ -342,6 +386,20 @@ mod tests {
         let [r, ..] = one([64, 64, 64, 255], &lifted);
         assert!(r > 64);
         assert_eq!(one([0, 0, 0, 255], &lifted), [0, 0, 0, 255], "black stays black");
+    }
+
+    #[test]
+    fn inverts_the_chosen_channels() {
+        assert_eq!(one([0, 100, 255, 30], &Adjustment::INVERT_COLORS), [255, 155, 0, 30]);
+        assert_eq!(one([0, 100, 255, 30], &Adjustment::INVERT_ALPHA), [0, 100, 255, 225]);
+        let red_and_alpha = Adjustment::Invert { mode: InvertMode::Normal, channels: [true, false, false], alpha: true };
+        assert_eq!(one([10, 100, 200, 255], &red_and_alpha), [245, 100, 200, 0]);
+        let linear = Adjustment::Invert { mode: InvertMode::Linear, channels: [true; 3], alpha: false };
+        assert_eq!(one([0, 255, 188, 255], &linear), [255, 0, 187, 255], "half the light stays about half");
+        let value = Adjustment::Invert { mode: InvertMode::Value, channels: [false; 3], alpha: false };
+        assert_eq!(one([255, 0, 0, 200], &value), [0, 0, 0, 200]);
+        assert_eq!(one([0, 0, 0, 255], &value), [255, 255, 255, 255]);
+        assert_eq!(one([64, 32, 0, 255], &value), [191, 96, 0, 255], "the hue and saturation are kept");
     }
 
     #[test]

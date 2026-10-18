@@ -31,7 +31,7 @@ pub const SECONDARY: f64 = -2.0;
 /// A number a dialog asks for, as `input` says, on a slider from `min` to `max`,
 /// going up and down by `step`, logarithmic or not, with `suffix` shown after it,
 /// which can be changed only while the setting at `enabled_by`, if any, is
-/// `enabled_value`, or for none, is a checked box.
+/// `enabled_value`, or is not `disabled_value`, or for neither, is a checked box.
 pub struct Setting {
     pub label: &'static str,
     pub min: f64,
@@ -42,12 +42,13 @@ pub struct Setting {
     pub input: Input,
     pub enabled_by: Option<usize>,
     pub enabled_value: Option<f64>,
+    pub disabled_value: Option<f64>,
     pub logarithmic: bool,
 }
 
 impl Setting {
     const fn new(label: &'static str, min: f64, max: f64, default: f64, input: Input) -> Self {
-        Self { label, min, max, step: 1.0, default, suffix: "", input, enabled_by: None, enabled_value: None, logarithmic: false }
+        Self { label, min, max, step: 1.0, default, suffix: "", input, enabled_by: None, enabled_value: None, disabled_value: None, logarithmic: false }
     }
 
     /// The same, which can be changed only while the box to check at `index` is checked.
@@ -58,6 +59,11 @@ impl Setting {
     /// The same, which can be changed only while the setting at `index` is `value`.
     pub const fn enabled_when(self, index: usize, value: f64) -> Self {
         Self { enabled_by: Some(index), enabled_value: Some(value), ..self }
+    }
+
+    /// The same, which can be changed only while the setting at `index` is not `value`.
+    pub const fn enabled_unless(self, index: usize, value: f64) -> Self {
+        Self { enabled_by: Some(index), disabled_value: Some(value), ..self }
     }
 
     /// The same on a logarithmic slider.
@@ -332,9 +338,13 @@ impl Dialog {
         let enabled: Vec<bool> = settings
             .iter()
             .map(|setting| {
-                setting.enabled_by.is_none_or(|index| match setting.enabled_value {
-                    Some(value) => self.values[index] == value,
-                    None => self.values[index] != 0.0,
+                setting.enabled_by.is_none_or(|index| {
+                    let value = self.values[index];
+                    match (setting.enabled_value, setting.disabled_value) {
+                        (Some(enabling), _) => value == enabling,
+                        (None, Some(disabling)) => value != disabling,
+                        (None, None) => value != 0.0,
+                    }
                 })
             })
             .collect();

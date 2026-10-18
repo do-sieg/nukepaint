@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
-use power_paint_core::Adjustment;
+use power_paint_core::{Adjustment, InvertMode};
 
-use crate::adjustment_dialog::{FilterKind, Setting, slider};
+use crate::adjustment_dialog::{FilterKind, Setting, check, choice, slider};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdjustmentKind {
@@ -16,6 +16,9 @@ pub enum AdjustmentKind {
     Exposure,
     HighlightsShadows,
     HueSaturation,
+    Invert,
+    InvertAlpha,
+    InvertColors,
     Sepia,
 }
 
@@ -35,10 +38,30 @@ const HUE_SATURATION: [Setting; 3] = [
     slider("Saturation:", 0.0, 200.0, 1.0, 100.0, " %"),
     slider("Lightness:", -100.0, 100.0, 1.0, 0.0, ""),
 ];
+const INVERT_MODES: [&str; 3] = ["Normal", "Linear", "Value"];
+/// Value mode leaves red, green and blue to it.
+const INVERT: [Setting; 5] = [
+    choice("Mode:", &INVERT_MODES, 0),
+    check("Red", true).enabled_unless(0, 2.0),
+    check("Green", true).enabled_unless(0, 2.0),
+    check("Blue", true).enabled_unless(0, 2.0),
+    check("Alpha", false),
+];
 
 impl AdjustmentKind {
     /// The Colors menu.
-    pub const MENU: [Self; 7] = [BlackAndWhite, BrightnessContrast, Curves, Exposure, HighlightsShadows, HueSaturation, Sepia];
+    pub const MENU: [Self; 10] = [
+        BlackAndWhite,
+        BrightnessContrast,
+        Curves,
+        Exposure,
+        HighlightsShadows,
+        HueSaturation,
+        InvertColors,
+        InvertAlpha,
+        Invert,
+        Sepia,
+    ];
 
     /// Its name, which its undo step is called as well.
     pub fn name(self) -> &'static str {
@@ -49,6 +72,9 @@ impl AdjustmentKind {
             Exposure => "Exposure",
             HighlightsShadows => "Highlights / Shadows",
             HueSaturation => "Hue / Saturation",
+            Invert => "Invert",
+            InvertAlpha => "Invert Alpha",
+            InvertColors => "Invert Colors",
             Sepia => "Sepia",
         }
     }
@@ -59,6 +85,9 @@ impl AdjustmentKind {
     }
 
     pub fn shortcut(self) -> Option<KeyboardShortcut> {
+        if self == InvertColors {
+            return Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::I));
+        }
         let key = match self {
             BlackAndWhite => Key::G,
             Curves => Key::M,
@@ -76,7 +105,8 @@ impl AdjustmentKind {
             Exposure => &EXPOSURE,
             HighlightsShadows => &HIGHLIGHTS_SHADOWS,
             HueSaturation => &HUE_SATURATION,
-            BlackAndWhite | Curves | Sepia => &[],
+            Invert => &INVERT,
+            BlackAndWhite | Curves | InvertAlpha | InvertColors | Sepia => &[],
         }
     }
 
@@ -95,6 +125,13 @@ impl AdjustmentKind {
             Exposure => Adjustment::Exposure { exposure: value(0) },
             HighlightsShadows => Adjustment::HighlightsShadows { shadows: value(0), highlights: value(1) },
             HueSaturation => Adjustment::HueSaturation { hue: value(0), saturation: value(1), lightness: value(2) },
+            Invert => {
+                let mode = [InvertMode::Normal, InvertMode::Linear, InvertMode::Value][values[0] as usize];
+                let checked = |index: usize| values[index] != 0.0;
+                Adjustment::Invert { mode, channels: [checked(1), checked(2), checked(3)], alpha: checked(4) }
+            }
+            InvertAlpha => Adjustment::INVERT_ALPHA,
+            InvertColors => Adjustment::INVERT_COLORS,
             Sepia => Adjustment::Sepia,
         }
     }
