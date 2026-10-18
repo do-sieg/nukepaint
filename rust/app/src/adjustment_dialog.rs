@@ -31,7 +31,8 @@ pub const SECONDARY: f64 = -2.0;
 /// A number a dialog asks for, as `input` says, on a slider from `min` to `max`,
 /// going up and down by `step`, logarithmic or not, with `suffix` shown after it,
 /// which can be changed only while the setting at `enabled_by`, if any, is
-/// `enabled_value`, or is not `disabled_value`, or for neither, is a checked box.
+/// `enabled_value`, or is not `disabled_value`, or for neither, is a checked box, and
+/// is shown only while the setting at `shown_by`, if any, is the value beside it.
 pub struct Setting {
     pub label: &'static str,
     pub min: f64,
@@ -43,12 +44,13 @@ pub struct Setting {
     pub enabled_by: Option<usize>,
     pub enabled_value: Option<f64>,
     pub disabled_value: Option<f64>,
+    pub shown_by: Option<(usize, f64)>,
     pub logarithmic: bool,
 }
 
 impl Setting {
     const fn new(label: &'static str, min: f64, max: f64, default: f64, input: Input) -> Self {
-        Self { label, min, max, step: 1.0, default, suffix: "", input, enabled_by: None, enabled_value: None, disabled_value: None, logarithmic: false }
+        Self { label, min, max, step: 1.0, default, suffix: "", input, enabled_by: None, enabled_value: None, disabled_value: None, shown_by: None, logarithmic: false }
     }
 
     /// The same, which can be changed only while the box to check at `index` is checked.
@@ -64,6 +66,11 @@ impl Setting {
     /// The same, which can be changed only while the setting at `index` is not `value`.
     pub const fn enabled_unless(self, index: usize, value: f64) -> Self {
         Self { enabled_by: Some(index), disabled_value: Some(value), ..self }
+    }
+
+    /// The same, which is shown only while the setting at `index` is `value`.
+    pub const fn shown_when(self, index: usize, value: f64) -> Self {
+        Self { shown_by: Some((index, value)), ..self }
     }
 
     /// The same on a logarithmic slider.
@@ -348,8 +355,13 @@ impl Dialog {
                 })
             })
             .collect();
+        let shown: Vec<bool> =
+            settings.iter().map(|setting| setting.shown_by.is_none_or(|(index, showing)| self.values[index] == showing)).collect();
         egui::Grid::new("adjustment_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-            for ((setting, value), enabled) in settings.iter().zip(&mut self.values).zip(enabled) {
+            for (((setting, value), enabled), shown) in settings.iter().zip(&mut self.values).zip(enabled).zip(shown) {
+                if !shown {
+                    continue;
+                }
                 // A box to check shows its label beside it instead.
                 let label = if setting.input == Input::Check { "" } else { setting.label };
                 ui.add_enabled_ui(enabled, |ui| ui.label(label));

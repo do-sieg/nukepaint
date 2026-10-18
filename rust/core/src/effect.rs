@@ -15,6 +15,8 @@ mod photo;
 mod render;
 mod stylize;
 
+pub(crate) use artistic::noise;
+
 use std::{
     f32::consts::TAU,
     num::NonZero,
