@@ -4,12 +4,13 @@
 use std::collections::HashMap;
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
-use power_paint_core::{Adjustment, DitherMethod, InvertMode};
+use power_paint_core::{Adjustment, AutoLevelMode, DesaturateMode, DitherMethod, InvertMode};
 
 use crate::adjustment_dialog::{FilterKind, Setting, check, choice, color, pack_color, slider, unpack_color};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdjustmentKind {
+    AutoLevel,
     BlackAndWhite,
     BrightnessContrast,
     ColorBalance,
@@ -17,6 +18,7 @@ pub enum AdjustmentKind {
     Colorize,
     Curves,
     Dither,
+    Equalize,
     Exposure,
     HighlightsShadows,
     HueSaturation,
@@ -28,10 +30,16 @@ pub enum AdjustmentKind {
     Sepia,
     TemperatureTint,
     Threshold,
+    WhiteBalance,
 }
 
 use AdjustmentKind::*;
 
+const AUTO_LEVEL_MODES: [&str; 3] = ["Each channel", "Keep colors", "HSV"];
+const AUTO_LEVEL: [Setting; 2] =
+    [choice("Mode:", &AUTO_LEVEL_MODES, 0), slider("Clip:", 0.0, 10.0, 0.1, 0.0, " %")];
+const BLACK_AND_WHITE_MODES: [&str; 5] = ["Luminance", "Luma", "Lightness", "Average", "Value"];
+const BLACK_AND_WHITE: [Setting; 1] = [choice("Mode:", &BLACK_AND_WHITE_MODES, 1)];
 const BRIGHTNESS_CONTRAST: [Setting; 2] = [
     slider("Brightness:", -100.0, 100.0, 1.0, 0.0, ""),
     slider("Contrast:", -100.0, 100.0, 1.0, 0.0, ""),
@@ -64,6 +72,8 @@ const COLORIZE: [Setting; 3] = [
 const DITHER_METHODS: [&str; 4] = ["Floyd–Steinberg", "Atkinson", "Ordered", "Random"];
 const DITHER: [Setting; 2] =
     [slider("Levels:", 2.0, 256.0, 1.0, 4.0, "").logarithmic(), choice("Method:", &DITHER_METHODS, 0)];
+const EQUALIZE_MODES: [&str; 2] = ["Each channel", "Lightness"];
+const EQUALIZE: [Setting; 1] = [choice("Mode:", &EQUALIZE_MODES, 0)];
 const EXPOSURE: [Setting; 1] = [slider("Exposure:", -5.0, 5.0, 0.01, 0.0, " EV")];
 const HIGHLIGHTS_SHADOWS: [Setting; 2] = [
     slider("Shadows:", -100.0, 100.0, 1.0, 0.0, ""),
@@ -101,11 +111,13 @@ const TEMPERATURE_TINT: [Setting; 2] = [
     slider("Tint:", -100.0, 100.0, 1.0, 0.0, ""),
 ];
 const THRESHOLD: [Setting; 2] = [slider("Low:", 0.0, 255.0, 1.0, 128.0, ""), slider("High:", 0.0, 255.0, 1.0, 255.0, "")];
+const WHITE_BALANCE: [Setting; 1] = [slider("Strength:", 0.0, 100.0, 1.0, 100.0, " %")];
 
 impl AdjustmentKind {
-    /// The Colors menu, in groups that separators keep apart: tone, colour, monochrome,
-    /// fewer levels, inversions and transparency.
-    pub const MENU: [&[Self]; 6] = [
+    /// The Colors menu, in groups that separators keep apart: automatic, tone, colour,
+    /// monochrome, fewer levels, inversions and transparency.
+    pub const MENU: [&[Self]; 7] = [
+        &[AutoLevel, Equalize, WhiteBalance],
         &[BrightnessContrast, Exposure, HighlightsShadows, Levels, Curves],
         &[HueSaturation, ColorBalance, TemperatureTint, Colorize],
         &[BlackAndWhite, Sepia, Threshold],
@@ -117,6 +129,7 @@ impl AdjustmentKind {
     /// Its name, which its undo step is called as well.
     pub fn name(self) -> &'static str {
         match self {
+            AutoLevel => "Auto-Level",
             BlackAndWhite => "Black and White",
             BrightnessContrast => "Brightness / Contrast",
             ColorBalance => "Color Balance",
@@ -124,6 +137,7 @@ impl AdjustmentKind {
             Colorize => "Colorize",
             Curves => "Curves",
             Dither => "Dither",
+            Equalize => "Equalize",
             Exposure => "Exposure",
             HighlightsShadows => "Highlights / Shadows",
             HueSaturation => "Hue / Saturation",
@@ -135,6 +149,7 @@ impl AdjustmentKind {
             Sepia => "Sepia",
             TemperatureTint => "Temperature and Tint",
             Threshold => "Threshold",
+            WhiteBalance => "White Balance",
         }
     }
 
@@ -161,11 +176,14 @@ impl AdjustmentKind {
     /// The numbers its dialog asks for. Curves has a dialog of its own.
     pub fn settings(self) -> &'static [Setting] {
         match self {
+            AutoLevel => &AUTO_LEVEL,
+            BlackAndWhite => &BLACK_AND_WHITE,
             BrightnessContrast => &BRIGHTNESS_CONTRAST,
             ColorBalance => &COLOR_BALANCE,
             ColorToAlpha => &COLOR_TO_ALPHA,
             Colorize => &COLORIZE,
             Dither => &DITHER,
+            Equalize => &EQUALIZE,
             Exposure => &EXPOSURE,
             HighlightsShadows => &HIGHLIGHTS_SHADOWS,
             HueSaturation => &HUE_SATURATION,
@@ -174,7 +192,8 @@ impl AdjustmentKind {
             Posterize => &POSTERIZE,
             TemperatureTint => &TEMPERATURE_TINT,
             Threshold => &THRESHOLD,
-            BlackAndWhite | Curves | InvertAlpha | InvertColors | Sepia => &[],
+            WhiteBalance => &WHITE_BALANCE,
+            Curves | InvertAlpha | InvertColors | Sepia => &[],
         }
     }
 
@@ -188,7 +207,20 @@ impl AdjustmentKind {
         let value = |index: usize| values[index] as f32;
         let checked = |index: usize| values[index] != 0.0;
         match self {
-            BlackAndWhite => Adjustment::BlackAndWhite,
+            AutoLevel => {
+                let mode = [AutoLevelMode::Channels, AutoLevelMode::Together, AutoLevelMode::Hsv][values[0] as usize];
+                Adjustment::AutoLevel { mode, clip: value(1) }
+            }
+            BlackAndWhite => {
+                let modes = [
+                    DesaturateMode::Luminance,
+                    DesaturateMode::Luma,
+                    DesaturateMode::Lightness,
+                    DesaturateMode::Average,
+                    DesaturateMode::Value,
+                ];
+                Adjustment::BlackAndWhite { mode: modes[values[0] as usize] }
+            }
             BrightnessContrast => Adjustment::BrightnessContrast { brightness: value(0), contrast: value(1) },
             ColorBalance => {
                 let range = |first: usize| [value(first), value(first + 1), value(first + 2)];
@@ -204,6 +236,7 @@ impl AdjustmentKind {
                 let methods = [DitherMethod::FloydSteinberg, DitherMethod::Atkinson, DitherMethod::Ordered, DitherMethod::Random];
                 Adjustment::Dither { levels: values[0].round() as u32, method: methods[values[1] as usize] }
             }
+            Equalize => Adjustment::Equalize { lightness: checked(0) },
             Exposure => Adjustment::Exposure { exposure: value(0) },
             HighlightsShadows => Adjustment::HighlightsShadows { shadows: value(0), highlights: value(1) },
             HueSaturation => {
@@ -225,6 +258,7 @@ impl AdjustmentKind {
             Sepia => Adjustment::Sepia,
             TemperatureTint => Adjustment::TemperatureTint { temperature: value(0), tint: value(1) },
             Threshold => Adjustment::Threshold { low: value(0), high: value(1) },
+            WhiteBalance => Adjustment::WhiteBalance { strength: value(0) },
         }
     }
 }

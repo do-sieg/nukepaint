@@ -26,7 +26,7 @@ mod stroke;
 mod turn;
 mod wrap;
 
-pub use adjustment::{Adjustment, Curves, DitherMethod, InvertMode, adjust, sample_curve};
+pub use adjustment::{Adjustment, AutoLevelMode, Curves, DesaturateMode, DitherMethod, InvertMode, adjust, sample_curve};
 pub use affine::{Affine, Projective};
 pub use blend::{blend_layer, composite, composite_area};
 pub use document::Document;

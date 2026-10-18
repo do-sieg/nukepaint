@@ -1,6 +1,7 @@
 //! The adjustments of the Colors menu, which change the colours of each pixel on
 //! its own: no pixel looks at any other, but for dithering, which spreads what each
-//! pixel's colour is off by to those after it, and how opaque each is stays as it was,
+//! pixel's colour is off by to those after it, and the automatic ones, which first
+//! measure the colours of all the pixels they change, and how opaque each is stays as it was,
 //! but for an inversion that turns it upside down as well and Color to Alpha. Those
 //! that change each channel on its own go through a table of what each byte becomes.
 //! Large images are cut into bands of rows, adjusted at the same time on as many
@@ -28,7 +29,11 @@ const SEPIA: [[f32; 3]; 3] = [[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.2
 /// An adjustment, with its settings.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Adjustment {
-    BlackAndWhite,
+    /// Stretches the levels from the darkest to the lightest the pixels have to black
+    /// and white, as `mode` says, leaving out `clip` percent of them at each end.
+    AutoLevel { mode: AutoLevelMode, clip: f32 },
+    /// Makes each pixel grey, as light as `mode` says it is.
+    BlackAndWhite { mode: DesaturateMode },
     /// Each from -100 to 100.
     BrightnessContrast { brightness: f32, contrast: f32 },
     /// How far the shadows, the midtones and the highlights each go towards red, green
@@ -46,6 +51,10 @@ pub enum Adjustment {
     /// Leaves each of red, green and blue `levels` levels, from 2 to 256, and makes up
     /// for those it loses as `method` says.
     Dither { levels: u32, method: DitherMethod },
+    /// Spreads the levels so that each is as common as any other: each of red, green
+    /// and blue on its own, or how light each pixel is, if `lightness`, which keeps
+    /// its hue and how strong it is.
+    Equalize { lightness: bool },
     /// In stops: each doubles or halves the light.
     Exposure { exposure: f32 },
     /// Each from -100, darker, to 100, lighter.
@@ -71,6 +80,9 @@ pub enum Adjustment {
     /// Makes white each pixel at least `low` and at most `high` light, from 0 to 255,
     /// and the others black.
     Threshold { low: f32, high: f32 },
+    /// Makes the pixels' average colour grey, in linear light, by `strength` percent,
+    /// keeping it as light: what a colour cast tints all of them is taken out.
+    WhiteBalance { strength: f32 },
 }
 
 impl Adjustment {
@@ -90,6 +102,35 @@ pub enum InvertMode {
     /// Only how bright each colour is, its value, which keeps its hue and how strong it is.
     /// Each of red, green and blue is left to it.
     Value,
+}
+
+/// How light black and white makes each colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesaturateMode {
+    /// As much light as it gives, weighing linear red, green and blue as the eye does,
+    /// which is the most faithful.
+    Luminance,
+    /// Weighing red, green and blue as they are as video does, which is quicker and
+    /// close to it.
+    Luma,
+    /// Halfway between its strongest and its weakest channel, as HSL has it.
+    Lightness,
+    /// The average of red, green and blue.
+    Average,
+    /// Its strongest channel, as HSV has it.
+    Value,
+}
+
+/// What automatic levels stretch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoLevelMode {
+    /// Each of red, green and blue on its own, which takes out a colour cast as well.
+    Channels,
+    /// Red, green and blue as one, which keeps the colours.
+    Together,
+    /// How strong and how bright each colour is, its saturation and its value, which
+    /// keeps its hue.
+    Hsv,
 }
 
 /// How dithering makes up for the levels it loses.
@@ -141,7 +182,12 @@ pub fn adjust(pixels: &RgbaImage, adjustment: &Adjustment, mask: Option<&Selecti
         dither(&mut adjusted, row_pixels, levels, method, selected);
         return adjusted;
     }
-    let mapping = Mapping::of(adjustment);
+    let mapping = match *adjustment {
+        Adjustment::AutoLevel { mode, clip } => auto_level(pixels, selected, mode, clip / 100.0),
+        Adjustment::Equalize { lightness } => equalize(pixels, selected, lightness),
+        Adjustment::WhiteBalance { strength } => white_balance(pixels, selected, strength / 100.0),
+        _ => Mapping::of(adjustment),
+    };
     let invert_alpha = matches!(adjustment, Adjustment::Invert { alpha: true, .. });
     let adjust_rows = |pixels: &mut [u8], selected: Option<&[bool]>| {
         for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -166,6 +212,120 @@ pub fn adjust(pixels: &RgbaImage, adjustment: &Adjustment, mask: Option<&Selecti
         }
     });
     adjusted
+}
+
+/// How many of the pixels have each level of each of the measures `measure` takes of
+/// their colour, from 0 to 1, but for those `selected` leaves out and those that are
+/// fully transparent, which show no colour.
+fn histograms<const N: usize>(pixels: &RgbaImage, selected: Option<&[bool]>, measure: impl Fn([f32; 3]) -> [f32; N]) -> [[u64; 256]; N] {
+    let mut counts = [[0; 256]; N];
+    for (index, pixel) in pixels.pixels().enumerate() {
+        if pixel[3] == 0 || selected.is_some_and(|selected| !selected[index]) {
+            continue;
+        }
+        let measures = measure([0, 1, 2].map(|channel| pixel[channel] as f32 / 255.0));
+        for (count, value) in counts.iter_mut().zip(measures) {
+            count[to_byte(value) as usize] += 1;
+        }
+    }
+    counts
+}
+
+/// The darkest and the lightest level of a histogram, from 0 to 1, past the `clip`
+/// share of what it counts at each end, or none if it counts nothing.
+fn level_range(counts: &[u64; 256], clip: f32) -> Option<(f32, f32)> {
+    let total: u64 = counts.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let skipped = (total as f64 * f64::from(clip.clamp(0.0, 0.5))) as u64;
+    let past = |mut levels: Box<dyn Iterator<Item = usize>>| {
+        let mut seen = 0;
+        levels.find(|&level| {
+            seen += counts[level];
+            seen > skipped
+        })
+    };
+    let low = past(Box::new(0..256))?;
+    let high = past(Box::new((0..256).rev()))?;
+    Some((low as f32 / 255.0, high as f32 / 255.0))
+}
+
+/// Stretches `value` from the range to 0 to 1. A range of one level is left as it is.
+fn stretch(value: f32, (low, high): (f32, f32)) -> f32 {
+    if high - low < 0.5 / 255.0 { value } else { ((value - low) / (high - low)).clamp(0.0, 1.0) }
+}
+
+fn auto_level(pixels: &RgbaImage, selected: Option<&[bool]>, mode: AutoLevelMode, clip: f32) -> Mapping {
+    match mode {
+        AutoLevelMode::Channels => {
+            let counts = histograms(pixels, selected, |c| c);
+            let ranges = counts.map(|counts| level_range(&counts, clip));
+            let tables = ranges.map(|range| {
+                std::array::from_fn(|byte| range.map_or(byte as u8, |range| to_byte(stretch(byte as f32 / 255.0, range))))
+            });
+            Mapping::Channels(Box::new(tables))
+        }
+        AutoLevelMode::Together => {
+            let [r, g, b] = histograms(pixels, selected, |c| c);
+            let counts = std::array::from_fn(|level| r[level] + g[level] + b[level]);
+            match level_range(&counts, clip) {
+                Some(range) => Mapping::each_channel(|c| stretch(c, range)),
+                None => Mapping::each_channel(|c| c),
+            }
+        }
+        AutoLevelMode::Hsv => {
+            let [_, saturation, value] = histograms(pixels, selected, rgb_to_hsv);
+            let saturation = level_range(&saturation, clip).unwrap_or((0.0, 1.0));
+            let value = level_range(&value, clip).unwrap_or((0.0, 1.0));
+            Mapping::Colors(Box::new(move |c| {
+                let [h, s, v] = rgb_to_hsv(c);
+                hsv_to_rgb([h, stretch(s, saturation), stretch(v, value)])
+            }))
+        }
+    }
+}
+
+/// What each level becomes for the levels counted to spread evenly from 0 to 1: how
+/// many are below it, out of all but those of the darkest, which becomes black.
+fn equalized(counts: &[u64; 256]) -> [f32; 256] {
+    let darkest = counts.iter().copied().find(|&count| count > 0).unwrap_or(0);
+    let total: u64 = counts.iter().sum();
+    let mut below = 0;
+    std::array::from_fn(|level| {
+        below += counts[level];
+        if total <= darkest { level as f32 / 255.0 } else { below.saturating_sub(darkest) as f32 / (total - darkest) as f32 }
+    })
+}
+
+fn equalize(pixels: &RgbaImage, selected: Option<&[bool]>, lightness: bool) -> Mapping {
+    if lightness {
+        let [counts] = histograms(pixels, selected, |c| [luma(c)]);
+        let light = equalized(&counts);
+        // As for the curve of how light pixels are, the colour is shifted as a whole.
+        Mapping::Colors(Box::new(move |c| {
+            let l = luma(c);
+            let shift = look_up(&light, l) - l;
+            c.map(|channel| channel + shift)
+        }))
+    } else {
+        let counts = histograms(pixels, selected, |c| c);
+        Mapping::Channels(Box::new(counts.map(|counts| equalized(&counts).map(to_byte))))
+    }
+}
+
+fn white_balance(pixels: &RgbaImage, selected: Option<&[bool]>, strength: f32) -> Mapping {
+    let counts = histograms(pixels, selected, |c| c);
+    // The average light of each channel.
+    let means = counts.map(|counts| {
+        let total: u64 = counts.iter().sum();
+        let light: f64 = counts.iter().enumerate().map(|(level, &count)| f64::from(to_linear(level as f32 / 255.0)) * count as f64).sum();
+        if total == 0 { 0.0 } else { (light / total as f64) as f32 }
+    });
+    let grey = dot(means, LINEAR_LUMINANCE);
+    let gains = means.map(|mean| if mean > 1e-6 && grey > 1e-6 { 1.0 + (grey / mean - 1.0) * strength } else { 1.0 });
+    let tables = gains.map(|gain| std::array::from_fn(|byte| to_byte(to_srgb(to_linear(byte as f32 / 255.0) * gain))));
+    Mapping::Channels(Box::new(tables))
 }
 
 /// Leaves each of red, green and blue of the pixels, `row_pixels` to a row, `levels`
@@ -309,7 +469,16 @@ enum Mapping {
 impl Mapping {
     fn of(adjustment: &Adjustment) -> Self {
         match *adjustment {
-            Adjustment::BlackAndWhite => Self::Colors(Box::new(|c| [luma(c); 3])),
+            Adjustment::BlackAndWhite { mode } => {
+                let grey: fn([f32; 3]) -> f32 = match mode {
+                    DesaturateMode::Luminance => |c| to_srgb(dot(c.map(to_linear), LINEAR_LUMINANCE)),
+                    DesaturateMode::Luma => luma,
+                    DesaturateMode::Lightness => |c| (c[0].max(c[1]).max(c[2]) + c[0].min(c[1]).min(c[2])) / 2.0,
+                    DesaturateMode::Average => |c| (c[0] + c[1] + c[2]) / 3.0,
+                    DesaturateMode::Value => |c| c[0].max(c[1]).max(c[2]),
+                };
+                Self::Colors(Box::new(move |c| [grey(c); 3]))
+            }
             Adjustment::BrightnessContrast { brightness, contrast } => {
                 // Brightness moves each channel towards black or white, by up to half the way.
                 let b = brightness / 200.0;
@@ -359,6 +528,9 @@ impl Mapping {
                 Self::Channels(Box::new(tables))
             }
             Adjustment::Dither { .. } => unreachable!("each pixel's dithering depends on those before it"),
+            Adjustment::AutoLevel { .. } | Adjustment::Equalize { .. } | Adjustment::WhiteBalance { .. } => {
+                unreachable!("they depend on the colours of all the pixels")
+            }
             Adjustment::Exposure { exposure } => {
                 // Light adds up linearly, so it is scaled before the colours are made sRGB again.
                 let scale = exposure.exp2();
@@ -660,7 +832,12 @@ mod tests {
 
     #[test]
     fn adjusts_the_colours_and_keeps_the_alpha() {
-        assert_eq!(one([255, 0, 0, 100], &Adjustment::BlackAndWhite), [76, 76, 76, 100]);
+        let grey = |mode| one([255, 0, 0, 100], &Adjustment::BlackAndWhite { mode });
+        assert_eq!(grey(DesaturateMode::Luma), [76, 76, 76, 100]);
+        assert_eq!(grey(DesaturateMode::Luminance), [127, 127, 127, 100]);
+        assert_eq!(grey(DesaturateMode::Lightness), [128, 128, 128, 100]);
+        assert_eq!(grey(DesaturateMode::Average), [85, 85, 85, 100]);
+        assert_eq!(grey(DesaturateMode::Value), [255, 255, 255, 100]);
         assert_eq!(one([255, 255, 255, 255], &Adjustment::Sepia), [255, 255, 239, 255]);
         let hue = Adjustment::HueSaturation { hue: 120.0, saturation: 100.0, lightness: 0.0, perceptual: false };
         assert_eq!(one([255, 0, 0, 255], &hue), [0, 255, 0, 255]);
@@ -784,6 +961,43 @@ mod tests {
     }
 
     #[test]
+    fn auto_level_stretches_to_black_and_white() {
+        let pixels = RgbaImage::from_fn(2, 1, |x, _| if x == 0 { Rgba([50, 60, 70, 255]) } else { Rgba([150, 200, 170, 255]) });
+        let channels = adjust(&pixels, &Adjustment::AutoLevel { mode: AutoLevelMode::Channels, clip: 0.0 }, None);
+        assert_eq!(channels.as_raw(), &[0, 0, 0, 255, 255, 255, 255, 255]);
+        let together = adjust(&pixels, &Adjustment::AutoLevel { mode: AutoLevelMode::Together, clip: 0.0 }, None);
+        assert_eq!(together.as_raw(), &[0, 17, 34, 255, 170, 255, 204, 255]);
+        let hsv = adjust(&pixels, &Adjustment::AutoLevel { mode: AutoLevelMode::Hsv, clip: 0.0 }, None);
+        let [_, _, value] = rgb_to_hsv([0, 1, 2].map(|channel| hsv[(0, 0)][channel] as f32 / 255.0));
+        assert_eq!(value, 0.0);
+        assert_eq!(hsv[(1, 0)][1], 255);
+        // Transparent pixels are not measured.
+        let mut hidden = pixels.clone();
+        hidden.put_pixel(1, 0, Rgba([255, 255, 255, 0]));
+        let one = adjust(&hidden, &Adjustment::AutoLevel { mode: AutoLevelMode::Channels, clip: 0.0 }, None);
+        assert_eq!(one[(0, 0)], pixels[(0, 0)], "a single colour is left as it is");
+    }
+
+    #[test]
+    fn equalize_spreads_the_levels() {
+        let pixels = RgbaImage::from_fn(4, 1, |x, _| Rgba([[10, 11, 12, 13][x as usize]; 4]));
+        let equalized = adjust(&pixels, &Adjustment::Equalize { lightness: false }, None);
+        assert_eq!(equalized.pixels().map(|pixel| pixel[0]).collect::<Vec<_>>(), [0, 85, 170, 255]);
+        let light = adjust(&pixels, &Adjustment::Equalize { lightness: true }, None);
+        assert_eq!(light[(3, 0)].0, [255, 255, 255, 13]);
+    }
+
+    #[test]
+    fn white_balance_makes_the_average_grey() {
+        let pixels = RgbaImage::from_pixel(2, 1, Rgba([200, 150, 100, 255]));
+        let balanced = adjust(&pixels, &Adjustment::WhiteBalance { strength: 100.0 }, None);
+        for pixel in balanced.pixels() {
+            assert!(pixel[0].abs_diff(pixel[1]) <= 1 && pixel[1].abs_diff(pixel[2]) <= 1, "{pixel:?}");
+        }
+        assert_eq!(adjust(&pixels, &Adjustment::WhiteBalance { strength: 0.0 }, None), pixels);
+    }
+
+    #[test]
     fn inverts_the_chosen_channels() {
         assert_eq!(one([0, 100, 255, 30], &Adjustment::INVERT_COLORS), [255, 155, 0, 30]);
         assert_eq!(one([0, 100, 255, 30], &Adjustment::INVERT_ALPHA), [0, 100, 255, 225]);
@@ -825,7 +1039,7 @@ mod tests {
         let pixels = RgbaImage::from_pixel(300, 300, Rgba([255, 0, 0, 255]));
         let selection = Selection::rect(PixelRect { left: 10, top: 250, right: 20, bottom: 260 });
         let mask = SelectionMask::of(&selection, 300, 300).unwrap();
-        let adjusted = adjust(&pixels, &Adjustment::BlackAndWhite, Some(&mask));
+        let adjusted = adjust(&pixels, &Adjustment::BlackAndWhite { mode: DesaturateMode::Luma }, Some(&mask));
         assert_eq!(adjusted[(15, 255)], Rgba([76, 76, 76, 255]));
         assert_eq!(adjusted[(5, 255)], Rgba([255, 0, 0, 255]));
         assert_eq!(adjusted[(15, 100)], Rgba([255, 0, 0, 255]));
