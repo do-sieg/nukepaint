@@ -1464,13 +1464,18 @@ impl App {
         ui.menu_button("Colors", |ui| {
             let last = self.last_adjustment.map(FilterKind::Adjustment);
             self.repeat_buttons(ui, &ctx, last, "Last Adjustment", [REPEAT_ADJUSTMENT, RESHOW_ADJUSTMENT]);
-            for kind in AdjustmentKind::MENU {
-                let mut button = egui::Button::new(kind.label());
-                if let Some(shortcut) = kind.shortcut() {
-                    button = button.shortcut_text(ctx.format_shortcut(&shortcut));
+            for (group, kinds) in AdjustmentKind::MENU.into_iter().enumerate() {
+                if group > 0 {
+                    ui.separator();
                 }
-                if ui.add_enabled(self.can_adjust(), button).clicked() {
-                    self.adjust(&ctx, FilterKind::Adjustment(kind));
+                for &kind in kinds {
+                    let mut button = egui::Button::new(kind.label());
+                    if let Some(shortcut) = kind.shortcut() {
+                        button = button.shortcut_text(ctx.format_shortcut(&shortcut));
+                    }
+                    if ui.add_enabled(self.can_adjust(), button).clicked() {
+                        self.adjust(&ctx, FilterKind::Adjustment(kind));
+                    }
                 }
             }
         });
@@ -2178,7 +2183,7 @@ impl App {
                 self.edit(ctx, EditCommand::InvertSelection);
             }
             // Before the layer commands, as Merge Layer Down takes M with Ctrl, which Curves takes with Shift as well.
-            for kind in AdjustmentKind::MENU {
+            for kind in AdjustmentKind::MENU.into_iter().flatten().copied() {
                 if let Some(shortcut) = kind.shortcut()
                     && ctx.input_mut(|input| input.consume_shortcut(&shortcut))
                 {

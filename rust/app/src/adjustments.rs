@@ -103,26 +103,15 @@ const TEMPERATURE_TINT: [Setting; 2] = [
 const THRESHOLD: [Setting; 2] = [slider("Low:", 0.0, 255.0, 1.0, 128.0, ""), slider("High:", 0.0, 255.0, 1.0, 255.0, "")];
 
 impl AdjustmentKind {
-    /// The Colors menu.
-    pub const MENU: [Self; 18] = [
-        BlackAndWhite,
-        BrightnessContrast,
-        ColorBalance,
-        ColorToAlpha,
-        Colorize,
-        Curves,
-        Dither,
-        Exposure,
-        HighlightsShadows,
-        HueSaturation,
-        InvertColors,
-        InvertAlpha,
-        Invert,
-        Levels,
-        Posterize,
-        Sepia,
-        TemperatureTint,
-        Threshold,
+    /// The Colors menu, in groups that separators keep apart: tone, colour, monochrome,
+    /// fewer levels, inversions and transparency.
+    pub const MENU: [&[Self]; 6] = [
+        &[BrightnessContrast, Exposure, HighlightsShadows, Levels, Curves],
+        &[HueSaturation, ColorBalance, TemperatureTint, Colorize],
+        &[BlackAndWhite, Sepia, Threshold],
+        &[Posterize, Dither],
+        &[InvertColors, InvertAlpha, Invert],
+        &[ColorToAlpha],
     ];
 
     /// Its name, which its undo step is called as well.
