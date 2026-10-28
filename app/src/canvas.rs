@@ -16,7 +16,7 @@
 //! of its box, or the one out from its bottom right corner, or rotate it from around
 //! the box. Shear and Perspective slant the selected pixels, or tilt them, from the
 //! handles on the edges or the corners of the selection's box. The shape tools draw their shape, which their handles then change until it
-//! is finished. The selection shows as a tinted area in a dashed outline, with a button by it: with the
+//! is finished. The selection shows as a dashed outline, tinted inside but for the tools that paint, with a button by it: with the
 //! selection tools and Move Selection, to go from one to the other, and with the other
 //! tools, to deselect. The grid shows over the image; while snapping to it, the
 //! selection tools put their corners on its cells' corners.
@@ -270,7 +270,16 @@ pub fn show(
     }
 
     let painter = ui.painter_at(viewport);
-    let tint = if tools.tool == Tool::MoveSelection { MOVE_SELECTION_TINT } else { SELECTION_TINT };
+    // A tool that changes the pixels leaves them untinted, for their colours to show as they are.
+    let paints = tools.tool.draws()
+        || tools.tool.shape().is_some()
+        || tools.tool.warp().is_some()
+        || matches!(tools.tool, Tool::PaintBucket | Tool::Gradient);
+    let tint = match tools.tool {
+        _ if paints => Color32::TRANSPARENT,
+        Tool::MoveSelection => MOVE_SELECTION_TINT,
+        _ => SELECTION_TINT,
+    };
     // Tiled, a selection on the tile shows on each copy too.
     let selection = &image.document.selection;
     let on_tile = image.view.tile().zip(selection.bounds()).is_some_and(|(tile, bounds)| {
@@ -1638,26 +1647,18 @@ fn box_dragged(image: &OpenImage) -> bool {
     image.transform.as_ref().is_some_and(Transform::is_dragging)
 }
 
-/// Shows what the drawing tool would cover with the pointer at `at`, in the colour it
-/// would leave, if it leaves one. A tip large enough on screen is outlined along its
+/// Shows what the drawing tool would cover with the pointer at `at`, as an outline that
+/// leaves the pixels under it in view. A tip large enough on screen is outlined along its
 /// edge. That would hide a smaller one, down to a single pixel, which is ringed from
 /// outside instead.
 fn paint_tip(painter: &Painter, view: &View, at: Pos2, tools: &Tools) {
     let retouching = tools.tool.retouch().is_some();
-    let fill = (tools.tool != Tool::Eraser && !retouching).then(|| {
-        let [red, green, blue, alpha] = tools.colors.primary.0;
-        Color32::from_rgba_unmultiplied(red, green, blue, alpha)
-    });
     let pixel = 1.0 / painter.pixels_per_point();
     let tip_side = tools.tip_size() as f32 * view.zoom;
     if tools.smooth() || tools.tool == Tool::Spray || retouching {
         // A smooth tip is round about the point itself, not about a pixel, and so are
-        // the areas the retouch tools go over, and the area the Spray covers, which is
-        // left empty: it only fills up little by little.
+        // the areas the retouch tools go over, and the area the Spray covers.
         let radius = tools.tip_size() as f32 / 2.0 * view.zoom * pixel;
-        if let Some(fill) = fill.filter(|_| tools.tool != Tool::Spray) {
-            painter.circle_filled(at, radius, fill);
-        }
         let ring = if tip_side >= OUTLINED_TIP { radius } else { radius + 1.5 * pixel };
         painter.circle_stroke(at, ring, Stroke::new(3.0 * pixel, Color32::WHITE));
         painter.circle_stroke(at, ring, Stroke::new(pixel, Color32::BLACK));
@@ -1666,11 +1667,6 @@ fn paint_tip(painter: &Painter, view: &View, at: Pos2, tools: &Tools) {
     let at = view.pixel_at(at);
     let rows: Vec<(i64, i64, i64)> = hard_tip(at, tools.tip_size()).collect();
     let screen = |x: i64, y: i64| view.to_screen(x as f32, y as f32);
-    if let Some(fill) = fill {
-        for &(y, from, to) in &rows {
-            painter.rect_filled(Rect::from_min_max(screen(from, y), screen(to, y + 1)), 0.0, fill);
-        }
-    }
     if tip_side >= OUTLINED_TIP {
         // The two ends of each row, and the parts of its top and bottom that the rows
         // above and below do not cover.
@@ -1798,10 +1794,12 @@ fn release_selecting(image: &mut OpenImage, tools: &mut Tools) {
 fn paint_selection(painter: &Painter, view: &View, selection: &Selection, tint: Color32, shift: Vec2) {
     // On a copy, the pixels in view are those of the tile.
     let within = if shift == Vec2::ZERO { view.visible_pixels() } else { view.tile().unwrap_or(view.visible_pixels()) };
-    for span in selection.spans(within) {
-        let min = view.to_screen(span.left as f32, span.top as f32) + shift;
-        let max = view.to_screen(span.right as f32, span.bottom as f32) + shift;
-        painter.rect_filled(Rect::from_min_max(min, max), 0.0, tint);
+    if tint != Color32::TRANSPARENT {
+        for span in selection.spans(within) {
+            let min = view.to_screen(span.left as f32, span.top as f32) + shift;
+            let max = view.to_screen(span.right as f32, span.bottom as f32) + shift;
+            painter.rect_filled(Rect::from_min_max(min, max), 0.0, tint);
+        }
     }
     for outline in selection.outlines() {
         let points: Vec<Pos2> = outline

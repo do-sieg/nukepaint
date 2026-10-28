@@ -175,13 +175,11 @@ impl AdjustmentKind {
     }
 
     pub fn shortcut(self) -> Option<KeyboardShortcut> {
-        if self == InvertColors {
-            return Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::I));
-        }
         let key = match self {
             BlackAndWhite => Key::G,
             Curves => Key::M,
             HueSaturation => Key::U,
+            InvertColors => Key::I,
             Levels => Key::L,
             Sepia => Key::E,
             _ => return None,

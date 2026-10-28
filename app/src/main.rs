@@ -88,7 +88,7 @@ const SELECT_ALL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, K
 const DESELECT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
 /// How many pixels the arrow keys nudge the selection's box by with Shift held.
 const NUDGE_SHIFT_STEP: i32 = 10;
-const INVERT_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::I);
+const INVERT_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
 const ZOOM_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
 /// Plus is a shifted key on most keyboards, so the key it shares counts as well.
 const ZOOM_IN_EQUALS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
@@ -1246,7 +1246,13 @@ impl App {
         if let Some(copied) = copied {
             self.clipboard.set(copied);
         }
-        if matches!(command, EditCommand::Cut | EditCommand::EraseSelection) && document.erase_selection() {
+        if !matches!(command, EditCommand::Cut | EditCommand::EraseSelection) {
+            return;
+        }
+        let erased = document.erase_selection();
+        // What was cut leaves nothing behind to select.
+        let deselected = command == EditCommand::Cut && document.deselect();
+        if erased || deselected {
             let (name, icon) = if command == EditCommand::Cut { ("Cut", icons::CUT) } else { ("Erase Selection", icons::ERASE) };
             document.commit(name, Some(icon.name()));
             // A transform would go on from the pixels as they were before.
@@ -2286,11 +2292,6 @@ impl App {
                 };
                 self.edit(ctx, command);
             }
-            // Before the adjustments, as Invert Colors takes I with Ctrl, which Invert
-            // Selection takes with Shift as well.
-            if ctx.input_mut(|input| input.consume_shortcut(&INVERT_SELECTION)) {
-                self.edit(ctx, EditCommand::InvertSelection);
-            }
             // Before the layer commands, as Merge Layer Down takes M with Ctrl, which Curves takes with Shift as well.
             for kind in AdjustmentKind::MENU.into_iter().flatten().copied() {
                 if let Some(shortcut) = kind.shortcut()
@@ -2298,6 +2299,11 @@ impl App {
                 {
                     self.adjust(ctx, FilterKind::Adjustment(kind));
                 }
+            }
+            // After the adjustments, as Invert Selection takes I with Ctrl, which Invert
+            // Colors takes with Shift as well.
+            if ctx.input_mut(|input| input.consume_shortcut(&INVERT_SELECTION)) {
+                self.edit(ctx, EditCommand::InvertSelection);
             }
             for commands in LayerCommand::MENU.into_iter().chain(LayerCommand::IMAGE_MENU) {
                 for &command in commands {
