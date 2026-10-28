@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=NukePaint
+GenericName=Image Editor
+Comment=Image editor with pixel and palette management
+Exec=nukepaint %F
+Icon=nukepaint
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=paint;draw;pixel;palette;image;editor;
+MimeType=image/png;image/jpeg;image/bmp;image/webp;image/x-tga;image/x-targa;image/svg+xml;image/openraster;
+StartupWMClass=nukepaint

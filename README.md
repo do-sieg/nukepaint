@@ -24,12 +24,17 @@ You need a recent stable [Rust](https://rustup.rs) toolchain (edition 2024).
 cargo run -p nukepaint --release
 ```
 
+On Linux, `packaging/linux/install.sh` builds NukePaint and installs it for the
+current user, with a menu entry and file associations so images open with it
+from the file manager. Run it again to update, or with `--uninstall` to remove it.
+
 ## Project layout
 
 - `core/`: the document model and pixel operations, with no UI.
 - `app/`: the application, built on eframe, egui and wgpu.
 - `icons/`: the toolbar and cursor icons, as SVG.
-- `icon.svg`: the app icon.
+- `icon.png`: the app icon, with smaller sizes in `packaging/linux/icons/`.
+- `packaging/`: the files to install the app on each system.
 
 During development, [bacon](https://dystroy.org/bacon/) can run from the root:
 `bacon` runs clippy as files change, and `bacon app` restarts the app on each change.

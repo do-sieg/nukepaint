@@ -111,10 +111,19 @@ const TOOL_FIELD_WIDTH: f32 = 64.0;
 /// Widest the list of recent files gets, in points.
 const WELCOME_WIDTH: f32 = 600.0;
 
+/// The window icon.
+fn app_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../packaging/linux/icons/256.png"))
+        .expect("the app icon is a valid PNG")
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_NAME)
+            // Matches the .desktop file, so the taskbar shows the app's icon.
+            .with_app_id("nukepaint")
+            .with_icon(app_icon())
             .with_inner_size([1280.0, 800.0])
             .with_drag_and_drop(true),
         ..Default::default()

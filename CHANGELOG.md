@@ -21,6 +21,7 @@ and wgpu.
 - Recent files, listed on the start screen and in File > Open Recent.
 - Image strip with thumbnails to switch between open images, reordered by dragging.
 - Images of any size, shown with tiled GPU textures.
+- Linux install script, with a menu entry, icon and file associations.
 
 #### Editing
 
